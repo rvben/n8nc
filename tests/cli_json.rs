@@ -887,6 +887,217 @@ async fn doctor_json_fails_for_sensitive_workflow_literals() {
     );
 }
 
+#[tokio::test]
+async fn workflow_new_json_creates_local_draft_file() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    let output = base_command(repo.path())
+        .arg("workflow")
+        .arg("new")
+        .arg("Order Alert")
+        .arg("--id")
+        .arg("wf-draft")
+        .output()
+        .expect("run workflow new");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "workflow");
+    assert_eq!(envelope["data"]["changed"], true);
+    let workflow_path = envelope["data"]["workflow_path"]
+        .as_str()
+        .expect("workflow path");
+    let workflow = read_json_file(Path::new(workflow_path));
+    assert_eq!(workflow["id"], "wf-draft");
+    assert_eq!(workflow["name"], "Order Alert");
+    assert_eq!(workflow["nodes"], json!([]));
+}
+
+#[tokio::test]
+async fn node_add_and_set_json_update_local_workflow() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    fs::write(
+        repo.path().join("workflows").join("example.workflow.json"),
+        serde_json::to_string_pretty(&workflow_fixture("wf-1", "Example", false))
+            .expect("serialize workflow"),
+    )
+    .expect("write workflow");
+
+    let add_output = base_command(repo.path())
+        .arg("node")
+        .arg("add")
+        .arg("workflows/example.workflow.json")
+        .arg("--name")
+        .arg("HTTP Request")
+        .arg("--type")
+        .arg("n8n-nodes-base.httpRequest")
+        .arg("--type-version")
+        .arg("4.2")
+        .arg("--x")
+        .arg("120")
+        .arg("--y")
+        .arg("240")
+        .output()
+        .expect("run node add");
+    assert!(add_output.status.success());
+
+    let set_output = base_command(repo.path())
+        .arg("node")
+        .arg("set")
+        .arg("workflows/example.workflow.json")
+        .arg("HTTP Request")
+        .arg("url")
+        .arg("https://example.com")
+        .output()
+        .expect("run node set");
+    assert!(set_output.status.success());
+    let envelope = parse_json(&set_output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["changed"], true);
+
+    let workflow = read_json_file(&repo.path().join("workflows").join("example.workflow.json"));
+    let node = workflow["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.first())
+        .expect("node");
+    assert_eq!(node["name"], "HTTP Request");
+    assert_eq!(node["position"], json!([120, 240]));
+    assert_eq!(node["parameters"]["url"], "https://example.com");
+}
+
+#[tokio::test]
+async fn expr_set_json_wraps_expression_and_credential_set_updates_reference() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    fs::write(
+        repo.path().join("workflows").join("example.workflow.json"),
+        serde_json::to_string_pretty(&json!({
+            "id": "wf-1",
+            "name": "Example",
+            "nodes": [
+                {
+                    "id": "node-1",
+                    "name": "HTTP Request",
+                    "type": "n8n-nodes-base.httpRequest",
+                    "typeVersion": 4.2,
+                    "position": [0, 0],
+                    "parameters": {}
+                }
+            ],
+            "connections": {}
+        }))
+        .expect("serialize workflow"),
+    )
+    .expect("write workflow");
+
+    let expr_output = base_command(repo.path())
+        .arg("expr")
+        .arg("set")
+        .arg("workflows/example.workflow.json")
+        .arg("HTTP Request")
+        .arg("authentication")
+        .arg("$json.auth.mode")
+        .output()
+        .expect("run expr set");
+    assert!(expr_output.status.success());
+
+    let credential_output = base_command(repo.path())
+        .arg("credential")
+        .arg("set")
+        .arg("workflows/example.workflow.json")
+        .arg("HTTP Request")
+        .arg("--type")
+        .arg("httpBasicAuth")
+        .arg("--id")
+        .arg("cred-123")
+        .arg("--name")
+        .arg("Primary Basic Auth")
+        .output()
+        .expect("run credential set");
+    assert!(credential_output.status.success());
+
+    let workflow = read_json_file(&repo.path().join("workflows").join("example.workflow.json"));
+    let node = workflow["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.first())
+        .expect("node");
+    assert_eq!(node["parameters"]["authentication"], "={{$json.auth.mode}}");
+    assert_eq!(node["credentials"]["httpBasicAuth"]["id"], "cred-123");
+    assert_eq!(
+        node["credentials"]["httpBasicAuth"]["name"],
+        "Primary Basic Auth"
+    );
+}
+
+#[tokio::test]
+async fn conn_add_json_creates_connection_branch() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    fs::write(
+        repo.path().join("workflows").join("example.workflow.json"),
+        serde_json::to_string_pretty(&json!({
+            "id": "wf-1",
+            "name": "Example",
+            "nodes": [
+                {
+                    "id": "node-1",
+                    "name": "Start",
+                    "type": "n8n-nodes-base.manualTrigger",
+                    "typeVersion": 1,
+                    "position": [0, 0],
+                    "parameters": {}
+                },
+                {
+                    "id": "node-2",
+                    "name": "HTTP Request",
+                    "type": "n8n-nodes-base.httpRequest",
+                    "typeVersion": 4.2,
+                    "position": [200, 0],
+                    "parameters": {}
+                }
+            ],
+            "connections": {}
+        }))
+        .expect("serialize workflow"),
+    )
+    .expect("write workflow");
+
+    let output = base_command(repo.path())
+        .arg("conn")
+        .arg("add")
+        .arg("workflows/example.workflow.json")
+        .arg("--from")
+        .arg("Start")
+        .arg("--to")
+        .arg("HTTP Request")
+        .arg("--kind")
+        .arg("main")
+        .output()
+        .expect("run conn add");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "conn");
+
+    let workflow = read_json_file(&repo.path().join("workflows").join("example.workflow.json"));
+    assert_eq!(
+        workflow["connections"]["Start"]["main"][0][0],
+        json!({
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+        })
+    );
+}
+
 fn base_command(repo_root: &Path) -> Command {
     let mut command = Command::cargo_bin("n8nc").expect("n8nc binary");
     command
@@ -941,6 +1152,11 @@ fn workflow_with_sensitive_literal() -> Value {
         ],
         "connections": {}
     })
+}
+
+fn read_json_file(path: &Path) -> Value {
+    serde_json::from_str(&fs::read_to_string(path).expect("read json file"))
+        .expect("parse json file")
 }
 
 fn parse_json(bytes: &[u8]) -> Value {

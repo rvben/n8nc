@@ -19,14 +19,20 @@ use crate::{
     },
     canonical::{canonicalize_workflow, hash_value, pretty_json},
     cli::{
-        AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, Cli, Command, DiffArgs, DoctorArgs,
-        FmtArgs, GetArgs, IdArgs, InitArgs, ListArgs, PullArgs, PushArgs, RunsArgs, RunsCommand,
+        AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, Cli, Command, ConnAddArgs, ConnArgs,
+        ConnCommand, CredentialArgs, CredentialCommand, CredentialSetArgs, DiffArgs, DoctorArgs,
+        ExprArgs, ExprCommand, ExprSetArgs, FmtArgs, GetArgs, IdArgs, InitArgs, ListArgs,
+        NodeAddArgs, NodeArgs, NodeCommand, NodeSetArgs, PullArgs, PushArgs, RunsArgs, RunsCommand,
         RunsGetArgs, RunsListArgs, RunsTimeArgs, RunsWatchArgs, StatusArgs, TriggerArgs,
-        ValidateArgs,
+        ValidateArgs, ValueModeArgs, WorkflowArgs, WorkflowCommand, WorkflowNewArgs,
     },
     config::{
         InstanceConfig, LoadedRepo, RepoConfig, ensure_gitignore, ensure_repo_layout, load_repo,
-        resolve_instance_alias, save_repo_config,
+        resolve_instance_alias, save_repo_config, workflow_dir,
+    },
+    edit::{
+        EditResult, add_connection, add_node, create_workflow, default_workflow_file_name,
+        set_credential_reference, set_node_expression, set_node_value, workflow_id_string,
     },
     error::AppError,
     repo::{
@@ -176,6 +182,11 @@ pub async fn run(cli: Cli) -> Result<(), AppError> {
         Command::Runs(args) => cmd_runs(&context, args).await,
         Command::Pull(args) => cmd_pull(&context, args).await,
         Command::Push(args) => cmd_push(&context, args).await,
+        Command::Workflow(args) => cmd_workflow(&context, args).await,
+        Command::Node(args) => cmd_node(&context, args).await,
+        Command::Conn(args) => cmd_conn(&context, args).await,
+        Command::Expr(args) => cmd_expr(&context, args).await,
+        Command::Credential(args) => cmd_credential(&context, args).await,
         Command::Status(args) => cmd_status(&context, args).await,
         Command::Diff(args) => cmd_diff(&context, args).await,
         Command::Activate(args) => cmd_activation(&context, args, true).await,
@@ -1194,6 +1205,204 @@ async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), AppError> {
     }
 }
 
+async fn cmd_workflow(context: &Context, args: WorkflowArgs) -> Result<(), AppError> {
+    match args.command {
+        WorkflowCommand::New(args) => cmd_workflow_new(context, args).await,
+    }
+}
+
+async fn cmd_workflow_new(context: &Context, args: WorkflowNewArgs) -> Result<(), AppError> {
+    let workflow_id = args.id.unwrap_or_else(|| {
+        format!(
+            "draft-{}-{}",
+            Utc::now().timestamp_millis(),
+            std::process::id()
+        )
+    });
+    let target_path = resolve_new_workflow_path(
+        context,
+        args.path.as_deref(),
+        &args.name,
+        Some(&workflow_id),
+    )?;
+    let result = create_workflow(&target_path, &args.name, Some(&workflow_id), args.active)?;
+    emit_edit_result(
+        context,
+        "workflow",
+        "Created",
+        &result,
+        vec![(
+            "workflow_id".to_string(),
+            json!(workflow_id_string(&result.workflow)),
+        )],
+    )
+}
+
+async fn cmd_node(context: &Context, args: NodeArgs) -> Result<(), AppError> {
+    match args.command {
+        NodeCommand::Add(args) => cmd_node_add(context, args).await,
+        NodeCommand::Set(args) => cmd_node_set(context, args).await,
+    }
+}
+
+async fn cmd_node_add(context: &Context, args: NodeAddArgs) -> Result<(), AppError> {
+    let file = resolve_local_file_path(context, &args.file)?;
+    let result = add_node(
+        &file,
+        &args.name,
+        &args.node_type,
+        args.type_version,
+        args.x,
+        args.y,
+        args.disabled,
+    )?;
+    emit_edit_result(
+        context,
+        "node",
+        if result.changed {
+            "Added node to"
+        } else {
+            "No node changes for"
+        },
+        &result,
+        vec![
+            (
+                "workflow_id".to_string(),
+                json!(workflow_id_string(&result.workflow)),
+            ),
+            ("node".to_string(), json!(args.name)),
+        ],
+    )
+}
+
+async fn cmd_node_set(context: &Context, args: NodeSetArgs) -> Result<(), AppError> {
+    let file = resolve_local_file_path(context, &args.file)?;
+    let value = parse_node_value("node", &args.mode, args.value.as_deref())?;
+    let result = set_node_value(&file, &args.node, &args.path, value)?;
+    emit_edit_result(
+        context,
+        "node",
+        if result.changed {
+            "Updated node in"
+        } else {
+            "No node changes for"
+        },
+        &result,
+        vec![
+            (
+                "workflow_id".to_string(),
+                json!(workflow_id_string(&result.workflow)),
+            ),
+            ("node".to_string(), json!(args.node)),
+            ("path".to_string(), json!(args.path)),
+        ],
+    )
+}
+
+async fn cmd_conn(context: &Context, args: ConnArgs) -> Result<(), AppError> {
+    match args.command {
+        ConnCommand::Add(args) => cmd_conn_add(context, args).await,
+    }
+}
+
+async fn cmd_conn_add(context: &Context, args: ConnAddArgs) -> Result<(), AppError> {
+    let file = resolve_local_file_path(context, &args.file)?;
+    let result = add_connection(
+        &file,
+        &args.from,
+        &args.to,
+        &args.kind,
+        args.target_kind.as_deref(),
+        args.output_index,
+        args.input_index,
+    )?;
+    emit_edit_result(
+        context,
+        "conn",
+        if result.changed {
+            "Updated connections in"
+        } else {
+            "No connection changes for"
+        },
+        &result,
+        vec![
+            (
+                "workflow_id".to_string(),
+                json!(workflow_id_string(&result.workflow)),
+            ),
+            ("from".to_string(), json!(args.from)),
+            ("to".to_string(), json!(args.to)),
+            ("kind".to_string(), json!(args.kind)),
+            ("output_index".to_string(), json!(args.output_index)),
+            ("input_index".to_string(), json!(args.input_index)),
+        ],
+    )
+}
+
+async fn cmd_expr(context: &Context, args: ExprArgs) -> Result<(), AppError> {
+    match args.command {
+        ExprCommand::Set(args) => cmd_expr_set(context, args).await,
+    }
+}
+
+async fn cmd_expr_set(context: &Context, args: ExprSetArgs) -> Result<(), AppError> {
+    let file = resolve_local_file_path(context, &args.file)?;
+    let result = set_node_expression(&file, &args.node, &args.path, &args.expression)?;
+    emit_edit_result(
+        context,
+        "expr",
+        if result.changed {
+            "Updated expression in"
+        } else {
+            "No expression changes for"
+        },
+        &result,
+        vec![
+            (
+                "workflow_id".to_string(),
+                json!(workflow_id_string(&result.workflow)),
+            ),
+            ("node".to_string(), json!(args.node)),
+            ("path".to_string(), json!(args.path)),
+        ],
+    )
+}
+
+async fn cmd_credential(context: &Context, args: CredentialArgs) -> Result<(), AppError> {
+    match args.command {
+        CredentialCommand::Set(args) => cmd_credential_set(context, args).await,
+    }
+}
+
+async fn cmd_credential_set(context: &Context, args: CredentialSetArgs) -> Result<(), AppError> {
+    let file = resolve_local_file_path(context, &args.file)?;
+    let result = set_credential_reference(
+        &file,
+        &args.node,
+        &args.credential_type,
+        &args.credential_id,
+        args.name.as_deref(),
+    )?;
+    emit_edit_result(
+        context,
+        "credential",
+        if result.changed {
+            "Updated credential reference in"
+        } else {
+            "No credential changes for"
+        },
+        &result,
+        vec![
+            (
+                "workflow_id".to_string(),
+                json!(workflow_id_string(&result.workflow)),
+            ),
+            ("node".to_string(), json!(args.node)),
+            ("credential_type".to_string(), json!(args.credential_type)),
+        ],
+    )
+}
+
 async fn cmd_status(context: &Context, args: StatusArgs) -> Result<(), AppError> {
     let repo = load_loaded_repo(context)?;
     let statuses = scan_local_status(&repo, &args.paths)?;
@@ -1964,6 +2173,53 @@ fn parse_pairs(
         .collect()
 }
 
+fn parse_node_value(
+    command: &'static str,
+    mode: &ValueModeArgs,
+    value: Option<&str>,
+) -> Result<Value, AppError> {
+    if mode.null {
+        return Ok(Value::Null);
+    }
+
+    let Some(value) = value else {
+        return Err(AppError::usage(
+            command,
+            "A value is required unless `--null` is used.",
+        ));
+    };
+
+    if mode.json_value {
+        return serde_json::from_str(value).map_err(|err| {
+            AppError::usage(command, format!("`--json-value` must be valid JSON: {err}"))
+        });
+    }
+
+    if mode.number {
+        let number = serde_json::Number::from_f64(value.parse::<f64>().map_err(|err| {
+            AppError::usage(command, format!("`--number` value must be numeric: {err}"))
+        })?)
+        .ok_or_else(|| AppError::usage(command, "`--number` value must be finite."))?;
+        return Ok(Value::Number(number));
+    }
+
+    if mode.bool_value {
+        let parsed = match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" => true,
+            "false" | "0" | "no" => false,
+            _ => {
+                return Err(AppError::usage(
+                    command,
+                    "`--bool` value must be one of: true, false, 1, 0, yes, no.",
+                ));
+            }
+        };
+        return Ok(Value::Bool(parsed));
+    }
+
+    Ok(Value::String(value.to_string()))
+}
+
 fn read_request_body(
     data: Option<String>,
     data_file: Option<PathBuf>,
@@ -2007,6 +2263,85 @@ fn emit_json<T: Serialize>(command: &'static str, data: &T) -> Result<(), AppErr
     })?;
     println!("{rendered}");
     Ok(())
+}
+
+fn emit_edit_result(
+    context: &Context,
+    command: &'static str,
+    action: &str,
+    result: &EditResult,
+    extra: Vec<(String, Value)>,
+) -> Result<(), AppError> {
+    let warnings = sensitive_data_diagnostics(&result.path)?;
+    let warning_count = warnings.len();
+    if context.json {
+        let mut data = serde_json::Map::new();
+        data.insert("workflow_path".to_string(), json!(result.path));
+        data.insert("changed".to_string(), json!(result.changed));
+        data.insert("warning_count".to_string(), json!(warning_count));
+        for (key, value) in extra {
+            data.insert(key, value);
+        }
+        if warning_count > 0 {
+            data.insert("diagnostics".to_string(), json!(warnings));
+        }
+        emit_json(command, &Value::Object(data))
+    } else {
+        println!("{action} {}.", result.path.display());
+        print_sensitive_warning_summary(&result.path, warning_count);
+        Ok(())
+    }
+}
+
+fn resolve_local_file_path(context: &Context, path: &Path) -> Result<PathBuf, AppError> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    if let Ok(repo) = load_repo(context.repo_root.as_deref()) {
+        return Ok(repo.root.join(path));
+    }
+
+    Ok(context_root(context)?.join(path))
+}
+
+fn resolve_new_workflow_path(
+    context: &Context,
+    explicit: Option<&Path>,
+    name: &str,
+    workflow_id: Option<&str>,
+) -> Result<PathBuf, AppError> {
+    if let Some(path) = explicit {
+        return resolve_local_file_path(context, path);
+    }
+
+    let workflow_id = workflow_id.map(ToOwned::to_owned).unwrap_or_else(|| {
+        format!(
+            "draft-{}-{}",
+            Utc::now().timestamp_millis(),
+            std::process::id()
+        )
+    });
+    let file_name = default_workflow_file_name(name, &workflow_id);
+
+    if let Ok(repo) = load_repo(context.repo_root.as_deref()) {
+        return Ok(workflow_dir(&repo.root, &repo.config).join(file_name));
+    }
+
+    Ok(context_root(context)?.join(file_name))
+}
+
+fn context_root(context: &Context) -> Result<PathBuf, AppError> {
+    if let Some(path) = &context.repo_root {
+        Ok(path.clone())
+    } else {
+        std::env::current_dir().map_err(|err| {
+            AppError::config(
+                "config",
+                format!("Failed to resolve current directory: {err}"),
+            )
+        })
+    }
 }
 
 fn emit_json_line<T: Serialize>(command: &'static str, data: &T) -> Result<(), AppError> {

@@ -42,6 +42,18 @@ pub enum Command {
     Pull(PullArgs),
     /// Push a tracked workflow back to n8n
     Push(PushArgs),
+    /// Create a new local workflow file
+    Workflow(WorkflowArgs),
+    /// Add or edit nodes in a local workflow file
+    Node(NodeArgs),
+    /// Add a connection between nodes in a local workflow file
+    #[command(alias = "connection")]
+    Conn(ConnArgs),
+    /// Set an expression value on a node path
+    Expr(ExprArgs),
+    /// Set a credential reference on a node
+    #[command(alias = "cred")]
+    Credential(CredentialArgs),
     /// Show local workflow sync state
     Status(StatusArgs),
     /// Show local changes for one tracked workflow
@@ -225,6 +237,160 @@ pub struct PushArgs {
     #[command(flatten)]
     pub remote: RemoteArgs,
     pub file: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowArgs {
+    #[command(subcommand)]
+    pub command: WorkflowCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkflowCommand {
+    /// Create a new local workflow draft
+    New(WorkflowNewArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowNewArgs {
+    /// Local workflow name
+    pub name: String,
+    /// Output path for the workflow file
+    #[arg(long)]
+    pub path: Option<PathBuf>,
+    /// Explicit workflow ID to embed in the local draft
+    #[arg(long)]
+    pub id: Option<String>,
+    /// Create the workflow as active instead of inactive
+    #[arg(long)]
+    pub active: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NodeArgs {
+    #[command(subcommand)]
+    pub command: NodeCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NodeCommand {
+    /// Add a node to a local workflow file
+    Add(NodeAddArgs),
+    /// Set a node field or parameter path
+    Set(NodeSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct NodeAddArgs {
+    pub file: PathBuf,
+    #[arg(long)]
+    pub name: String,
+    #[arg(long = "type")]
+    pub node_type: String,
+    #[arg(long, default_value_t = 1.0)]
+    pub type_version: f64,
+    #[arg(long, default_value_t = 0)]
+    pub x: i64,
+    #[arg(long, default_value_t = 0)]
+    pub y: i64,
+    #[arg(long)]
+    pub disabled: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NodeSetArgs {
+    pub file: PathBuf,
+    pub node: String,
+    pub path: String,
+    #[arg(required_unless_present = "null")]
+    pub value: Option<String>,
+    #[command(flatten)]
+    pub mode: ValueModeArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct ValueModeArgs {
+    #[arg(long = "json-value", conflicts_with_all = ["number", "bool_value", "null"])]
+    pub json_value: bool,
+    #[arg(long, conflicts_with_all = ["json_value", "bool_value", "null"])]
+    pub number: bool,
+    #[arg(long = "bool", conflicts_with_all = ["json_value", "number", "null"])]
+    pub bool_value: bool,
+    #[arg(long, conflicts_with_all = ["json_value", "number", "bool_value"])]
+    pub null: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ConnArgs {
+    #[command(subcommand)]
+    pub command: ConnCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConnCommand {
+    /// Add a connection between two nodes
+    Add(ConnAddArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ConnAddArgs {
+    pub file: PathBuf,
+    #[arg(long)]
+    pub from: String,
+    #[arg(long)]
+    pub to: String,
+    #[arg(long, default_value = "main")]
+    pub kind: String,
+    #[arg(long)]
+    pub target_kind: Option<String>,
+    #[arg(long, default_value_t = 0)]
+    pub output_index: usize,
+    #[arg(long, default_value_t = 0)]
+    pub input_index: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct ExprArgs {
+    #[command(subcommand)]
+    pub command: ExprCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ExprCommand {
+    /// Set an expression string on a node field or parameter path
+    Set(ExprSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ExprSetArgs {
+    pub file: PathBuf,
+    pub node: String,
+    pub path: String,
+    pub expression: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CredentialArgs {
+    #[command(subcommand)]
+    pub command: CredentialCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CredentialCommand {
+    /// Set a credential reference on a node
+    Set(CredentialSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CredentialSetArgs {
+    pub file: PathBuf,
+    pub node: String,
+    #[arg(long = "type")]
+    pub credential_type: String,
+    #[arg(long = "id")]
+    pub credential_id: String,
+    #[arg(long)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Args)]

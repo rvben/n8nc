@@ -4,6 +4,7 @@ mod auth;
 mod canonical;
 mod cli;
 mod config;
+mod edit;
 mod error;
 mod repo;
 mod validate;
