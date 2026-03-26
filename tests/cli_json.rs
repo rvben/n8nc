@@ -28,6 +28,37 @@ impl Match for MissingQueryParam {
 }
 
 #[derive(Debug)]
+struct WorkflowWebhookPayloadMatcher {
+    path: &'static str,
+    webhook_id: &'static str,
+    type_version: f64,
+}
+
+impl Match for WorkflowWebhookPayloadMatcher {
+    fn matches(&self, request: &Request) -> bool {
+        let Ok(payload) = serde_json::from_slice::<Value>(&request.body) else {
+            return false;
+        };
+        let Some(node) = payload
+            .get("nodes")
+            .and_then(Value::as_array)
+            .and_then(|nodes| nodes.first())
+        else {
+            return false;
+        };
+        node.get("type").and_then(Value::as_str) == Some("n8n-nodes-base.webhook")
+            && node.get("typeVersion").and_then(Value::as_f64) == Some(self.type_version)
+            && node.get("webhookId").and_then(Value::as_str) == Some(self.webhook_id)
+            && node
+                .get("parameters")
+                .and_then(Value::as_object)
+                .and_then(|parameters| parameters.get("path"))
+                .and_then(Value::as_str)
+                == Some(self.path)
+    }
+}
+
+#[derive(Debug)]
 struct SequenceResponder {
     calls: Arc<AtomicUsize>,
 }
@@ -1047,6 +1078,148 @@ async fn workflow_create_activate_json_fetches_active_remote_workflow() {
 }
 
 #[tokio::test]
+async fn workflow_create_json_emits_webhook_urls_and_normalizes_payload() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    let draft_path = repo
+        .path()
+        .join("workflows")
+        .join("incoming-webhook--wf-draft.workflow.json");
+    fs::write(
+        &draft_path,
+        serde_json::to_string_pretty(&json!({
+            "id": "wf-draft",
+            "name": "Incoming Webhook",
+            "nodes": [
+                {
+                    "id": "node-1",
+                    "name": "Webhook",
+                    "type": "n8n-nodes-base.webhook",
+                    "typeVersion": 1,
+                    "position": [0, 0],
+                    "parameters": {
+                        "path": "/orders/new/",
+                        "httpMethod": "POST"
+                    }
+                }
+            ],
+            "connections": {},
+            "settings": {}
+        }))
+        .expect("serialize webhook draft"),
+    )
+    .expect("write draft");
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(WorkflowWebhookPayloadMatcher {
+            path: "orders/new",
+            webhook_id: "orders/new",
+            type_version: 2.0,
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-webhook",
+                "name": "Incoming Webhook",
+                "active": false,
+                "nodes": [
+                    {
+                        "id": "node-1",
+                        "name": "Webhook",
+                        "type": "n8n-nodes-base.webhook",
+                        "typeVersion": 2,
+                        "position": [0, 0],
+                        "webhookId": "orders/new",
+                        "parameters": {
+                            "path": "orders/new",
+                            "httpMethod": "POST"
+                        }
+                    }
+                ],
+                "connections": {},
+                "settings": {}
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("workflow")
+        .arg("create")
+        .arg("--instance")
+        .arg("mock")
+        .arg("workflows/incoming-webhook--wf-draft.workflow.json")
+        .output()
+        .expect("run workflow create webhook");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["workflow_id"], "wf-webhook");
+    assert_eq!(
+        envelope["data"]["webhooks"][0]["production_url"],
+        format!("{}/webhook/orders/new", server.uri())
+    );
+    assert_eq!(
+        envelope["data"]["webhooks"][0]["test_url"],
+        format!("{}/webhook-test/orders/new", server.uri())
+    );
+}
+
+#[tokio::test]
+async fn workflow_show_json_reports_webhook_urls() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    fs::write(
+        repo.path().join("workflows").join("webhook.workflow.json"),
+        serde_json::to_string_pretty(&json!({
+            "id": "wf-1",
+            "name": "Incoming Webhook",
+            "active": true,
+            "nodes": [
+                {
+                    "id": "node-1",
+                    "name": "Webhook",
+                    "type": "n8n-nodes-base.webhook",
+                    "typeVersion": 2,
+                    "position": [0, 0],
+                    "webhookId": "orders/new",
+                    "parameters": {
+                        "path": "orders/new",
+                        "httpMethod": "POST"
+                    }
+                }
+            ],
+            "connections": {},
+            "settings": {}
+        }))
+        .expect("serialize workflow"),
+    )
+    .expect("write workflow");
+
+    let output = base_command(repo.path())
+        .arg("workflow")
+        .arg("show")
+        .arg("--instance")
+        .arg("mock")
+        .arg("workflows/webhook.workflow.json")
+        .output()
+        .expect("run workflow show");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["node_count"], 1);
+    assert_eq!(
+        envelope["data"]["webhooks"][0]["production_url"],
+        format!("{}/webhook/orders/new", server.uri())
+    );
+}
+
+#[tokio::test]
 async fn node_add_and_set_json_update_local_workflow() {
     let server = MockServer::start().await;
     let repo = tempdir().expect("tempdir");
@@ -1225,6 +1398,238 @@ async fn conn_add_json_creates_connection_branch() {
             "type": "main",
             "index": 0
         })
+    );
+}
+
+#[tokio::test]
+async fn node_rename_json_rewrites_connections() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    fs::write(
+        repo.path().join("workflows").join("example.workflow.json"),
+        serde_json::to_string_pretty(&json!({
+            "id": "wf-1",
+            "name": "Example",
+            "nodes": [
+                {
+                    "id": "node-1",
+                    "name": "Start",
+                    "type": "n8n-nodes-base.manualTrigger",
+                    "typeVersion": 1,
+                    "position": [0, 0],
+                    "parameters": {}
+                },
+                {
+                    "id": "node-2",
+                    "name": "HTTP Request",
+                    "type": "n8n-nodes-base.httpRequest",
+                    "typeVersion": 4.2,
+                    "position": [200, 0],
+                    "parameters": {}
+                }
+            ],
+            "connections": {
+                "Start": {
+                    "main": [[{"node": "HTTP Request", "type": "main", "index": 0}]]
+                }
+            }
+        }))
+        .expect("serialize workflow"),
+    )
+    .expect("write workflow");
+
+    let output = base_command(repo.path())
+        .arg("node")
+        .arg("rename")
+        .arg("workflows/example.workflow.json")
+        .arg("HTTP Request")
+        .arg("Fetch Orders")
+        .output()
+        .expect("run node rename");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    let workflow = read_json_file(&repo.path().join("workflows").join("example.workflow.json"));
+    assert_eq!(workflow["nodes"][1]["name"], "Fetch Orders");
+    assert_eq!(
+        workflow["connections"]["Start"]["main"][0][0]["node"],
+        "Fetch Orders"
+    );
+}
+
+#[tokio::test]
+async fn node_rm_json_removes_connections() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    fs::write(
+        repo.path().join("workflows").join("example.workflow.json"),
+        serde_json::to_string_pretty(&json!({
+            "id": "wf-1",
+            "name": "Example",
+            "nodes": [
+                {
+                    "id": "node-1",
+                    "name": "Start",
+                    "type": "n8n-nodes-base.manualTrigger",
+                    "typeVersion": 1,
+                    "position": [0, 0],
+                    "parameters": {}
+                },
+                {
+                    "id": "node-2",
+                    "name": "HTTP Request",
+                    "type": "n8n-nodes-base.httpRequest",
+                    "typeVersion": 4.2,
+                    "position": [200, 0],
+                    "parameters": {}
+                }
+            ],
+            "connections": {
+                "Start": {
+                    "main": [[{"node": "HTTP Request", "type": "main", "index": 0}]]
+                }
+            }
+        }))
+        .expect("serialize workflow"),
+    )
+    .expect("write workflow");
+
+    let output = base_command(repo.path())
+        .arg("node")
+        .arg("rm")
+        .arg("workflows/example.workflow.json")
+        .arg("HTTP Request")
+        .output()
+        .expect("run node rm");
+
+    assert!(output.status.success());
+    let workflow = read_json_file(&repo.path().join("workflows").join("example.workflow.json"));
+    assert_eq!(workflow["nodes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(workflow["connections"]["Start"]["main"][0], json!([]));
+}
+
+#[tokio::test]
+async fn conn_rm_json_removes_single_edge() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    fs::write(
+        repo.path().join("workflows").join("example.workflow.json"),
+        serde_json::to_string_pretty(&json!({
+            "id": "wf-1",
+            "name": "Example",
+            "nodes": [
+                {
+                    "id": "node-1",
+                    "name": "Start",
+                    "type": "n8n-nodes-base.manualTrigger",
+                    "typeVersion": 1,
+                    "position": [0, 0],
+                    "parameters": {}
+                },
+                {
+                    "id": "node-2",
+                    "name": "HTTP Request",
+                    "type": "n8n-nodes-base.httpRequest",
+                    "typeVersion": 4.2,
+                    "position": [200, 0],
+                    "parameters": {}
+                },
+                {
+                    "id": "node-3",
+                    "name": "Slack",
+                    "type": "n8n-nodes-base.slack",
+                    "typeVersion": 2,
+                    "position": [400, 0],
+                    "parameters": {}
+                }
+            ],
+            "connections": {
+                "Start": {
+                    "main": [[
+                        {"node": "HTTP Request", "type": "main", "index": 0},
+                        {"node": "Slack", "type": "main", "index": 0}
+                    ]]
+                }
+            }
+        }))
+        .expect("serialize workflow"),
+    )
+    .expect("write workflow");
+
+    let output = base_command(repo.path())
+        .arg("conn")
+        .arg("rm")
+        .arg("workflows/example.workflow.json")
+        .arg("--from")
+        .arg("Start")
+        .arg("--to")
+        .arg("HTTP Request")
+        .arg("--kind")
+        .arg("main")
+        .arg("--output-index")
+        .arg("0")
+        .arg("--input-index")
+        .arg("0")
+        .output()
+        .expect("run conn rm");
+
+    assert!(output.status.success());
+    let workflow = read_json_file(&repo.path().join("workflows").join("example.workflow.json"));
+    let branch = workflow["connections"]["Start"]["main"][0]
+        .as_array()
+        .expect("connection branch");
+    assert_eq!(branch.len(), 1);
+    assert_eq!(branch[0]["node"], "Slack");
+}
+
+#[tokio::test]
+async fn trigger_json_404_includes_webhook_guidance() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("POST"))
+        .and(path("/webhook/orders/new"))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_json(json!({"message": "Webhook not registered"})),
+        )
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("trigger")
+        .arg("--instance")
+        .arg("mock")
+        .arg("/webhook/orders/new")
+        .output()
+        .expect("run trigger");
+
+    assert_eq!(output.status.code(), Some(6));
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["command"], "trigger");
+    assert_eq!(envelope["error"]["code"], "trigger.http_404");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("/webhook/orders/new")
+    );
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Webhook not registered")
+    );
+    assert!(
+        envelope["error"]["suggestion"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("workflow show")
     );
 }
 
