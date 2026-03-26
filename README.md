@@ -176,9 +176,9 @@ The cache stores the last pulled canonical workflow snapshot for local `diff`.
 - `conflict`
 - `missing_remote`
 
-Entries that cannot be compared remotely still show their local state and count toward the refresh summary as `unavailable`.
+If remote refresh fails for a tracked workflow, `status --refresh` still returns the local row, leaves the sync state unavailable, and records the remote error in `remote_detail`. `untracked`, `invalid`, and `orphaned_meta` entries remain visible but do not count toward `sync_summary`.
 
-`diff` is local by default. `diff --refresh` adds a second comparison against the current remote workflow and shows a remote/local patch when the workflow is still remotely available.
+`diff` is local by default. `diff --refresh` adds a second comparison against the current remote workflow and shows a remote/local patch when the workflow is still remotely available. If the remote lookup fails, the command still returns the local diff and marks the remote comparison as unavailable.
 
 `push` uses the sidecar metadata as a lease check and refuses to overwrite a workflow that changed remotely since the last `pull`.
 

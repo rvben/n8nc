@@ -217,7 +217,7 @@ Remote sync states:
 - `conflict`: both local file and remote changed since the last pull or successful push
 - `missing_remote`: the tracked workflow no longer exists remotely
 
-Entries that cannot be refreshed, such as `untracked`, `invalid`, or `orphaned_meta`, remain visible with their local state and count toward the refresh summary as `unavailable`.
+If remote refresh fails for a tracked workflow, the CLI still returns the local row, leaves `sync_state` unset, and records the reason in `remote_detail`. `untracked`, `invalid`, and `orphaned_meta` entries remain visible with their local state but do not contribute to `sync_summary`.
 
 ## 9. Push Safety Model
 
@@ -277,6 +277,8 @@ Additional human output in refresh mode:
 - remote update timestamp when present
 - changed top-level sections between the current remote workflow and the local file
 - unified `remote` vs `local` patch when both sides are available and differ
+
+If remote refresh fails, the command still returns the local base snapshot diff, leaves the remote comparison unavailable, and records the reason in `status.remote_detail`.
 
 Additional JSON fields in refresh mode:
 
