@@ -46,6 +46,7 @@ n8nc
 ├── workflow new
 ├── workflow create
 ├── workflow show
+├── workflow rm
 ├── node ls
 ├── node add
 ├── node set
@@ -352,6 +353,7 @@ Current commands:
 - `workflow new <name> [--path <path>] [--id <id>] [--active]`
 - `workflow create <file> --instance <alias> [--activate]`
 - `workflow show <file> [--instance <alias>]`
+- `workflow rm <target> [--instance <alias>] [--local-only|--keep-local]`
 - `node ls <file>`
 - `node add <file> --name <name> --type <node_type> [--type-version <number>] [--x <int>] [--y <int>] [--disabled]`
 - `node set <file> <node> <path> [value] [--json-value|--number|--bool|--null]`
@@ -368,10 +370,13 @@ Behavior:
 - edit commands rewrite the file in canonical JSON form after each successful mutation
 - tracked sidecars are left untouched, so tracked files become locally `modified` until they are pushed
 - edit commands also run the sensitive-data scanner after write and include `warning_count` in JSON output
-- `workflow show` summarizes local nodes, edges, and webhook URLs, using the explicit `--instance` or the tracked sidecar instance when available
+- `workflow show` summarizes local nodes, edges, and webhook URLs, using the explicit `--instance`, the tracked sidecar instance, or the repo default instance for local drafts
 - `workflow create` requires a repo because it writes the new tracked file and sidecar into the configured workflow directory
 - `workflow create` refuses files that already have a sidecar and expects you to use `push` for tracked workflows
 - `workflow create` removes local `id` and `active` before the create request, ensures execution-saving `settings` defaults exist, normalizes webhook nodes for remote creation, and stores the server response as the new source of truth
+- `workflow rm` accepts a workflow file path, workflow ID, or exact workflow name
+- `workflow rm <file>` removes a local draft directly; for tracked files it also deletes the remote workflow unless `--local-only` is set
+- `workflow rm <id-or-name>` deletes the remote workflow and removes matching tracked local artifacts unless `--keep-local` is set
 
 Webhook-specific behavior:
 
@@ -601,6 +606,16 @@ Local edit command success payloads include:
 - optional `active`
 - optional `webhooks`
 
+`workflow rm` success payloads include:
+
+- `target`
+- optional `workflow_id`
+- optional `workflow_name`
+- optional `instance`
+- `remote_removed`
+- `local_removed`
+- `removed_paths`
+
 ## 16. Exit Codes
 
 - `0`: success
@@ -624,14 +639,14 @@ Local edit command success payloads include:
 - `doctor` uses a cheap workflow-list probe and does not verify every endpoint.
 - `diff` is best after a fresh `pull`, because older repos may not have cached base snapshots yet.
 - sensitive-data scanning is heuristic. It is tuned to catch likely mistakes, not to prove a workflow is secret-free.
-- workflow deletion is still outside the CLI even though the public delete endpoint was used in manual verification.
+- archive support is still outside the CLI until a stable public endpoint is verified.
 
 ## 18. Next Likely Steps
 
 The next improvements that fit the current design are:
 
 1. shell completions and packaging
-2. workflow deletion through the public delete endpoint
-3. more contract snapshot coverage for agent-facing JSON
-4. richer workflow inspection or graph rendering in human output
+2. more contract snapshot coverage for agent-facing JSON
+3. richer workflow inspection or graph rendering in human output
+4. optional archive support if a stable public endpoint exists
 5. only after that: a real environment-promotion model with explicit mappings and lock files

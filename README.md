@@ -34,6 +34,7 @@ Implemented commands:
 - `workflow new`
 - `workflow create`
 - `workflow show`
+- `workflow rm`
 - `node ls`
 - `node add`
 - `node set`
@@ -160,6 +161,12 @@ Inspect a local workflow summary, graph edges, and webhook URLs:
 n8nc workflow show workflows/order-alert--abc123.workflow.json
 ```
 
+Remove a remote workflow and clean up matching local tracked artifacts:
+
+```bash
+n8nc workflow rm abc123
+```
+
 List nodes in a local workflow file:
 
 ```bash
@@ -266,6 +273,15 @@ workflows/<workflow-slug>--<workflow-id>.meta.json
 
 `workflow new` creates a local `.workflow.json` draft without a sidecar. `workflow create` turns a sidecar-free local file into a tracked workflow by creating it remotely, writing the tracked file plus sidecar, and removing the original in-repo draft when the tracked path changes.
 
+`workflow show` now falls back to the repo default instance when a local draft has no sidecar yet, so draft webhook files still render full production and test URLs.
+
+`workflow rm` fills the missing cleanup step:
+
+- `n8nc workflow rm <workflow-id-or-name>` deletes the remote workflow and removes matching tracked local artifacts when they exist
+- `n8nc workflow rm <file>` removes a local draft file directly
+- `--local-only` removes local artifacts without touching remote
+- `--keep-local` deletes remotely but keeps local files and metadata
+
 Drafts and create payloads now also fill in execution-saving workflow settings when they are missing:
 
 - `executionOrder = "v1"`
@@ -316,8 +332,9 @@ When `runs ls --workflow ...` returns no rows for an active workflow whose setti
 - Same-instance first: tracked files are bound to the instance they were pulled from.
 - Agent-safe: every command supports `--json`.
 - Deterministic: workflows are canonicalized before storage and hashing.
-- Local authoring first: `workflow new`, `workflow show`, `node ls`, `node add`, `node set`, `node rename`, `node rm`, `expr set`, `credential set`, `conn add`, and `conn rm` edit local workflow files directly.
+- Local authoring first: `workflow new`, `workflow show`, `workflow rm`, `node ls`, `node add`, `node set`, `node rename`, `node rm`, `expr set`, `credential set`, `conn add`, and `conn rm` edit local workflow files directly.
 - Draft-to-tracked flow: `workflow create` publishes a local draft through the official workflow-create API and converts it into a tracked file plus sidecar.
+- Full cleanup path: `workflow rm` removes the remote workflow and cleans tracked repo artifacts instead of forcing raw API calls.
 - Better webhook ergonomics: webhook nodes are normalized for remote creation, publish and activate return the resolved URLs, and webhook trigger failures explain likely `404` causes.
 - Better execution ergonomics: new drafts default to saved successful executions, and `runs ls` explains one common “why is history empty?” workflow-settings pitfall.
 - Explicit refresh: remote drift is only reported when you ask for it with `--refresh`.
