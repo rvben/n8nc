@@ -30,6 +30,7 @@ Top-level commands:
 ```text
 n8nc
 ├── init
+├── doctor
 ├── auth add
 ├── auth test
 ├── auth list
@@ -111,6 +112,32 @@ Example:
 - `N8NC_TOKEN_STAGING`
 
 `auth add` is non-interactive in v0.1. You must provide `--token` or `--stdin`.
+
+### Doctor
+
+`doctor` is a setup and reachability check for humans and agents.
+
+Supported options:
+
+- `--instance <alias>`
+- `--skip-network`
+
+Checks currently include:
+
+- repo `config_file`
+- repo `workflow_dir`
+- repo `cache_dir`
+- repo `instances`
+- repo `default_instance`
+- per-instance `config`
+- per-instance `token`
+- per-instance `api`
+
+Failure behavior:
+
+- returns exit code `13` when any check fails
+- in JSON mode, returns an error envelope with the full doctor report attached under `data`
+- in human mode, prints the report before returning the failure summary
 
 ## 5. API Assumptions
 
@@ -446,7 +473,7 @@ Error envelope:
 }
 ```
 
-Validation failures may also include a `data` object with diagnostics.
+Validation failures and `doctor` failures may also include a `data` object with diagnostics or the full doctor report.
 
 ## 14. Exit Codes
 
@@ -459,21 +486,23 @@ Validation failures may also include a `data` object with diagnostics.
 - `10`: validation error
 - `11`: not found
 - `12`: conflict refusal
+- `13`: doctor failures
 
 ## 15. Known Limits
 
 - The tool is currently strongest when a repo mirrors one n8n instance.
 - `tags` are preserved structurally, not normalized semantically.
 - `ls` assumes a paginated workflow list response with `data` and optional `nextCursor`.
-- `status` and `diff` are local-only and do not verify remote drift.
+- remote drift and API health remain opt-in via `status --refresh`, `diff --refresh`, and `doctor`.
+- `doctor` uses a cheap workflow-list probe and does not verify every endpoint.
 - `diff` is best after a fresh `pull`, because older repos may not have cached base snapshots yet.
 
 ## 16. Next Likely Steps
 
 The next improvements that fit the current design are:
 
-1. remote-aware `status --refresh`
-2. remote-aware `diff --refresh`
-3. create workflow from local file
-4. richer execution inspection if public endpoints are verified
+1. workflow creation from local files
+2. shell completions and packaging
+3. richer execution actions if public endpoints are verified
+4. more contract snapshot coverage for agent-facing JSON
 5. only after that: a real environment-promotion model with explicit mappings and lock files

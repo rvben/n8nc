@@ -18,6 +18,7 @@ This is intentionally narrower than a full deployment platform.
 Implemented commands:
 
 - `init`
+- `doctor`
 - `auth add`
 - `auth test`
 - `auth list`
@@ -57,6 +58,12 @@ Store an API token:
 
 ```bash
 n8nc auth add prod --token <api_key>
+```
+
+Check repo, auth, and API health:
+
+```bash
+n8nc doctor --instance prod
 ```
 
 List workflows:
@@ -200,6 +207,7 @@ If remote refresh fails for a tracked workflow, `status --refresh` still returns
 - Agent-safe: every command supports `--json`.
 - Deterministic: workflows are canonicalized before storage and hashing.
 - Explicit refresh: remote drift is only reported when you ask for it with `--refresh`.
+- Fast setup check: `doctor` validates repo layout, token availability, and live API reachability.
 - Dev-loop friendly: `runs ls`, `runs get --details`, and `runs watch` cover recent execution inspection without leaving the terminal.
 - Time-window aware: `runs ls` and `runs watch` support `--since <RFC3339>` and `--last <window>` with `s`, `m`, `h`, and `d` units.
 - Honest triggering: `trigger` is an HTTP call helper for webhook URLs, not a guessed “execute workflow” API wrapper.
