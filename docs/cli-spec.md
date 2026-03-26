@@ -290,9 +290,11 @@ Outcomes:
 
 - if `remote_hash != meta.remote_hash`, refuse the push with exit code `12`
 - if `local_hash == meta.remote_hash`, report no-op
-- otherwise, update the workflow with `PUT /workflows/{id}`
+- otherwise, update the workflow with `PUT /workflows/{id}` using only `name`, `nodes`, `connections`, and `settings`
 
-After a successful push, the CLI re-writes the workflow and sidecar from the server response so local state stays canonical.
+If local edits also changed unsupported top-level fields, `push` fails explicitly instead of silently dropping them.
+
+After a successful push, the CLI re-fetches the workflow and re-writes the workflow and sidecar from that remote snapshot so local state stays canonical.
 
 ## 10. Diff Model
 
@@ -373,7 +375,8 @@ Behavior:
 - `workflow show` summarizes local nodes, edges, and webhook URLs, using the explicit `--instance`, the tracked sidecar instance, or the repo default instance for local drafts
 - `workflow create` requires a repo because it writes the new tracked file and sidecar into the configured workflow directory
 - `workflow create` refuses files that already have a sidecar and expects you to use `push` for tracked workflows
-- `workflow create` removes local `id` and `active` before the create request, ensures execution-saving `settings` defaults exist, normalizes webhook nodes for remote creation, and stores the server response as the new source of truth
+- `workflow create` removes local `id` and `active` before the create request, ensures execution-saving `settings` defaults exist, normalizes webhook nodes for remote creation, and re-fetches the created workflow before storing the new tracked state
+- `credential set` requires an existing credential ID; the public API available to this CLI does not expose credential listing
 - `workflow rm` accepts a workflow file path, workflow ID, or exact workflow name
 - `workflow rm <file>` removes a local draft directly; for tracked files it also deletes the remote workflow unless `--local-only` is set
 - `workflow rm <id-or-name>` deletes the remote workflow and removes matching tracked local artifacts unless `--keep-local` is set
@@ -533,7 +536,7 @@ The user concern that started this implementation was valid: developers need mor
 The current answer is:
 
 - use `ls` and `get` for fast inspection
-- use `activate` and `deactivate` for workflow state changes
+- use `activate` and `deactivate` for workflow state changes; they wait for the remote state to converge and refresh tracked local artifacts when available
 - use `trigger` for webhook-based development flows
 
 `trigger` supports:

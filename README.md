@@ -204,6 +204,8 @@ Set a credential reference on a node:
 n8nc credential set workflows/order-alert--wf-draft.workflow.json "HTTP Request" --type httpBasicAuth --id cred-123 --name "Primary Basic Auth"
 ```
 
+`credential set` intentionally uses an existing credential ID. The public n8n API on this instance does not expose credential listing, so you still source credential IDs from the n8n UI or another trusted system.
+
 Connect two nodes:
 
 ```bash
@@ -271,7 +273,7 @@ workflows/<workflow-slug>--<workflow-id>.workflow.json
 workflows/<workflow-slug>--<workflow-id>.meta.json
 ```
 
-`workflow new` creates a local `.workflow.json` draft without a sidecar. `workflow create` turns a sidecar-free local file into a tracked workflow by creating it remotely, writing the tracked file plus sidecar, and removing the original in-repo draft when the tracked path changes.
+`workflow new` creates a local `.workflow.json` draft without a sidecar. `workflow create` turns a sidecar-free local file into a tracked workflow by creating it remotely, re-fetching the created workflow from n8n as the canonical source of truth, writing the tracked file plus sidecar, and removing the original in-repo draft when the tracked path changes.
 
 `workflow show` now falls back to the repo default instance when a local draft has no sidecar yet, so draft webhook files still render full production and test URLs.
 
@@ -296,6 +298,7 @@ Webhook nodes get safer defaults in the local authoring flow:
 - webhook nodes automatically get a `webhookId`
 - setting `path` normalizes leading and trailing slashes and keeps `webhookId` in sync while it still uses the auto-derived value
 - `workflow create`, `workflow show`, and `activate` surface resolved webhook URLs
+- `activate` and `deactivate` now wait until n8n reports the requested state and refresh matching tracked local artifacts when they exist
 
 The sidecar stores:
 
@@ -323,6 +326,8 @@ If remote refresh fails for a tracked workflow, `status --refresh` still returns
 
 `push` uses the sidecar metadata as a lease check and refuses to overwrite a workflow that changed remotely since the last `pull`.
 
+`push` only sends the API-supported mutable workflow fields: `name`, `nodes`, `connections`, and `settings`. If local edits also changed unsupported top-level fields such as `active`, the command fails explicitly instead of silently dropping those changes.
+
 `pull`, successful `push`, and `validate` all scan tracked workflow files for likely sensitive literals such as inline tokens, private keys, and URLs with embedded credentials.
 
 When `runs ls --workflow ...` returns no rows for an active workflow whose settings do not explicitly save successful production executions, the CLI includes a note explaining that successful runs may be omitted from execution history.
@@ -334,8 +339,10 @@ When `runs ls --workflow ...` returns no rows for an active workflow whose setti
 - Deterministic: workflows are canonicalized before storage and hashing.
 - Local authoring first: `workflow new`, `workflow show`, `workflow rm`, `node ls`, `node add`, `node set`, `node rename`, `node rm`, `expr set`, `credential set`, `conn add`, and `conn rm` edit local workflow files directly.
 - Draft-to-tracked flow: `workflow create` publishes a local draft through the official workflow-create API and converts it into a tracked file plus sidecar.
+- Server-truth tracking: `workflow create` and successful `push` both re-fetch the remote workflow before storing it locally, so lease hashes are based on the same shape that later reads use.
 - Full cleanup path: `workflow rm` removes the remote workflow and cleans tracked repo artifacts instead of forcing raw API calls.
 - Better webhook ergonomics: webhook nodes are normalized for remote creation, publish and activate return the resolved URLs, and webhook trigger failures explain likely `404` causes.
+- Truthful lifecycle commands: `activate` and `deactivate` only report success after the remote workflow state converges and tracked local files are refreshed.
 - Better execution ergonomics: new drafts default to saved successful executions, and `runs ls` explains one common “why is history empty?” workflow-settings pitfall.
 - Explicit refresh: remote drift is only reported when you ask for it with `--refresh`.
 - Sensitive-data aware: `validate` emits warnings, not hard failures, for likely secret literals in tracked workflow files.
