@@ -322,6 +322,34 @@ async fn doctor_json_reports_success() {
 }
 
 #[tokio::test]
+async fn validate_json_reports_sensitive_warnings_without_failing() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    fs::write(
+        repo.path()
+            .join("workflows")
+            .join("sensitive.workflow.json"),
+        serde_json::to_string_pretty(&workflow_with_sensitive_literal())
+            .expect("serialize workflow"),
+    )
+    .expect("write workflow");
+
+    let output = base_command(repo.path())
+        .arg("validate")
+        .output()
+        .expect("run validate");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "validate");
+    assert_eq!(envelope["data"]["error_count"], 0);
+    assert_eq!(envelope["data"]["warning_count"], 1);
+    assert_eq!(envelope["data"]["diagnostics"][0]["severity"], "warning");
+}
+
+#[tokio::test]
 async fn runs_get_json_details_returns_execution_payload() {
     let server = MockServer::start().await;
     let repo = tempdir().expect("tempdir");
@@ -808,6 +836,57 @@ async fn doctor_json_reports_failure_with_attached_data() {
     assert_eq!(api_check["status"], "skip");
 }
 
+#[tokio::test]
+async fn doctor_json_fails_for_sensitive_workflow_literals() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    fs::write(
+        repo.path()
+            .join("workflows")
+            .join("sensitive.workflow.json"),
+        serde_json::to_string_pretty(&workflow_with_sensitive_literal())
+            .expect("serialize workflow"),
+    )
+    .expect("write workflow");
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "wf-1", "name": "Alpha Workflow"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("doctor")
+        .arg("--instance")
+        .arg("mock")
+        .output()
+        .expect("run doctor sensitive");
+
+    assert_eq!(output.status.code(), Some(13));
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "doctor.failed");
+    let checks = envelope["data"]["checks"].as_array().expect("check list");
+    let sensitive_check = checks
+        .iter()
+        .find(|check| check["name"] == "sensitive_data")
+        .expect("sensitive data check");
+    assert_eq!(sensitive_check["status"], "fail");
+    assert!(
+        sensitive_check["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("potential sensitive-data warning")
+    );
+}
+
 fn base_command(repo_root: &Path) -> Command {
     let mut command = Command::cargo_bin("n8nc").expect("n8nc binary");
     command
@@ -844,6 +923,22 @@ fn workflow_fixture(id: &str, name: &str, active: bool) -> Value {
         "name": name,
         "active": active,
         "nodes": [],
+        "connections": {}
+    })
+}
+
+fn workflow_with_sensitive_literal() -> Value {
+    json!({
+        "id": "wf-sensitive",
+        "name": "Sensitive Workflow",
+        "nodes": [
+            {
+                "name": "HTTP Request",
+                "parameters": {
+                    "password": "super-secret-value"
+                }
+            }
+        ],
         "connections": {}
     })
 }

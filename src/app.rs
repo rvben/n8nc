@@ -35,7 +35,7 @@ use crate::{
         refresh_local_status, scan_local_status, sidecar_path_for, store_workflow, workflow_active,
         workflow_id, workflow_name, workflow_updated_at,
     },
-    validate::validate_workflow_path,
+    validate::{Severity, sensitive_data_diagnostics, validate_workflow_path},
 };
 
 #[derive(Debug, Clone)]
@@ -451,6 +451,75 @@ async fn build_doctor_report(
         Some("Set `default_instance` to one of the configured aliases.".to_string()),
     );
 
+    if workflow_dir.is_dir() {
+        match scan_repo_for_sensitive_workflows(&workflow_dir) {
+            Ok((workflow_count, warning_count, sample_files)) => {
+                if workflow_count == 0 {
+                    add_doctor_check(
+                        &mut checks,
+                        DoctorCheckStatus::Ok,
+                        "repo",
+                        None,
+                        "sensitive_data",
+                        "No tracked workflow files to scan for sensitive data.".to_string(),
+                        None,
+                    );
+                } else if warning_count == 0 {
+                    add_doctor_check(
+                        &mut checks,
+                        DoctorCheckStatus::Ok,
+                        "repo",
+                        None,
+                        "sensitive_data",
+                        format!(
+                            "Scanned {workflow_count} workflow file(s), no sensitive literals detected."
+                        ),
+                        None,
+                    );
+                } else {
+                    let sample_suffix = if sample_files.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" Example file(s): {}.", sample_files.join(", "))
+                    };
+                    add_doctor_check(
+                        &mut checks,
+                        DoctorCheckStatus::Fail,
+                        "repo",
+                        None,
+                        "sensitive_data",
+                        format!(
+                            "Found {warning_count} potential sensitive-data warning(s) across {workflow_count} workflow file(s).{sample_suffix}"
+                        ),
+                        Some(
+                            "Run `n8nc validate` to inspect the findings and move secrets into credentials or env-backed expressions."
+                                .to_string(),
+                        ),
+                    );
+                }
+            }
+            Err(err) => add_doctor_check(
+                &mut checks,
+                DoctorCheckStatus::Fail,
+                "repo",
+                None,
+                "sensitive_data",
+                err.message,
+                err.suggestion,
+            ),
+        }
+    } else {
+        add_doctor_check(
+            &mut checks,
+            DoctorCheckStatus::Skip,
+            "repo",
+            None,
+            "sensitive_data",
+            "Skipped sensitive-data scan because the workflow directory is missing.".to_string(),
+            None,
+        );
+    }
+
     let instance_aliases: Vec<String> = match selected_instance.clone() {
         Some(alias) => vec![alias],
         None => repo.config.instances.keys().cloned().collect(),
@@ -697,6 +766,55 @@ fn print_doctor_report(report: &DoctorReport) {
     println!(
         "Summary: ok={}, fail={}, skip={}",
         report.summary.ok, report.summary.fail, report.summary.skip
+    );
+}
+
+fn scan_repo_for_sensitive_workflows(
+    workflow_dir: &Path,
+) -> Result<(usize, usize, Vec<String>), AppError> {
+    let workflow_files: Vec<PathBuf> = collect_json_targets(&[workflow_dir.to_path_buf()], None)?
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .map(|name| name.ends_with(".workflow.json"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let mut warning_count = 0usize;
+    let mut sample_files = Vec::new();
+    for file in &workflow_files {
+        let warnings = sensitive_data_diagnostics(file)?;
+        if !warnings.is_empty() {
+            warning_count += warnings.len();
+            if sample_files.len() < 3 {
+                sample_files.push(
+                    file.strip_prefix(workflow_dir)
+                        .unwrap_or(file)
+                        .display()
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    Ok((workflow_files.len(), warning_count, sample_files))
+}
+
+fn print_sensitive_warning_summary(workflow_path: &Path, warning_count: usize) {
+    if warning_count == 0 {
+        return;
+    }
+
+    println!(
+        "Warning: found {} potential sensitive-data warning(s) in {}.",
+        warning_count,
+        workflow_path.display()
+    );
+    println!(
+        "Run `n8nc validate {}` to inspect the findings.",
+        workflow_path.display()
     );
 }
 
@@ -954,17 +1072,20 @@ async fn cmd_pull(context: &Context, args: PullArgs) -> Result<(), AppError> {
     let (client, _, _) = remote_client(&repo, Some(&alias), "pull")?;
     let workflow = client.resolve_workflow(&args.identifier).await?;
     let stored = store_workflow(&repo, &alias, &workflow)?;
+    let warnings = sensitive_data_diagnostics(&stored.workflow_path)?;
+    let warning_count = warnings.len();
 
     if context.json {
-        emit_json(
-            "pull",
-            &json!({
-                "instance": alias,
-                "workflow_path": stored.workflow_path,
-                "meta_path": stored.meta_path,
-                "workflow_id": stored.meta.workflow_id,
-            }),
-        )
+        let mut data = serde_json::Map::new();
+        data.insert("instance".to_string(), json!(alias));
+        data.insert("workflow_path".to_string(), json!(stored.workflow_path));
+        data.insert("meta_path".to_string(), json!(stored.meta_path));
+        data.insert("workflow_id".to_string(), json!(stored.meta.workflow_id));
+        data.insert("warning_count".to_string(), json!(warning_count));
+        if warning_count > 0 {
+            data.insert("diagnostics".to_string(), json!(warnings));
+        }
+        emit_json("pull", &Value::Object(data))
     } else {
         println!(
             "Pulled {} -> {}",
@@ -972,6 +1093,7 @@ async fn cmd_pull(context: &Context, args: PullArgs) -> Result<(), AppError> {
             stored.workflow_path.display()
         );
         println!("Metadata: {}", stored.meta_path.display());
+        print_sensitive_warning_summary(&stored.workflow_path, warning_count);
         Ok(())
     }
 }
@@ -1050,20 +1172,24 @@ async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), AppError> {
         .update_workflow(&meta.workflow_id, &canonical)
         .await?;
     let stored = store_workflow(&repo, &alias, &updated)?;
+    let warnings = sensitive_data_diagnostics(&stored.workflow_path)?;
+    let warning_count = warnings.len();
 
     if context.json {
-        emit_json(
-            "push",
-            &json!({
-                "workflow_id": meta.workflow_id,
-                "changed": true,
-                "workflow_path": stored.workflow_path,
-                "meta_path": stored.meta_path,
-            }),
-        )
+        let mut data = serde_json::Map::new();
+        data.insert("workflow_id".to_string(), json!(meta.workflow_id));
+        data.insert("changed".to_string(), json!(true));
+        data.insert("workflow_path".to_string(), json!(stored.workflow_path));
+        data.insert("meta_path".to_string(), json!(stored.meta_path));
+        data.insert("warning_count".to_string(), json!(warning_count));
+        if warning_count > 0 {
+            data.insert("diagnostics".to_string(), json!(warnings));
+        }
+        emit_json("push", &Value::Object(data))
     } else {
         println!("Pushed {}.", meta.workflow_id);
         println!("Updated local file: {}", stored.workflow_path.display());
+        print_sensitive_warning_summary(&stored.workflow_path, warning_count);
         Ok(())
     }
 }
@@ -1432,7 +1558,11 @@ async fn cmd_validate(context: &Context, args: ValidateArgs) -> Result<(), AppEr
 
     let error_count = diagnostics
         .iter()
-        .filter(|diag| diag.severity == crate::validate::Severity::Error)
+        .filter(|diag| diag.severity == Severity::Error)
+        .count();
+    let warning_count = diagnostics
+        .iter()
+        .filter(|diag| diag.severity == Severity::Warning)
         .count();
 
     if context.json {
@@ -1444,6 +1574,7 @@ async fn cmd_validate(context: &Context, args: ValidateArgs) -> Result<(), AppEr
             .with_json_data(json!({
                 "files_checked": workflow_files.len(),
                 "error_count": error_count,
+                "warning_count": warning_count,
                 "diagnostics": diagnostics,
             })));
         }
@@ -1453,26 +1584,34 @@ async fn cmd_validate(context: &Context, args: ValidateArgs) -> Result<(), AppEr
             &json!({
                 "files_checked": workflow_files.len(),
                 "error_count": error_count,
+                "warning_count": warning_count,
                 "diagnostics": diagnostics,
             }),
         )?;
     } else if diagnostics.is_empty() {
         println!(
-            "Validated {} workflow file(s): 0 errors.",
+            "Validated {} workflow file(s): 0 errors, 0 warnings.",
             workflow_files.len()
         );
     } else {
         for diagnostic in &diagnostics {
             let path = diagnostic.path.as_deref().unwrap_or("-");
             println!(
-                "[error] {} {} {}",
-                diagnostic.file, path, diagnostic.message
+                "[{}] {} {} {}",
+                match diagnostic.severity {
+                    Severity::Error => "error",
+                    Severity::Warning => "warning",
+                },
+                diagnostic.file,
+                path,
+                diagnostic.message
             );
         }
         println!(
-            "Validated {} workflow file(s): {} error(s).",
+            "Validated {} workflow file(s): {} error(s), {} warning(s).",
             workflow_files.len(),
-            error_count
+            error_count,
+            warning_count
         );
     }
 
