@@ -59,6 +59,48 @@ impl Match for WorkflowWebhookPayloadMatcher {
 }
 
 #[derive(Debug)]
+struct WorkflowSettingsMatcher;
+
+impl Match for WorkflowSettingsMatcher {
+    fn matches(&self, request: &Request) -> bool {
+        let Ok(payload) = serde_json::from_slice::<Value>(&request.body) else {
+            return false;
+        };
+        let settings = payload.get("settings").and_then(Value::as_object);
+        settings
+            .and_then(|settings| settings.get("executionOrder"))
+            .and_then(Value::as_str)
+            == Some("v1")
+            && settings
+                .and_then(|settings| settings.get("saveDataSuccessExecution"))
+                .and_then(Value::as_str)
+                == Some("all")
+            && settings
+                .and_then(|settings| settings.get("saveDataErrorExecution"))
+                .and_then(Value::as_str)
+                == Some("all")
+            && settings
+                .and_then(|settings| settings.get("saveManualExecutions"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            && settings
+                .and_then(|settings| settings.get("saveExecutionProgress"))
+                .and_then(Value::as_bool)
+                == Some(true)
+    }
+}
+
+#[derive(Debug)]
+struct EchoJsonResponder;
+
+impl Respond for EchoJsonResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body = serde_json::from_slice::<Value>(&request.body).unwrap_or_else(|_| json!({}));
+        ResponseTemplate::new(200).set_body_json(body)
+    }
+}
+
+#[derive(Debug)]
 struct SequenceResponder {
     calls: Arc<AtomicUsize>,
 }
@@ -944,6 +986,11 @@ async fn workflow_new_json_creates_local_draft_file() {
     let workflow = read_json_file(Path::new(workflow_path));
     assert_eq!(workflow["id"], "wf-draft");
     assert_eq!(workflow["name"], "Order Alert");
+    assert_eq!(workflow["settings"]["executionOrder"], "v1");
+    assert_eq!(workflow["settings"]["saveDataSuccessExecution"], "all");
+    assert_eq!(workflow["settings"]["saveDataErrorExecution"], "all");
+    assert_eq!(workflow["settings"]["saveManualExecutions"], true);
+    assert_eq!(workflow["settings"]["saveExecutionProgress"], true);
     assert_eq!(workflow["nodes"], json!([]));
 }
 
@@ -966,6 +1013,7 @@ async fn workflow_create_json_promotes_draft_to_tracked_workflow() {
     Mock::given(method("POST"))
         .and(path("/api/v1/workflows"))
         .and(header("x-n8n-api-key", "test-token"))
+        .and(WorkflowSettingsMatcher)
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": {
                 "id": "wf-remote",
@@ -1630,6 +1678,93 @@ async fn trigger_json_404_includes_webhook_guidance() {
             .as_str()
             .unwrap_or_default()
             .contains("workflow show")
+    );
+}
+
+#[tokio::test]
+async fn trigger_json_defaults_content_type_for_json_data() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("POST"))
+        .and(path("/webhook/echo"))
+        .and(header("content-type", "application/json"))
+        .respond_with(EchoJsonResponder)
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("trigger")
+        .arg("--instance")
+        .arg("mock")
+        .arg("/webhook/echo")
+        .arg("--data")
+        .arg("{\"hello\":\"world\"}")
+        .output()
+        .expect("run trigger echo");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["status"], 200);
+    assert_eq!(envelope["data"]["body"]["hello"], "world");
+}
+
+#[tokio::test]
+async fn runs_ls_json_reports_note_when_successful_executions_are_not_saved() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-1",
+                "name": "No Saved Runs",
+                "active": true,
+                "settings": {},
+                "nodes": [],
+                "connections": {}
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "5"))
+        .and(query_param("workflowId", "wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": []
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("runs")
+        .arg("ls")
+        .arg("--instance")
+        .arg("mock")
+        .arg("--workflow")
+        .arg("wf-1")
+        .arg("--limit")
+        .arg("5")
+        .output()
+        .expect("run runs ls note");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["count"], 0);
+    assert!(
+        envelope["data"]["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("saveDataSuccessExecution = unset")
     );
 }
 
