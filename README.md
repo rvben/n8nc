@@ -24,6 +24,8 @@ Implemented commands:
 - `auth remove`
 - `ls`
 - `get`
+- `runs ls`
+- `runs get`
 - `pull`
 - `push`
 - `status`
@@ -66,6 +68,18 @@ Pull one into `workflows/`:
 
 ```bash
 n8nc pull <workflow-id-or-exact-name> --instance prod
+```
+
+Inspect recent executions:
+
+```bash
+n8nc runs ls --instance prod --limit 10
+```
+
+Inspect one execution with node-level details:
+
+```bash
+n8nc runs get <execution-id> --instance prod --details
 ```
 
 Validate tracked workflows:
@@ -161,6 +175,7 @@ Entries that cannot be compared remotely still show their local state and count 
 - Agent-safe: every command supports `--json`.
 - Deterministic: workflows are canonicalized before storage and hashing.
 - Explicit refresh: remote drift is only reported when you ask for it with `--refresh`.
+- Dev-loop friendly: `runs ls` and `runs get --details` cover recent execution inspection without leaving the terminal.
 - Honest triggering: `trigger` is an HTTP call helper for webhook URLs, not a guessed “execute workflow” API wrapper.
 
 ## Spec

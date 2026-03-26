@@ -9,6 +9,7 @@ It is intentionally narrower than the original brainstorm. The tool is now speci
 `n8nc` is for:
 
 - listing workflows from a configured n8n instance
+- listing recent executions and fetching one execution by ID
 - fetching one workflow into a canonical local artifact
 - validating and formatting local workflow files
 - pushing a tracked workflow back safely
@@ -35,6 +36,8 @@ n8nc
 ├── auth remove
 ├── ls
 ├── get
+├── runs ls
+├── runs get
 ├── pull
 ├── push
 ├── status
@@ -122,6 +125,13 @@ The CLI currently assumes these workflow endpoints exist and are reachable throu
 - `PUT /workflows/{id}`
 - `POST /workflows/{id}/activate`
 - `POST /workflows/{id}/deactivate`
+
+The execution commands currently assume these endpoints exist and are reachable through the public API:
+
+- `GET /executions`
+- `GET /executions/{id}`
+
+`runs get --details` uses `includeData=true` when fetching a single execution.
 
 `trigger` does not use the public API. It makes a direct HTTP request to a full URL or a path resolved against the configured instance base URL.
 
@@ -289,6 +299,38 @@ Additional JSON fields in refresh mode:
 - node names are unique
 - connection targets point to existing node names
 - if a sidecar exists, `workflow_id` matches the workflow file
+
+## 12. Execution Inspection
+
+`runs ls` returns recent executions from the remote instance.
+
+Current supported options:
+
+- `--limit`
+- `--workflow <id-or-exact-name>`
+- `--status <value>`
+
+List rows currently include:
+
+- execution ID
+- workflow ID
+- workflow name when it can be resolved
+- status
+- mode
+- started and stopped timestamps
+- computed duration in milliseconds when both timestamps exist
+
+`runs get <execution-id>` returns the execution summary.
+
+`runs get <execution-id> --details` fetches the detailed execution payload and, in human output, summarizes:
+
+- workflow name and ID
+- status and mode
+- start and stop timestamps
+- computed duration
+- node-level execution status
+- node execution time
+- output item counts per node based on `data.resultData.runData`
 
 The current diagnostics model is intentionally simple:
 
