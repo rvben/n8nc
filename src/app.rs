@@ -24,7 +24,8 @@ use crate::{
         ExprArgs, ExprCommand, ExprSetArgs, FmtArgs, GetArgs, IdArgs, InitArgs, ListArgs,
         NodeAddArgs, NodeArgs, NodeCommand, NodeSetArgs, PullArgs, PushArgs, RunsArgs, RunsCommand,
         RunsGetArgs, RunsListArgs, RunsTimeArgs, RunsWatchArgs, StatusArgs, TriggerArgs,
-        ValidateArgs, ValueModeArgs, WorkflowArgs, WorkflowCommand, WorkflowNewArgs,
+        ValidateArgs, ValueModeArgs, WorkflowArgs, WorkflowCommand, WorkflowCreateArgs,
+        WorkflowNewArgs,
     },
     config::{
         InstanceConfig, LoadedRepo, RepoConfig, ensure_gitignore, ensure_repo_layout, load_repo,
@@ -1208,6 +1209,7 @@ async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), AppError> {
 async fn cmd_workflow(context: &Context, args: WorkflowArgs) -> Result<(), AppError> {
     match args.command {
         WorkflowCommand::New(args) => cmd_workflow_new(context, args).await,
+        WorkflowCommand::Create(args) => cmd_workflow_create(context, args).await,
     }
 }
 
@@ -1236,6 +1238,89 @@ async fn cmd_workflow_new(context: &Context, args: WorkflowNewArgs) -> Result<()
             json!(workflow_id_string(&result.workflow)),
         )],
     )
+}
+
+async fn cmd_workflow_create(context: &Context, args: WorkflowCreateArgs) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let alias = resolve_instance_alias(&repo, args.remote.instance.as_deref(), "workflow")?;
+    let source_path = resolve_local_file_path(context, &args.file)?;
+    let source_meta_path = sidecar_path_for(&source_path);
+    if source_meta_path.exists() {
+        return Err(AppError::validation(
+            "workflow",
+            format!(
+                "{} already has a metadata sidecar. Use `n8nc push` for tracked workflows.",
+                source_path.display()
+            ),
+        ));
+    }
+
+    let payload = workflow_create_payload(&source_path)?;
+    let (client, _, _) = remote_client(&repo, Some(&alias), "workflow")?;
+    let mut created = client.create_workflow(&payload).await?;
+    let created_id = workflow_id(&created).ok_or_else(|| {
+        AppError::api(
+            "workflow",
+            "api.invalid_response",
+            "Created workflow response was missing `id`.",
+        )
+    })?;
+
+    if args.activate {
+        client.activate_workflow(&created_id).await?;
+        let Some(remote_workflow) = client.get_workflow_by_id(&created_id).await? else {
+            return Err(AppError::not_found(
+                "workflow",
+                format!("Workflow `{created_id}` was created but could not be re-fetched."),
+            ));
+        };
+        created = remote_workflow
+            .get("data")
+            .cloned()
+            .unwrap_or(remote_workflow);
+    }
+
+    let stored = store_workflow(&repo, &alias, &created)?;
+    let (source_removed, cleanup_warning) =
+        finalize_created_workflow_source(&repo, &source_path, &stored.workflow_path);
+
+    let warnings = sensitive_data_diagnostics(&stored.workflow_path)?;
+    let warning_count = warnings.len();
+    if context.json {
+        let mut data = serde_json::Map::new();
+        data.insert("instance".to_string(), json!(alias));
+        data.insert("source_path".to_string(), json!(source_path));
+        data.insert("source_removed".to_string(), json!(source_removed));
+        data.insert("workflow_path".to_string(), json!(stored.workflow_path));
+        data.insert("meta_path".to_string(), json!(stored.meta_path));
+        data.insert("workflow_id".to_string(), json!(stored.meta.workflow_id));
+        data.insert("active".to_string(), json!(workflow_active(&created)));
+        data.insert("warning_count".to_string(), json!(warning_count));
+        if warning_count > 0 {
+            data.insert("diagnostics".to_string(), json!(warnings));
+        }
+        if let Some(cleanup_warning) = cleanup_warning {
+            data.insert("cleanup_warning".to_string(), json!(cleanup_warning));
+        }
+        emit_json("workflow", &Value::Object(data))
+    } else {
+        println!(
+            "Created remote workflow {} -> {}",
+            stored.meta.workflow_id,
+            stored.workflow_path.display()
+        );
+        println!("Metadata: {}", stored.meta_path.display());
+        if source_removed {
+            println!("Removed original draft: {}", source_path.display());
+        } else if source_path != stored.workflow_path {
+            println!("Original local file kept at {}", source_path.display());
+        }
+        if let Some(cleanup_warning) = cleanup_warning {
+            println!("{cleanup_warning}");
+        }
+        print_sensitive_warning_summary(&stored.workflow_path, warning_count);
+        Ok(())
+    }
 }
 
 async fn cmd_node(context: &Context, args: NodeArgs) -> Result<(), AppError> {
@@ -2220,6 +2305,71 @@ fn parse_node_value(
     Ok(Value::String(value.to_string()))
 }
 
+fn workflow_create_payload(path: &Path) -> Result<Value, AppError> {
+    let diagnostics = validate_workflow_path(path)?;
+    let error_count = diagnostics
+        .iter()
+        .filter(|diag| diag.severity == Severity::Error)
+        .count();
+    let warning_count = diagnostics
+        .iter()
+        .filter(|diag| diag.severity == Severity::Warning)
+        .count();
+    if error_count > 0 {
+        return Err(AppError::validation(
+            "workflow",
+            format!(
+                "Local workflow file has {error_count} validation error(s) and cannot be created remotely."
+            ),
+        )
+        .with_json_data(json!({
+            "files_checked": 1,
+            "error_count": error_count,
+            "warning_count": warning_count,
+            "diagnostics": diagnostics,
+        })));
+    }
+
+    let workflow = load_workflow_file(path, "workflow")?;
+    let mut payload = canonicalize_workflow(&workflow)?;
+    let object = payload.as_object_mut().ok_or_else(|| {
+        AppError::validation("workflow", "Workflow payload must be a JSON object.")
+    })?;
+    object.remove("id");
+    object.remove("active");
+    if !object.contains_key("settings") {
+        object.insert(
+            "settings".to_string(),
+            Value::Object(serde_json::Map::new()),
+        );
+    }
+
+    let has_name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_name {
+        return Err(AppError::validation(
+            "workflow",
+            "Workflow file must include a non-empty `name` before it can be created remotely.",
+        ));
+    }
+    if !matches!(object.get("nodes"), Some(Value::Array(_))) {
+        return Err(AppError::validation(
+            "workflow",
+            "Workflow file must include a `nodes` array before it can be created remotely.",
+        ));
+    }
+    if !matches!(object.get("connections"), Some(Value::Object(_))) {
+        return Err(AppError::validation(
+            "workflow",
+            "Workflow file must include a `connections` object before it can be created remotely.",
+        ));
+    }
+
+    Ok(payload)
+}
+
 fn read_request_body(
     data: Option<String>,
     data_file: Option<PathBuf>,
@@ -2341,6 +2491,32 @@ fn context_root(context: &Context) -> Result<PathBuf, AppError> {
                 format!("Failed to resolve current directory: {err}"),
             )
         })
+    }
+}
+
+fn finalize_created_workflow_source(
+    repo: &LoadedRepo,
+    source_path: &Path,
+    tracked_path: &Path,
+) -> (bool, Option<String>) {
+    if source_path == tracked_path {
+        return (false, None);
+    }
+
+    let workflow_root = workflow_dir(&repo.root, &repo.config);
+    if !source_path.starts_with(&workflow_root) {
+        return (false, None);
+    }
+
+    match fs::remove_file(source_path) {
+        Ok(()) => (true, None),
+        Err(err) => (
+            false,
+            Some(format!(
+                "Warning: failed to remove original draft {}: {err}",
+                source_path.display()
+            )),
+        ),
     }
 }
 

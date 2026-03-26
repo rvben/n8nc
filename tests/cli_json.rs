@@ -917,6 +917,136 @@ async fn workflow_new_json_creates_local_draft_file() {
 }
 
 #[tokio::test]
+async fn workflow_create_json_promotes_draft_to_tracked_workflow() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    let draft_path = repo
+        .path()
+        .join("workflows")
+        .join("order-alert--wf-draft.workflow.json");
+    fs::write(
+        &draft_path,
+        serde_json::to_string_pretty(&workflow_fixture("wf-draft", "Order Alert", false))
+            .expect("serialize draft"),
+    )
+    .expect("write draft");
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-remote",
+                "name": "Order Alert",
+                "nodes": [],
+                "connections": {},
+                "settings": {},
+                "active": false
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("workflow")
+        .arg("create")
+        .arg("--instance")
+        .arg("mock")
+        .arg("workflows/order-alert--wf-draft.workflow.json")
+        .output()
+        .expect("run workflow create");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "workflow");
+    assert_eq!(envelope["data"]["workflow_id"], "wf-remote");
+    assert_eq!(envelope["data"]["source_removed"], true);
+
+    let workflow_path = envelope["data"]["workflow_path"]
+        .as_str()
+        .expect("workflow path");
+    let meta_path = envelope["data"]["meta_path"].as_str().expect("meta path");
+    assert!(!draft_path.exists());
+    assert!(Path::new(workflow_path).exists());
+    assert!(Path::new(meta_path).exists());
+
+    let meta = read_json_file(Path::new(meta_path));
+    assert_eq!(meta["workflow_id"], "wf-remote");
+    assert_eq!(meta["instance"], "mock");
+}
+
+#[tokio::test]
+async fn workflow_create_activate_json_fetches_active_remote_workflow() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    fs::write(
+        repo.path()
+            .join("workflows")
+            .join("activate-me--wf-draft.workflow.json"),
+        serde_json::to_string_pretty(&workflow_fixture("wf-draft", "Activate Me", false))
+            .expect("serialize draft"),
+    )
+    .expect("write draft");
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-created",
+                "name": "Activate Me",
+                "nodes": [],
+                "connections": {},
+                "settings": {}
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/wf-created/activate"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-created"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-created",
+                "name": "Activate Me",
+                "active": true,
+                "nodes": [],
+                "connections": {},
+                "settings": {}
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("workflow")
+        .arg("create")
+        .arg("--instance")
+        .arg("mock")
+        .arg("--activate")
+        .arg("workflows/activate-me--wf-draft.workflow.json")
+        .output()
+        .expect("run workflow create activate");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["workflow_id"], "wf-created");
+    assert_eq!(envelope["data"]["active"], true);
+}
+
+#[tokio::test]
 async fn node_add_and_set_json_update_local_workflow() {
     let server = MockServer::start().await;
     let repo = tempdir().expect("tempdir");

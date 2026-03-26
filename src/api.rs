@@ -282,6 +282,13 @@ impl ApiClient {
         Ok(extract_data(response))
     }
 
+    pub async fn create_workflow(&self, payload: &Value) -> Result<Value, AppError> {
+        let response = self
+            .request_json(Method::POST, "workflows", &[], Some(payload))
+            .await?;
+        Ok(extract_data(response))
+    }
+
     pub async fn activate_workflow(&self, workflow_id: &str) -> Result<(), AppError> {
         self.request_json(
             Method::POST,
@@ -887,6 +894,40 @@ mod tests {
 
         assert_eq!(execution["id"], "42");
         assert!(execution.get("data").is_some());
+    }
+
+    #[tokio::test]
+    async fn create_workflow_posts_payload_and_extracts_data() {
+        let server = MockServer::start().await;
+        let client = test_client(&server);
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/workflows"))
+            .and(header("x-n8n-api-key", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "wf-created",
+                    "name": "Created Workflow",
+                    "nodes": [],
+                    "connections": {},
+                    "settings": {}
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let workflow = client
+            .create_workflow(&json!({
+                "name": "Created Workflow",
+                "nodes": [],
+                "connections": {},
+                "settings": {}
+            }))
+            .await
+            .expect("create workflow");
+
+        assert_eq!(workflow["id"], "wf-created");
+        assert_eq!(workflow["name"], "Created Workflow");
     }
 
     #[tokio::test]

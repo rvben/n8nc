@@ -249,6 +249,8 @@ pub struct WorkflowArgs {
 pub enum WorkflowCommand {
     /// Create a new local workflow draft
     New(WorkflowNewArgs),
+    /// Create a remote workflow from a local file and start tracking it
+    Create(WorkflowCreateArgs),
 }
 
 #[derive(Debug, Args)]
@@ -264,6 +266,16 @@ pub struct WorkflowNewArgs {
     /// Create the workflow as active instead of inactive
     #[arg(long)]
     pub active: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowCreateArgs {
+    #[command(flatten)]
+    pub remote: RemoteArgs,
+    pub file: PathBuf,
+    /// Activate the workflow immediately after creation
+    #[arg(long)]
+    pub activate: bool,
 }
 
 #[derive(Debug, Args)]
