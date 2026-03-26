@@ -12,6 +12,7 @@ It is intentionally narrower than the original brainstorm. The tool is now speci
 - listing recent executions and fetching one execution by ID
 - fetching one workflow into a canonical local artifact
 - creating local workflow drafts and editing local workflow JSON structurally
+- creating a remote workflow from a local file and converting it into a tracked artifact
 - validating and formatting local workflow files
 - pushing a tracked workflow back safely
 - activating and deactivating workflows
@@ -21,7 +22,7 @@ It is intentionally narrower than the original brainstorm. The tool is now speci
 
 - promoting a workflow across multiple environments
 - remapping credential IDs or project bindings between instances
-- creating a remote workflow from a local file through the public API
+- renaming or removing nodes safely across connection-key rewrites
 - generic execution control through undocumented or unverified endpoints
 
 ## 2. Command Surface
@@ -44,6 +45,7 @@ n8nc
 ├── pull
 ├── push
 ├── workflow new
+├── workflow create
 ├── node add
 ├── node set
 ├── conn add
@@ -98,7 +100,7 @@ workflows/<slug>--<workflow_id>.meta.json
 
 The path is intentionally environment-neutral, but the sidecar binds the file to the instance it came from. That keeps the Git history of a single instance clean while making the current scope explicit.
 
-`workflow new` creates a local `.workflow.json` draft without a sidecar. Drafts are editable, formattable, and validatable, but they remain `untracked` until a future remote-create flow exists.
+`workflow new` creates a local `.workflow.json` draft without a sidecar. `workflow create` takes a sidecar-free local file, creates it remotely, writes the tracked workflow file plus sidecar, and removes the original in-repo draft when the tracked target path changes.
 
 The cache stores one canonical base snapshot per tracked workflow:
 
@@ -336,6 +338,7 @@ The local authoring surface in `0.1.x` is intentionally narrow and file-based.
 Current commands:
 
 - `workflow new <name> [--path <path>] [--id <id>] [--active]`
+- `workflow create <file> --instance <alias> [--activate]`
 - `node add <file> --name <name> --type <node_type> [--type-version <number>] [--x <int>] [--y <int>] [--disabled]`
 - `node set <file> <node> <path> [value] [--json-value|--number|--bool|--null]`
 - `expr set <file> <node> <path> <expression>`
@@ -348,6 +351,9 @@ Behavior:
 - edit commands rewrite the file in canonical JSON form after each successful mutation
 - tracked sidecars are left untouched, so tracked files become locally `modified` until they are pushed
 - edit commands also run the sensitive-data scanner after write and include `warning_count` in JSON output
+- `workflow create` requires a repo because it writes the new tracked file and sidecar into the configured workflow directory
+- `workflow create` refuses files that already have a sidecar and expects you to use `push` for tracked workflows
+- `workflow create` removes local `id` and `active` before the create request, ensures `settings` exists, and stores the server response as the new source of truth
 
 Path rules for `node set` and `expr set`:
 
@@ -547,6 +553,14 @@ Local edit command success payloads include:
 - `warning_count`
 - command-specific fields such as `workflow_id`, `node`, `path`, `from`, `to`, or `credential_type`
 
+`workflow create` success payloads also include:
+
+- `instance`
+- `source_path`
+- `source_removed`
+- `meta_path`
+- optional `active`
+
 ## 16. Exit Codes
 
 - `0`: success
@@ -563,7 +577,7 @@ Local edit command success payloads include:
 ## 17. Known Limits
 
 - The tool is currently strongest when a repo mirrors one n8n instance.
-- `workflow new` creates local drafts only. There is still no public-API-backed remote create flow.
+- `workflow create` depends on the public workflow-create endpoint and still assumes the returned payload can be stored with the same canonicalization rules as pulled workflows.
 - `tags` are preserved structurally, not normalized semantically.
 - `ls` assumes a paginated workflow list response with `data` and optional `nextCursor`.
 - remote drift and API health remain opt-in via `status --refresh`, `diff --refresh`, and `doctor`.
@@ -576,8 +590,8 @@ Local edit command success payloads include:
 
 The next improvements that fit the current design are:
 
-1. remote workflow creation from local files
+1. `node rename`, `node rm`, and `conn rm`
 2. shell completions and packaging
-3. richer execution actions if public endpoints are verified
+3. workflow deletion if the public delete endpoint is verified in the CLI
 4. more contract snapshot coverage for agent-facing JSON
 5. only after that: a real environment-promotion model with explicit mappings and lock files

@@ -32,6 +32,7 @@ Implemented commands:
 - `pull`
 - `push`
 - `workflow new`
+- `workflow create`
 - `node add`
 - `node set`
 - `conn add`
@@ -48,7 +49,7 @@ Implemented commands:
 Not implemented yet:
 
 - environment promotion across `dev/staging/prod`
-- remote workflow creation from local files
+- structured rename/remove operations for nodes and connections
 - a generic “run workflow by ID” command through the public API
 
 For triggering during development, use `trigger` against a webhook or test webhook URL.
@@ -133,6 +134,12 @@ Create a local workflow draft:
 
 ```bash
 n8nc workflow new "Order Alert"
+```
+
+Publish that draft to n8n and start tracking it:
+
+```bash
+n8nc workflow create workflows/order-alert--wf-draft.workflow.json --instance prod
 ```
 
 Add a node to a local workflow file:
@@ -220,7 +227,7 @@ workflows/<workflow-slug>--<workflow-id>.workflow.json
 workflows/<workflow-slug>--<workflow-id>.meta.json
 ```
 
-`workflow new` creates a local `.workflow.json` draft without a sidecar. It is editable, formattable, and validatable, but `push` still only supports updating workflows that were previously pulled and tracked.
+`workflow new` creates a local `.workflow.json` draft without a sidecar. `workflow create` turns a sidecar-free local file into a tracked workflow by creating it remotely, writing the tracked file plus sidecar, and removing the original in-repo draft when the tracked path changes.
 
 The sidecar stores:
 
@@ -256,6 +263,7 @@ If remote refresh fails for a tracked workflow, `status --refresh` still returns
 - Agent-safe: every command supports `--json`.
 - Deterministic: workflows are canonicalized before storage and hashing.
 - Local authoring first: `workflow new`, `node add`, `node set`, `expr set`, `credential set`, and `conn add` edit local workflow files directly.
+- Draft-to-tracked flow: `workflow create` publishes a local draft through the official workflow-create API and converts it into a tracked file plus sidecar.
 - Explicit refresh: remote drift is only reported when you ask for it with `--refresh`.
 - Sensitive-data aware: `validate` emits warnings, not hard failures, for likely secret literals in tracked workflow files.
 - Fast setup check: `doctor` validates repo layout, token availability, live API reachability, and scans tracked workflow files for likely sensitive literals.
