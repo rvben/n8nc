@@ -38,6 +38,10 @@ pub enum Command {
     Pull(PullArgs),
     /// Push a tracked workflow back to n8n
     Push(PushArgs),
+    /// Show local workflow sync state
+    Status(StatusArgs),
+    /// Show local changes for one tracked workflow
+    Diff(DiffArgs),
     /// Activate a workflow
     Activate(IdArgs),
     /// Deactivate a workflow
@@ -132,6 +136,18 @@ pub struct PullArgs {
 pub struct PushArgs {
     #[command(flatten)]
     pub remote: RemoteArgs,
+    pub file: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct StatusArgs {
+    #[arg(value_name = "PATH")]
+    pub paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct DiffArgs {
+    #[arg(value_name = "PATH")]
     pub file: PathBuf,
 }
 

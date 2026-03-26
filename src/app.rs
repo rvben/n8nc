@@ -15,8 +15,9 @@ use crate::{
     },
     canonical::{canonicalize_workflow, hash_value, pretty_json},
     cli::{
-        AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, Cli, Command, FmtArgs, GetArgs, IdArgs,
-        InitArgs, ListArgs, PullArgs, PushArgs, TriggerArgs, ValidateArgs,
+        AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, Cli, Command, DiffArgs, FmtArgs,
+        GetArgs, IdArgs, InitArgs, ListArgs, PullArgs, PushArgs, StatusArgs, TriggerArgs,
+        ValidateArgs,
     },
     config::{
         InstanceConfig, LoadedRepo, RepoConfig, ensure_gitignore, ensure_repo_layout, load_repo,
@@ -24,8 +25,9 @@ use crate::{
     },
     error::AppError,
     repo::{
-        collect_json_targets, format_json_file, load_meta, load_workflow_file, sidecar_path_for,
-        store_workflow, workflow_active, workflow_id, workflow_name, workflow_updated_at,
+        LocalWorkflowState, build_local_diff, collect_json_targets, format_json_file, load_meta,
+        load_workflow_file, scan_local_status, sidecar_path_for, store_workflow, workflow_active,
+        workflow_id, workflow_name, workflow_updated_at,
     },
     validate::validate_workflow_path,
 };
@@ -60,6 +62,15 @@ struct AuthListRow {
     token_source: String,
 }
 
+#[derive(Debug, Serialize)]
+struct StatusSummary {
+    clean: usize,
+    modified: usize,
+    untracked: usize,
+    invalid: usize,
+    orphaned_meta: usize,
+}
+
 pub async fn run(cli: Cli) -> Result<(), AppError> {
     let context = Context {
         json: cli.json,
@@ -73,6 +84,8 @@ pub async fn run(cli: Cli) -> Result<(), AppError> {
         Command::Get(args) => cmd_get(&context, args).await,
         Command::Pull(args) => cmd_pull(&context, args).await,
         Command::Push(args) => cmd_push(&context, args).await,
+        Command::Status(args) => cmd_status(&context, args).await,
+        Command::Diff(args) => cmd_diff(&context, args).await,
         Command::Activate(args) => cmd_activation(&context, args, true).await,
         Command::Deactivate(args) => cmd_activation(&context, args, false).await,
         Command::Trigger(args) => cmd_trigger(&context, args).await,
@@ -420,6 +433,107 @@ async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), AppError> {
     }
 }
 
+async fn cmd_status(context: &Context, args: StatusArgs) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let statuses = scan_local_status(&repo, &args.paths)?;
+    let summary = summarize_statuses(&statuses);
+
+    if context.json {
+        emit_json(
+            "status",
+            &json!({
+                "summary": summary,
+                "workflows": statuses,
+            }),
+        )
+    } else {
+        println!(
+            "{:<14} {:<14} {:<20} {:<20} {}",
+            "STATE", "INSTANCE", "ID", "LOCAL HASH", "FILE"
+        );
+        for status in &statuses {
+            println!(
+                "{:<14} {:<14} {:<20} {:<20} {}",
+                status_label(status.state),
+                status.instance.as_deref().unwrap_or("-"),
+                truncate(status.workflow_id.as_deref().unwrap_or("-"), 20),
+                truncate(status.local_hash.as_deref().unwrap_or("-"), 20),
+                status.file.display(),
+            );
+            if let Some(detail) = &status.detail {
+                println!("  {}", detail);
+            }
+        }
+        println!(
+            "Summary: clean={}, modified={}, untracked={}, invalid={}, orphaned_meta={}",
+            summary.clean,
+            summary.modified,
+            summary.untracked,
+            summary.invalid,
+            summary.orphaned_meta
+        );
+        Ok(())
+    }
+}
+
+async fn cmd_diff(context: &Context, args: DiffArgs) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let file = absolutize(&repo.root, &args.file);
+    let is_workflow_file = file
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| name.ends_with(".workflow.json"))
+        .unwrap_or(false);
+    if !is_workflow_file {
+        return Err(AppError::usage(
+            "diff",
+            "Diff expects a `.workflow.json` file path.",
+        ));
+    }
+    let diff = build_local_diff(&repo, &file)?;
+
+    if context.json {
+        emit_json("diff", &diff)
+    } else {
+        println!("State: {}", status_label(diff.status.state));
+        println!("File: {}", diff.status.file.display());
+        if let Some(workflow_id) = &diff.status.workflow_id {
+            println!("Workflow ID: {workflow_id}");
+        }
+        if let Some(local_hash) = &diff.status.local_hash {
+            println!("Local hash: {local_hash}");
+        }
+        if let Some(recorded_hash) = &diff.status.recorded_hash {
+            println!("Recorded hash: {recorded_hash}");
+        }
+        if let Some(base_hash) = &diff.base_hash {
+            println!("Base hash: {base_hash}");
+        }
+        if let Some(detail) = &diff.status.detail {
+            println!("Detail: {detail}");
+        }
+
+        if !diff.changed_sections.is_empty() {
+            println!("Changed sections: {}", diff.changed_sections.join(", "));
+        } else if diff.base_snapshot_available {
+            println!("Changed sections: none");
+        } else {
+            println!("Changed sections: unavailable (no cached base snapshot)");
+        }
+
+        if let Some(patch) = &diff.patch {
+            print!("{patch}");
+        } else if diff.base_snapshot_available {
+            println!("No local changes relative to the cached base snapshot.");
+        } else {
+            println!(
+                "No cached base snapshot available. Re-pull the workflow to seed local diff data."
+            );
+        }
+        Ok(())
+    }
+}
+
 async fn cmd_activation(context: &Context, args: IdArgs, active: bool) -> Result<(), AppError> {
     let command = if active { "activate" } else { "deactivate" };
     let repo = load_loaded_repo(context)?;
@@ -676,6 +790,36 @@ fn emit_json<T: Serialize>(command: &'static str, data: &T) -> Result<(), AppErr
     })?;
     println!("{rendered}");
     Ok(())
+}
+
+fn summarize_statuses(statuses: &[crate::repo::LocalStatusEntry]) -> StatusSummary {
+    let mut summary = StatusSummary {
+        clean: 0,
+        modified: 0,
+        untracked: 0,
+        invalid: 0,
+        orphaned_meta: 0,
+    };
+    for status in statuses {
+        match status.state {
+            LocalWorkflowState::Clean => summary.clean += 1,
+            LocalWorkflowState::Modified => summary.modified += 1,
+            LocalWorkflowState::Untracked => summary.untracked += 1,
+            LocalWorkflowState::Invalid => summary.invalid += 1,
+            LocalWorkflowState::OrphanedMeta => summary.orphaned_meta += 1,
+        }
+    }
+    summary
+}
+
+fn status_label(state: LocalWorkflowState) -> &'static str {
+    match state {
+        LocalWorkflowState::Clean => "clean",
+        LocalWorkflowState::Modified => "modified",
+        LocalWorkflowState::Untracked => "untracked",
+        LocalWorkflowState::Invalid => "invalid",
+        LocalWorkflowState::OrphanedMeta => "orphaned_meta",
+    }
 }
 
 fn truncate(input: &str, width: usize) -> String {

@@ -37,6 +37,8 @@ n8nc
 ├── get
 ├── pull
 ├── push
+├── status
+├── diff
 ├── activate
 ├── deactivate
 ├── trigger
@@ -83,6 +85,14 @@ workflows/<slug>--<workflow_id>.meta.json
 ```
 
 The path is intentionally environment-neutral, but the sidecar binds the file to the instance it came from. That keeps the Git history of a single instance clean while making the current scope explicit.
+
+The cache stores one canonical base snapshot per tracked workflow:
+
+```text
+.n8n/cache/<instance>--<workflow_id>.workflow.json
+```
+
+That snapshot is refreshed on `pull` and successful `push`.
 
 ## 4. Credentials
 
@@ -165,7 +175,28 @@ Each pulled workflow has a committed sidecar:
 
 The important field is `remote_hash`. It is the lease token used by `push`.
 
-## 8. Push Safety Model
+## 8. Local Status Model
+
+`status` is local-only in `0.1.x`. It does not claim to know whether the remote instance drifted unless a future `--refresh` mode is added.
+
+Current local states:
+
+- `clean`: workflow file and sidecar are valid, and the local canonical hash matches the recorded `remote_hash`
+- `modified`: workflow file and sidecar are valid, and the local canonical hash differs from the recorded `remote_hash`
+- `untracked`: workflow file exists without a sidecar
+- `invalid`: workflow file or sidecar cannot be used safely
+- `orphaned_meta`: sidecar exists without a matching workflow file
+
+`invalid` currently covers cases like:
+
+- workflow JSON parse failure
+- sidecar parse failure
+- metadata `workflow_id` mismatch
+- unsupported `canonical_version`
+- unsupported `hash_algorithm`
+- validation errors such as missing node targets
+
+## 9. Push Safety Model
 
 `push` is update-only in `0.1.x`.
 
@@ -186,7 +217,35 @@ Outcomes:
 
 After a successful push, the CLI re-writes the workflow and sidecar from the server response so local state stays canonical.
 
-## 9. Validation
+## 10. Local Diff Model
+
+`diff` is also local-only in `0.1.x`.
+
+It compares:
+
+- the current canonical local workflow file
+- the cached base snapshot from `.n8n/cache`
+
+If a cache snapshot is unavailable, `diff` falls back to hash and state reporting only and tells the user to re-pull the workflow to seed local diff data.
+
+The human output includes:
+
+- status summary
+- file path
+- workflow ID
+- local, recorded, and base hashes when available
+- changed top-level sections
+- unified patch when a base snapshot exists and content changed
+
+The JSON output includes:
+
+- the local status object
+- `base_hash`
+- `base_snapshot_available`
+- `changed_sections`
+- optional `patch`
+
+## 11. Validation
 
 `validate` currently checks:
 
@@ -208,7 +267,7 @@ The current diagnostics model is intentionally simple:
 - optional JSON path
 - optional suggestion
 
-## 10. Triggering
+## 12. Triggering
 
 The user concern that started this implementation was valid: developers need more than `pull` and `push`.
 
@@ -229,7 +288,7 @@ The current answer is:
 
 This avoids pretending there is a stable public “run workflow by ID” endpoint when that has not been verified in the implementation.
 
-## 11. JSON Contract
+## 13. JSON Contract
 
 Every command supports `--json`.
 
@@ -262,7 +321,7 @@ Error envelope:
 
 Validation failures may also include a `data` object with diagnostics.
 
-## 12. Exit Codes
+## 14. Exit Codes
 
 - `0`: success
 - `2`: usage error
@@ -274,19 +333,20 @@ Validation failures may also include a `data` object with diagnostics.
 - `11`: not found
 - `12`: conflict refusal
 
-## 13. Known Limits
+## 15. Known Limits
 
 - The tool is currently strongest when a repo mirrors one n8n instance.
 - `tags` are preserved structurally, not normalized semantically.
 - `ls` assumes a paginated workflow list response with `data` and optional `nextCursor`.
-- The implementation has no local `status` or `diff` command yet.
+- `status` and `diff` are local-only and do not verify remote drift.
+- `diff` is best after a fresh `pull`, because older repos may not have cached base snapshots yet.
 
-## 14. Next Likely Steps
+## 16. Next Likely Steps
 
 The next improvements that fit the current design are:
 
-1. `status`
-2. `diff`
+1. remote-aware `status --refresh`
+2. remote-aware `diff --refresh`
 3. create workflow from local file
 4. richer execution inspection if public endpoints are verified
 5. only after that: a real environment-promotion model with explicit mappings and lock files

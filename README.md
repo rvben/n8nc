@@ -26,6 +26,8 @@ Implemented commands:
 - `get`
 - `pull`
 - `push`
+- `status`
+- `diff`
 - `activate`
 - `deactivate`
 - `trigger`
@@ -35,7 +37,6 @@ Implemented commands:
 Not implemented yet:
 
 - environment promotion across `dev/staging/prod`
-- `status` and `diff`
 - workflow creation from local files
 - a generic “run workflow by ID” command through the public API
 
@@ -71,6 +72,18 @@ Validate tracked workflows:
 
 ```bash
 n8nc validate
+```
+
+See which tracked files changed locally:
+
+```bash
+n8nc status
+```
+
+Inspect one tracked workflow against its cached base snapshot:
+
+```bash
+n8nc diff workflows/order-alert--abc123.workflow.json
 ```
 
 Push a tracked workflow back:
@@ -112,7 +125,11 @@ The sidecar stores:
 - the hash algorithm
 - the remote hash recorded at pull time
 
-`push` uses that metadata as a lease check and refuses to overwrite a workflow that changed remotely since the last `pull`.
+The cache stores the last pulled canonical workflow snapshot for local `diff`.
+
+`status` is intentionally local-only in `0.1.x`: it reports whether tracked files are `clean`, `modified`, `untracked`, `invalid`, or `orphaned_meta` without claiming remote drift knowledge.
+
+`push` uses the sidecar metadata as a lease check and refuses to overwrite a workflow that changed remotely since the last `pull`.
 
 ## Design Notes
 
