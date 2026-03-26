@@ -77,6 +77,12 @@ Inspect recent executions:
 n8nc runs ls --instance prod --limit 10
 ```
 
+Filter execution listings to a time window:
+
+```bash
+n8nc runs ls --instance prod --workflow "Homelab: Container Restart Alert" --last 30m
+```
+
 Inspect one execution with node-level details:
 
 ```bash
@@ -87,6 +93,12 @@ Watch recent executions as they appear:
 
 ```bash
 n8nc runs watch --instance prod --workflow "Homelab: Container Restart Alert"
+```
+
+Watch only executions started after a fixed point in time:
+
+```bash
+n8nc runs watch --instance prod --since 2026-03-26T12:00:00Z
 ```
 
 Use finite polling for scripts or tests:
@@ -189,6 +201,7 @@ If remote refresh fails for a tracked workflow, `status --refresh` still returns
 - Deterministic: workflows are canonicalized before storage and hashing.
 - Explicit refresh: remote drift is only reported when you ask for it with `--refresh`.
 - Dev-loop friendly: `runs ls`, `runs get --details`, and `runs watch` cover recent execution inspection without leaving the terminal.
+- Time-window aware: `runs ls` and `runs watch` support `--since <RFC3339>` and `--last <window>` with `s`, `m`, `h`, and `d` units.
 - Honest triggering: `trigger` is an HTTP call helper for webhook URLs, not a guessed “execute workflow” API wrapper.
 
 `runs watch --json` emits one compact JSON envelope per poll. The first event is `snapshot`; later events are `update` when new executions appear or `heartbeat` when the latest window is unchanged.

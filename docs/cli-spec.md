@@ -312,6 +312,21 @@ Current supported options:
 - `--limit`
 - `--workflow <id-or-exact-name>`
 - `--status <value>`
+- `--since <RFC3339>`
+- `--last <window>`
+
+Time filtering is client-side in `0.1.x`. The CLI pages through recent executions until it collects the requested number of matching rows or exhausts the remote result set.
+
+Because execution listings are treated as recent-first, the CLI stops paging once a page has crossed below the active `--since` cutoff.
+
+`--since` includes executions at or after the given timestamp.
+
+`--last` computes a rolling window from the current time and accepts these suffixes:
+
+- `s` seconds
+- `m` minutes
+- `h` hours
+- `d` days
 
 List rows currently include:
 
@@ -341,6 +356,8 @@ Current supported options:
 
 - `--workflow <id-or-exact-name>`
 - `--status <value>`
+- `--since <RFC3339>`
+- `--last <window>`
 - `--limit`
 - `--interval <seconds>`
 - `--iterations <count>`
@@ -348,6 +365,7 @@ Current supported options:
 Human output behavior:
 
 - first poll prints the current execution window
+- prints the active workflow, status, and time-window filters when present
 - later polls print only newly seen executions
 - no output is emitted for unchanged polls after the initial snapshot
 
