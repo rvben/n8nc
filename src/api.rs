@@ -525,8 +525,29 @@ fn append_capped_values(results: &mut Vec<Value>, page_data: &[Value], limit: us
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use wiremock::{
+        Match, Mock, MockServer, Request, ResponseTemplate,
+        matchers::{header, method, path, query_param},
+    };
 
-    use super::{ListOptions, append_capped_values, append_matching_workflows};
+    use crate::config::InstanceConfig;
+
+    use super::{
+        ApiClient, ExecutionListOptions, ListOptions, append_capped_values,
+        append_matching_workflows,
+    };
+
+    #[derive(Debug)]
+    struct MissingQueryParam(&'static str);
+
+    impl Match for MissingQueryParam {
+        fn matches(&self, request: &Request) -> bool {
+            !request
+                .url
+                .query_pairs()
+                .any(|(key, _)| key.as_ref() == self.0)
+        }
+    }
 
     #[test]
     fn append_matching_workflows_honors_limit_and_filter() {
@@ -578,5 +599,119 @@ mod tests {
         assert_eq!(values.len(), 2);
         assert_eq!(values[0]["id"], "a");
         assert_eq!(values[1]["id"], "b");
+    }
+
+    #[tokio::test]
+    async fn list_executions_follows_cursor_and_respects_limit() {
+        let server = MockServer::start().await;
+        let client = test_client(&server);
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/executions"))
+            .and(header("x-n8n-api-key", "test-token"))
+            .and(query_param("limit", "3"))
+            .and(query_param("status", "success"))
+            .and(MissingQueryParam("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    {"id": "1"},
+                    {"id": "2"}
+                ],
+                "nextCursor": "next-1"
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/executions"))
+            .and(header("x-n8n-api-key", "test-token"))
+            .and(query_param("limit", "3"))
+            .and(query_param("status", "success"))
+            .and(query_param("cursor", "next-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    {"id": "3"},
+                    {"id": "4"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let executions = client
+            .list_executions(&ExecutionListOptions {
+                limit: 3,
+                workflow_id: None,
+                status: Some("success".to_string()),
+            })
+            .await
+            .expect("list executions");
+
+        assert_eq!(executions.len(), 3);
+        assert_eq!(executions[0]["id"], "1");
+        assert_eq!(executions[1]["id"], "2");
+        assert_eq!(executions[2]["id"], "3");
+    }
+
+    #[tokio::test]
+    async fn get_execution_includes_details_when_requested() {
+        let server = MockServer::start().await;
+        let client = test_client(&server);
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/executions/42"))
+            .and(header("x-n8n-api-key", "test-token"))
+            .and(query_param("includeData", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "42",
+                "status": "success",
+                "data": {
+                    "resultData": {
+                        "runData": {}
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let execution = client
+            .get_execution("42", true)
+            .await
+            .expect("get execution")
+            .expect("execution payload");
+
+        assert_eq!(execution["id"], "42");
+        assert!(execution.get("data").is_some());
+    }
+
+    #[tokio::test]
+    async fn get_execution_returns_none_for_not_found() {
+        let server = MockServer::start().await;
+        let client = test_client(&server);
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/executions/missing"))
+            .and(header("x-n8n-api-key", "test-token"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let execution = client
+            .get_execution("missing", false)
+            .await
+            .expect("get execution");
+
+        assert!(execution.is_none());
+    }
+
+    fn test_client(server: &MockServer) -> ApiClient {
+        ApiClient::new("test", &test_instance(server), "test-token".to_string())
+            .expect("api client")
+    }
+
+    fn test_instance(server: &MockServer) -> InstanceConfig {
+        InstanceConfig {
+            base_url: server.uri(),
+            api_version: "v1".to_string(),
+        }
     }
 }
