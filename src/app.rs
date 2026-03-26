@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -25,8 +26,9 @@ use crate::{
     },
     error::AppError,
     repo::{
-        LocalWorkflowState, build_local_diff, collect_json_targets, format_json_file, load_meta,
-        load_workflow_file, scan_local_status, sidecar_path_for, store_workflow, workflow_active,
+        LocalWorkflowState, RemoteSyncState, build_local_diff, build_refreshed_diff,
+        collect_json_targets, format_json_file, load_meta, load_workflow_file,
+        refresh_local_status, scan_local_status, sidecar_path_for, store_workflow, workflow_active,
         workflow_id, workflow_name, workflow_updated_at,
     },
     validate::validate_workflow_path,
@@ -69,6 +71,16 @@ struct StatusSummary {
     untracked: usize,
     invalid: usize,
     orphaned_meta: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct SyncSummary {
+    clean: usize,
+    modified: usize,
+    drifted: usize,
+    conflict: usize,
+    missing_remote: usize,
+    unavailable: usize,
 }
 
 pub async fn run(cli: Cli) -> Result<(), AppError> {
@@ -436,42 +448,108 @@ async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), AppError> {
 async fn cmd_status(context: &Context, args: StatusArgs) -> Result<(), AppError> {
     let repo = load_loaded_repo(context)?;
     let statuses = scan_local_status(&repo, &args.paths)?;
+    let statuses = if args.refresh {
+        refresh_statuses(&repo, &statuses, "status").await?
+    } else {
+        statuses
+    };
     let summary = summarize_statuses(&statuses);
+    let sync_summary = args.refresh.then(|| summarize_sync_states(&statuses));
 
     if context.json {
-        emit_json(
-            "status",
-            &json!({
-                "summary": summary,
-                "workflows": statuses,
-            }),
-        )
-    } else {
-        println!(
-            "{:<14} {:<14} {:<20} {:<20} {}",
-            "STATE", "INSTANCE", "ID", "LOCAL HASH", "FILE"
+        let mut data = serde_json::Map::new();
+        data.insert(
+            "summary".to_string(),
+            serde_json::to_value(&summary).map_err(|err| {
+                AppError::api(
+                    "status",
+                    "output.serialize_failed",
+                    format!("Failed to serialize status summary: {err}"),
+                )
+            })?,
         );
-        for status in &statuses {
+        if let Some(sync_summary) = &sync_summary {
+            data.insert(
+                "sync_summary".to_string(),
+                serde_json::to_value(sync_summary).map_err(|err| {
+                    AppError::api(
+                        "status",
+                        "output.serialize_failed",
+                        format!("Failed to serialize sync summary: {err}"),
+                    )
+                })?,
+            );
+        }
+        data.insert(
+            "workflows".to_string(),
+            serde_json::to_value(&statuses).map_err(|err| {
+                AppError::api(
+                    "status",
+                    "output.serialize_failed",
+                    format!("Failed to serialize status entries: {err}"),
+                )
+            })?,
+        );
+        emit_json("status", &Value::Object(data))
+    } else {
+        if args.refresh {
+            println!(
+                "{:<14} {:<14} {:<14} {:<20} {:<20} {}",
+                "LOCAL", "SYNC", "INSTANCE", "ID", "LOCAL HASH", "FILE"
+            );
+        } else {
             println!(
                 "{:<14} {:<14} {:<20} {:<20} {}",
-                status_label(status.state),
-                status.instance.as_deref().unwrap_or("-"),
-                truncate(status.workflow_id.as_deref().unwrap_or("-"), 20),
-                truncate(status.local_hash.as_deref().unwrap_or("-"), 20),
-                status.file.display(),
+                "STATE", "INSTANCE", "ID", "LOCAL HASH", "FILE"
             );
+        }
+        for status in &statuses {
+            if args.refresh {
+                println!(
+                    "{:<14} {:<14} {:<14} {:<20} {:<20} {}",
+                    local_status_label(status.state),
+                    status.sync_state.map(sync_status_label).unwrap_or("-"),
+                    status.instance.as_deref().unwrap_or("-"),
+                    truncate(status.workflow_id.as_deref().unwrap_or("-"), 20),
+                    truncate(status.local_hash.as_deref().unwrap_or("-"), 20),
+                    status.file.display(),
+                );
+            } else {
+                println!(
+                    "{:<14} {:<14} {:<20} {:<20} {}",
+                    local_status_label(status.state),
+                    status.instance.as_deref().unwrap_or("-"),
+                    truncate(status.workflow_id.as_deref().unwrap_or("-"), 20),
+                    truncate(status.local_hash.as_deref().unwrap_or("-"), 20),
+                    status.file.display(),
+                );
+            }
             if let Some(detail) = &status.detail {
+                println!("  {}", detail);
+            }
+            if let Some(detail) = &status.remote_detail {
                 println!("  {}", detail);
             }
         }
         println!(
-            "Summary: clean={}, modified={}, untracked={}, invalid={}, orphaned_meta={}",
+            "Local summary: clean={}, modified={}, untracked={}, invalid={}, orphaned_meta={}",
             summary.clean,
             summary.modified,
             summary.untracked,
             summary.invalid,
             summary.orphaned_meta
         );
+        if let Some(sync_summary) = sync_summary {
+            println!(
+                "Sync summary: clean={}, modified={}, drifted={}, conflict={}, missing_remote={}, unavailable={}",
+                sync_summary.clean,
+                sync_summary.modified,
+                sync_summary.drifted,
+                sync_summary.conflict,
+                sync_summary.missing_remote,
+                sync_summary.unavailable
+            );
+        }
         Ok(())
     }
 }
@@ -490,12 +568,35 @@ async fn cmd_diff(context: &Context, args: DiffArgs) -> Result<(), AppError> {
             "Diff expects a `.workflow.json` file path.",
         ));
     }
-    let diff = build_local_diff(&repo, &file)?;
+    let diff = if args.refresh {
+        let local = build_local_diff(&repo, &file)?;
+        if let (Some(instance), Some(workflow_id)) = (
+            local.status.instance.as_deref(),
+            local.status.workflow_id.as_deref(),
+        ) {
+            let client = client_for_instance(&repo, instance, "diff", &mut BTreeMap::new())?;
+            let remote = client.get_workflow_by_id(workflow_id).await?;
+            let remote_workflow = remote
+                .as_ref()
+                .map(|value| value.get("data").unwrap_or(value));
+            build_refreshed_diff("diff", &repo, &file, remote_workflow)?
+        } else {
+            local
+        }
+    } else {
+        build_local_diff(&repo, &file)?
+    };
 
     if context.json {
         emit_json("diff", &diff)
     } else {
-        println!("State: {}", status_label(diff.status.state));
+        println!("Local state: {}", local_status_label(diff.status.state));
+        if args.refresh {
+            println!(
+                "Sync state: {}",
+                diff.status.sync_state.map(sync_status_label).unwrap_or("-"),
+            );
+        }
         println!("File: {}", diff.status.file.display());
         if let Some(workflow_id) = &diff.status.workflow_id {
             println!("Workflow ID: {workflow_id}");
@@ -509,19 +610,29 @@ async fn cmd_diff(context: &Context, args: DiffArgs) -> Result<(), AppError> {
         if let Some(base_hash) = &diff.base_hash {
             println!("Base hash: {base_hash}");
         }
+        if let Some(remote_hash) = &diff.status.remote_hash {
+            println!("Remote hash: {remote_hash}");
+        }
+        if let Some(remote_updated_at) = &diff.status.remote_updated_at {
+            println!("Remote updated at: {remote_updated_at}");
+        }
         if let Some(detail) = &diff.status.detail {
             println!("Detail: {detail}");
         }
+        if let Some(detail) = &diff.status.remote_detail {
+            println!("Remote detail: {detail}");
+        }
 
         if !diff.changed_sections.is_empty() {
-            println!("Changed sections: {}", diff.changed_sections.join(", "));
+            println!("Base/local sections: {}", diff.changed_sections.join(", "));
         } else if diff.base_snapshot_available {
-            println!("Changed sections: none");
+            println!("Base/local sections: none");
         } else {
-            println!("Changed sections: unavailable (no cached base snapshot)");
+            println!("Base/local sections: unavailable (no cached base snapshot)");
         }
 
         if let Some(patch) = &diff.patch {
+            println!("Base vs local:");
             print!("{patch}");
         } else if diff.base_snapshot_available {
             println!("No local changes relative to the cached base snapshot.");
@@ -529,6 +640,26 @@ async fn cmd_diff(context: &Context, args: DiffArgs) -> Result<(), AppError> {
             println!(
                 "No cached base snapshot available. Re-pull the workflow to seed local diff data."
             );
+        }
+
+        if args.refresh {
+            if !diff.remote_changed_sections.is_empty() {
+                println!(
+                    "Remote/local sections: {}",
+                    diff.remote_changed_sections.join(", ")
+                );
+            } else if diff.remote_comparison_available {
+                println!("Remote/local sections: none");
+            } else {
+                println!("Remote/local sections: unavailable");
+            }
+
+            if let Some(patch) = &diff.remote_patch {
+                println!("Remote vs local:");
+                print!("{patch}");
+            } else if diff.remote_comparison_available {
+                println!("No local changes relative to the current remote workflow.");
+            }
         }
         Ok(())
     }
@@ -812,7 +943,29 @@ fn summarize_statuses(statuses: &[crate::repo::LocalStatusEntry]) -> StatusSumma
     summary
 }
 
-fn status_label(state: LocalWorkflowState) -> &'static str {
+fn summarize_sync_states(statuses: &[crate::repo::LocalStatusEntry]) -> SyncSummary {
+    let mut summary = SyncSummary {
+        clean: 0,
+        modified: 0,
+        drifted: 0,
+        conflict: 0,
+        missing_remote: 0,
+        unavailable: 0,
+    };
+    for status in statuses {
+        match status.sync_state {
+            Some(RemoteSyncState::Clean) => summary.clean += 1,
+            Some(RemoteSyncState::Modified) => summary.modified += 1,
+            Some(RemoteSyncState::Drifted) => summary.drifted += 1,
+            Some(RemoteSyncState::Conflict) => summary.conflict += 1,
+            Some(RemoteSyncState::MissingRemote) => summary.missing_remote += 1,
+            None => summary.unavailable += 1,
+        }
+    }
+    summary
+}
+
+fn local_status_label(state: LocalWorkflowState) -> &'static str {
     match state {
         LocalWorkflowState::Clean => "clean",
         LocalWorkflowState::Modified => "modified",
@@ -820,6 +973,68 @@ fn status_label(state: LocalWorkflowState) -> &'static str {
         LocalWorkflowState::Invalid => "invalid",
         LocalWorkflowState::OrphanedMeta => "orphaned_meta",
     }
+}
+
+fn sync_status_label(state: RemoteSyncState) -> &'static str {
+    match state {
+        RemoteSyncState::Clean => "clean",
+        RemoteSyncState::Modified => "modified",
+        RemoteSyncState::Drifted => "drifted",
+        RemoteSyncState::Conflict => "conflict",
+        RemoteSyncState::MissingRemote => "missing_remote",
+    }
+}
+
+async fn refresh_statuses(
+    repo: &LoadedRepo,
+    statuses: &[crate::repo::LocalStatusEntry],
+    command: &'static str,
+) -> Result<Vec<crate::repo::LocalStatusEntry>, AppError> {
+    let mut clients = BTreeMap::new();
+    let mut refreshed = Vec::with_capacity(statuses.len());
+
+    for status in statuses {
+        if !matches!(
+            status.state,
+            LocalWorkflowState::Clean | LocalWorkflowState::Modified
+        ) {
+            refreshed.push(status.clone());
+            continue;
+        }
+
+        let Some(instance) = status.instance.as_deref() else {
+            refreshed.push(status.clone());
+            continue;
+        };
+        let Some(workflow_id) = status.workflow_id.as_deref() else {
+            refreshed.push(status.clone());
+            continue;
+        };
+
+        let client = client_for_instance(repo, instance, command, &mut clients)?;
+        let remote = client.get_workflow_by_id(workflow_id).await?;
+        let remote_workflow = remote
+            .as_ref()
+            .map(|value| value.get("data").unwrap_or(value));
+        refreshed.push(refresh_local_status(command, status, remote_workflow)?);
+    }
+
+    Ok(refreshed)
+}
+
+fn client_for_instance(
+    repo: &LoadedRepo,
+    instance: &str,
+    command: &'static str,
+    clients: &mut BTreeMap<String, ApiClient>,
+) -> Result<ApiClient, AppError> {
+    if let Some(client) = clients.get(instance) {
+        return Ok(client.clone());
+    }
+
+    let (client, _, _) = remote_client(repo, Some(instance), command)?;
+    clients.insert(instance.to_string(), client.clone());
+    Ok(client)
 }
 
 fn truncate(input: &str, width: usize) -> String {

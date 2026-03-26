@@ -48,6 +48,16 @@ pub enum LocalWorkflowState {
     OrphanedMeta,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteSyncState {
+    Clean,
+    Modified,
+    Drifted,
+    Conflict,
+    MissingRemote,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LocalStatusEntry {
     pub state: LocalWorkflowState,
@@ -66,6 +76,14 @@ pub struct LocalStatusEntry {
     pub recorded_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_state: Option<RemoteSyncState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -77,6 +95,10 @@ pub struct LocalDiff {
     pub changed_sections: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patch: Option<String>,
+    pub remote_comparison_available: bool,
+    pub remote_changed_sections: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_patch: Option<String>,
 }
 
 pub fn workflow_id(workflow: &Value) -> Option<String> {
@@ -412,6 +434,9 @@ pub fn build_local_diff(repo: &LoadedRepo, workflow_path: &Path) -> Result<Local
             base_snapshot_available: false,
             changed_sections: Vec::new(),
             patch: None,
+            remote_comparison_available: false,
+            remote_changed_sections: Vec::new(),
+            remote_patch: None,
         });
     };
     let Some(instance) = status.instance.clone() else {
@@ -421,6 +446,9 @@ pub fn build_local_diff(repo: &LoadedRepo, workflow_path: &Path) -> Result<Local
             base_snapshot_available: false,
             changed_sections: Vec::new(),
             patch: None,
+            remote_comparison_available: false,
+            remote_changed_sections: Vec::new(),
+            remote_patch: None,
         });
     };
 
@@ -432,6 +460,9 @@ pub fn build_local_diff(repo: &LoadedRepo, workflow_path: &Path) -> Result<Local
             base_snapshot_available: false,
             changed_sections: Vec::new(),
             patch: None,
+            remote_comparison_available: false,
+            remote_changed_sections: Vec::new(),
+            remote_patch: None,
         });
     }
 
@@ -460,7 +491,124 @@ pub fn build_local_diff(repo: &LoadedRepo, workflow_path: &Path) -> Result<Local
         base_snapshot_available: true,
         changed_sections,
         patch,
+        remote_comparison_available: false,
+        remote_changed_sections: Vec::new(),
+        remote_patch: None,
     })
+}
+
+pub fn refresh_local_status(
+    command: &'static str,
+    status: &LocalStatusEntry,
+    remote_workflow: Option<&Value>,
+) -> Result<LocalStatusEntry, AppError> {
+    let mut refreshed = status.clone();
+    if !matches!(
+        refreshed.state,
+        LocalWorkflowState::Clean | LocalWorkflowState::Modified
+    ) {
+        return Ok(refreshed);
+    }
+
+    let Some(recorded_hash) = refreshed.recorded_hash.clone() else {
+        return Ok(refreshed);
+    };
+
+    let Some(remote_workflow) = remote_workflow else {
+        refreshed.sync_state = Some(RemoteSyncState::MissingRemote);
+        refreshed.remote_hash = None;
+        refreshed.remote_updated_at = None;
+        refreshed.remote_detail = Some("Remote workflow was not found.".to_string());
+        return Ok(refreshed);
+    };
+
+    let remote_canonical = canonicalize_workflow(remote_workflow).map_err(|err| {
+        AppError::api(
+            command,
+            "api.invalid_response",
+            format!(
+                "Remote workflow payload could not be canonicalized: {}",
+                err.message
+            ),
+        )
+    })?;
+    let remote_hash = hash_value(&remote_canonical)?;
+
+    refreshed.remote_hash = Some(remote_hash.clone());
+    refreshed.remote_updated_at = workflow_updated_at(remote_workflow);
+    refreshed.remote_detail = None;
+    refreshed.sync_state = Some(match refreshed.state {
+        LocalWorkflowState::Clean => {
+            if remote_hash == recorded_hash {
+                RemoteSyncState::Clean
+            } else {
+                RemoteSyncState::Drifted
+            }
+        }
+        LocalWorkflowState::Modified => {
+            if remote_hash == recorded_hash {
+                RemoteSyncState::Modified
+            } else {
+                RemoteSyncState::Conflict
+            }
+        }
+        _ => unreachable!(),
+    });
+
+    Ok(refreshed)
+}
+
+pub fn build_refreshed_diff(
+    command: &'static str,
+    repo: &LoadedRepo,
+    workflow_path: &Path,
+    remote_workflow: Option<&Value>,
+) -> Result<LocalDiff, AppError> {
+    let mut diff = build_local_diff(repo, workflow_path)?;
+    diff.status = refresh_local_status(command, &diff.status, remote_workflow)?;
+
+    let Some(remote_workflow) = remote_workflow else {
+        return Ok(diff);
+    };
+
+    if !matches!(
+        diff.status.state,
+        LocalWorkflowState::Clean | LocalWorkflowState::Modified
+    ) {
+        return Ok(diff);
+    }
+
+    let local_workflow = canonicalize_workflow(&load_workflow_file(workflow_path, "diff")?)?;
+    let remote_canonical = canonicalize_workflow(remote_workflow).map_err(|err| {
+        AppError::api(
+            command,
+            "api.invalid_response",
+            format!(
+                "Remote workflow payload could not be canonicalized: {}",
+                err.message
+            ),
+        )
+    })?;
+    let remote_hash = hash_value(&remote_canonical)?;
+    let local_hash = diff.status.local_hash.clone().unwrap_or_default();
+
+    diff.remote_comparison_available = true;
+    diff.remote_changed_sections = diff_sections(&remote_canonical, &local_workflow);
+    diff.remote_patch = if remote_hash == local_hash {
+        None
+    } else {
+        let remote_text = pretty_json(&remote_canonical)?;
+        let local_text = pretty_json(&local_workflow)?;
+        Some(
+            TextDiff::from_lines(&remote_text, &local_text)
+                .unified_diff()
+                .context_radius(3)
+                .header("remote", "local")
+                .to_string(),
+        )
+    };
+
+    Ok(diff)
 }
 
 fn classify_artifact_path(
@@ -493,6 +641,10 @@ fn classify_workflow_status(workflow_path: &Path) -> Result<LocalStatusEntry, Ap
                 local_hash: None,
                 recorded_hash: None,
                 detail: Some(err.message),
+                sync_state: None,
+                remote_hash: None,
+                remote_updated_at: None,
+                remote_detail: None,
             });
         }
     };
@@ -510,6 +662,10 @@ fn classify_workflow_status(workflow_path: &Path) -> Result<LocalStatusEntry, Ap
                 local_hash: None,
                 recorded_hash: None,
                 detail: Some(err.message),
+                sync_state: None,
+                remote_hash: None,
+                remote_updated_at: None,
+                remote_detail: None,
             });
         }
     };
@@ -529,6 +685,10 @@ fn classify_workflow_status(workflow_path: &Path) -> Result<LocalStatusEntry, Ap
             local_hash: Some(local_hash),
             recorded_hash: None,
             detail: Some("No metadata sidecar found.".to_string()),
+            sync_state: None,
+            remote_hash: None,
+            remote_updated_at: None,
+            remote_detail: None,
         });
     }
 
@@ -545,6 +705,10 @@ fn classify_workflow_status(workflow_path: &Path) -> Result<LocalStatusEntry, Ap
                 local_hash: Some(local_hash),
                 recorded_hash: None,
                 detail: Some(err.message),
+                sync_state: None,
+                remote_hash: None,
+                remote_updated_at: None,
+                remote_detail: None,
             });
         }
     };
@@ -563,6 +727,10 @@ fn classify_workflow_status(workflow_path: &Path) -> Result<LocalStatusEntry, Ap
                 "Unsupported canonical version {} in metadata sidecar.",
                 meta.canonical_version
             )),
+            sync_state: None,
+            remote_hash: None,
+            remote_updated_at: None,
+            remote_detail: None,
         });
     }
 
@@ -580,6 +748,10 @@ fn classify_workflow_status(workflow_path: &Path) -> Result<LocalStatusEntry, Ap
                 "Unsupported hash algorithm `{}` in metadata sidecar.",
                 meta.hash_algorithm
             )),
+            sync_state: None,
+            remote_hash: None,
+            remote_updated_at: None,
+            remote_detail: None,
         });
     }
 
@@ -595,6 +767,10 @@ fn classify_workflow_status(workflow_path: &Path) -> Result<LocalStatusEntry, Ap
             local_hash: Some(local_hash),
             recorded_hash: Some(meta.remote_hash),
             detail: Some(diagnostic.message.clone()),
+            sync_state: None,
+            remote_hash: None,
+            remote_updated_at: None,
+            remote_detail: None,
         });
     }
 
@@ -614,6 +790,10 @@ fn classify_workflow_status(workflow_path: &Path) -> Result<LocalStatusEntry, Ap
         local_hash: Some(local_hash),
         recorded_hash: Some(meta.remote_hash),
         detail: None,
+        sync_state: None,
+        remote_hash: None,
+        remote_updated_at: None,
+        remote_detail: None,
     })
 }
 
@@ -629,6 +809,10 @@ fn classify_orphaned_meta_status(meta_path: &Path) -> LocalStatusEntry {
             local_hash: None,
             recorded_hash: Some(meta.remote_hash),
             detail: Some("Metadata sidecar has no matching workflow file.".to_string()),
+            sync_state: None,
+            remote_hash: None,
+            remote_updated_at: None,
+            remote_detail: None,
         },
         Err(err) => LocalStatusEntry {
             state: LocalWorkflowState::Invalid,
@@ -640,6 +824,10 @@ fn classify_orphaned_meta_status(meta_path: &Path) -> LocalStatusEntry {
             local_hash: None,
             recorded_hash: None,
             detail: Some(err.message),
+            sync_state: None,
+            remote_hash: None,
+            remote_updated_at: None,
+            remote_detail: None,
         },
     }
 }
@@ -671,8 +859,8 @@ mod tests {
     use crate::config::{InstanceConfig, LoadedRepo, RepoConfig};
 
     use super::{
-        LocalWorkflowState, build_local_diff, cache_snapshot_path, scan_local_status, slugify,
-        store_workflow,
+        LocalWorkflowState, RemoteSyncState, build_local_diff, build_refreshed_diff,
+        cache_snapshot_path, refresh_local_status, scan_local_status, slugify, store_workflow,
     };
 
     #[test]
@@ -821,6 +1009,194 @@ mod tests {
         assert!(diff.changed_sections.contains(&"active".to_string()));
         assert!(diff.changed_sections.contains(&"settings".to_string()));
         assert!(diff.patch.expect("patch").contains("--- base"));
+    }
+
+    #[test]
+    fn refresh_local_status_classifies_remote_sync_states() {
+        let temp = tempdir().expect("tempdir");
+        let repo = fixture_repo(temp.path());
+
+        store_workflow(
+            &repo,
+            "prod",
+            &json!({
+                "id": "wf-clean-remote",
+                "name": "Clean Remote Workflow",
+                "active": false,
+                "nodes": [],
+                "connections": {}
+            }),
+        )
+        .expect("store clean workflow");
+
+        let modified = store_workflow(
+            &repo,
+            "prod",
+            &json!({
+                "id": "wf-modified-remote",
+                "name": "Modified Remote Workflow",
+                "active": false,
+                "settings": {"timezone": "UTC"},
+                "nodes": [],
+                "connections": {}
+            }),
+        )
+        .expect("store modified workflow");
+        fs::write(
+            &modified.workflow_path,
+            r#"{
+  "id": "wf-modified-remote",
+  "name": "Modified Remote Workflow",
+  "active": true,
+  "settings": {
+    "timezone": "Europe/Amsterdam"
+  },
+  "nodes": [],
+  "connections": {}
+}
+"#,
+        )
+        .expect("write local modification");
+
+        let statuses = scan_local_status(&repo, &[]).expect("scan statuses");
+        let clean_status = statuses
+            .iter()
+            .find(|status| status.workflow_id.as_deref() == Some("wf-clean-remote"))
+            .expect("clean status");
+        let modified_status = statuses
+            .iter()
+            .find(|status| status.workflow_id.as_deref() == Some("wf-modified-remote"))
+            .expect("modified status");
+
+        let clean_remote = json!({
+            "id": "wf-clean-remote",
+            "name": "Clean Remote Workflow",
+            "active": false,
+            "updatedAt": "2026-03-26T10:32:00Z",
+            "nodes": [],
+            "connections": {}
+        });
+        let clean_refreshed =
+            refresh_local_status("status", clean_status, Some(&clean_remote)).expect("clean");
+        assert_eq!(clean_refreshed.sync_state, Some(RemoteSyncState::Clean));
+        assert_eq!(
+            clean_refreshed.remote_updated_at.as_deref(),
+            Some("2026-03-26T10:32:00Z")
+        );
+        assert!(clean_refreshed.remote_hash.is_some());
+
+        let drifted_remote = json!({
+            "id": "wf-clean-remote",
+            "name": "Clean Remote Workflow",
+            "active": true,
+            "nodes": [],
+            "connections": {}
+        });
+        let drifted =
+            refresh_local_status("status", clean_status, Some(&drifted_remote)).expect("drifted");
+        assert_eq!(drifted.sync_state, Some(RemoteSyncState::Drifted));
+
+        let recorded_remote = json!({
+            "id": "wf-modified-remote",
+            "name": "Modified Remote Workflow",
+            "active": false,
+            "settings": {"timezone": "UTC"},
+            "nodes": [],
+            "connections": {}
+        });
+        let modified_refreshed =
+            refresh_local_status("status", modified_status, Some(&recorded_remote))
+                .expect("modified");
+        assert_eq!(
+            modified_refreshed.sync_state,
+            Some(RemoteSyncState::Modified)
+        );
+
+        let conflict_remote = json!({
+            "id": "wf-modified-remote",
+            "name": "Modified Remote Workflow",
+            "active": false,
+            "settings": {"timezone": "Asia/Tokyo"},
+            "nodes": [],
+            "connections": {}
+        });
+        let conflict = refresh_local_status("status", modified_status, Some(&conflict_remote))
+            .expect("conflict");
+        assert_eq!(conflict.sync_state, Some(RemoteSyncState::Conflict));
+
+        let missing = refresh_local_status("status", clean_status, None).expect("missing remote");
+        assert_eq!(missing.sync_state, Some(RemoteSyncState::MissingRemote));
+        assert_eq!(
+            missing.remote_detail.as_deref(),
+            Some("Remote workflow was not found.")
+        );
+    }
+
+    #[test]
+    fn build_refreshed_diff_compares_remote_against_local() {
+        let temp = tempdir().expect("tempdir");
+        let repo = fixture_repo(temp.path());
+
+        let stored = store_workflow(
+            &repo,
+            "prod",
+            &json!({
+                "id": "wf-remote-diff",
+                "name": "Remote Diff Workflow",
+                "active": false,
+                "settings": {"timezone": "UTC"},
+                "nodes": [],
+                "connections": {}
+            }),
+        )
+        .expect("store workflow");
+
+        fs::write(
+            &stored.workflow_path,
+            r#"{
+  "id": "wf-remote-diff",
+  "name": "Remote Diff Workflow",
+  "active": true,
+  "settings": {
+    "timezone": "Europe/Amsterdam"
+  },
+  "nodes": [],
+  "connections": {}
+}
+"#,
+        )
+        .expect("write local changes");
+
+        let remote_workflow = json!({
+            "id": "wf-remote-diff",
+            "name": "Remote Diff Workflow",
+            "active": false,
+            "settings": {"timezone": "Asia/Tokyo"},
+            "updatedAt": "2026-03-26T10:33:00Z",
+            "nodes": [],
+            "connections": {}
+        });
+        let diff =
+            build_refreshed_diff("diff", &repo, &stored.workflow_path, Some(&remote_workflow))
+                .expect("build refreshed diff");
+
+        assert_eq!(diff.status.state, LocalWorkflowState::Modified);
+        assert_eq!(diff.status.sync_state, Some(RemoteSyncState::Conflict));
+        assert!(diff.remote_comparison_available);
+        assert!(diff.remote_changed_sections.contains(&"active".to_string()));
+        assert!(
+            diff.remote_changed_sections
+                .contains(&"settings".to_string())
+        );
+        assert_eq!(
+            diff.status.remote_updated_at.as_deref(),
+            Some("2026-03-26T10:33:00Z")
+        );
+        assert!(
+            diff.remote_patch
+                .expect("remote patch")
+                .contains("--- remote")
+        );
     }
 
     fn fixture_repo(root: &Path) -> LoadedRepo {

@@ -143,12 +143,18 @@ pub struct PushArgs {
 pub struct StatusArgs {
     #[arg(value_name = "PATH")]
     pub paths: Vec<PathBuf>,
+    /// Refresh tracked workflows against the current remote instance state
+    #[arg(long)]
+    pub refresh: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct DiffArgs {
     #[arg(value_name = "PATH")]
     pub file: PathBuf,
+    /// Compare the local workflow against the current remote workflow
+    #[arg(long)]
+    pub refresh: bool,
 }
 
 #[derive(Debug, Args)]
