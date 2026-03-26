@@ -1,6 +1,6 @@
 use std::{
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -1268,6 +1268,55 @@ async fn workflow_show_json_reports_webhook_urls() {
 }
 
 #[tokio::test]
+async fn workflow_show_uses_default_instance_for_local_draft_urls() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    fs::write(
+        repo.path().join("workflows").join("draft.workflow.json"),
+        serde_json::to_string_pretty(&json!({
+            "id": "wf-draft",
+            "name": "Draft Webhook",
+            "active": false,
+            "settings": {},
+            "nodes": [
+                {
+                    "id": "node-1",
+                    "name": "Webhook",
+                    "type": "n8n-nodes-base.webhook",
+                    "typeVersion": 2,
+                    "position": [0, 0],
+                    "webhookId": "draft-url",
+                    "parameters": {
+                        "path": "draft-url",
+                        "httpMethod": "POST"
+                    }
+                }
+            ],
+            "connections": {}
+        }))
+        .expect("serialize workflow"),
+    )
+    .expect("write workflow");
+
+    let output = base_command(repo.path())
+        .arg("workflow")
+        .arg("show")
+        .arg("workflows/draft.workflow.json")
+        .output()
+        .expect("run workflow show default instance");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["instance"], "mock");
+    assert_eq!(
+        envelope["data"]["webhooks"][0]["production_url"],
+        format!("{}/webhook/draft-url", server.uri())
+    );
+}
+
+#[tokio::test]
 async fn node_add_and_set_json_update_local_workflow() {
     let server = MockServer::start().await;
     let repo = tempdir().expect("tempdir");
@@ -1768,6 +1817,88 @@ async fn runs_ls_json_reports_note_when_successful_executions_are_not_saved() {
     );
 }
 
+#[tokio::test]
+async fn workflow_rm_by_id_deletes_remote_and_local_artifacts() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    let tracked_path = write_tracked_workflow(repo.path(), "mock", "wf-1", "Delete Me");
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": workflow_fixture("wf-1", "Delete Me", false)
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("workflow")
+        .arg("rm")
+        .arg("wf-1")
+        .output()
+        .expect("run workflow rm by id");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["remote_removed"], true);
+    assert_eq!(envelope["data"]["local_removed"], true);
+    assert!(!tracked_path.exists());
+    assert!(
+        !tracked_path
+            .with_file_name("delete-me--wf-1.meta.json")
+            .exists()
+    );
+    assert!(
+        !repo
+            .path()
+            .join(".n8n")
+            .join("cache")
+            .join("mock--wf-1.workflow.json")
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn workflow_rm_local_draft_removes_file_without_remote_delete() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    let draft_path = repo
+        .path()
+        .join("workflows")
+        .join("draft-only.workflow.json");
+    fs::write(
+        &draft_path,
+        serde_json::to_string_pretty(&workflow_fixture("wf-draft", "Draft Only", false))
+            .expect("serialize draft"),
+    )
+    .expect("write draft");
+
+    let output = base_command(repo.path())
+        .arg("workflow")
+        .arg("rm")
+        .arg("workflows/draft-only.workflow.json")
+        .output()
+        .expect("run workflow rm local draft");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["remote_removed"], false);
+    assert_eq!(envelope["data"]["local_removed"], true);
+    assert!(!draft_path.exists());
+}
+
 fn base_command(repo_root: &Path) -> Command {
     let mut command = Command::cargo_bin("n8nc").expect("n8nc binary");
     command
@@ -1806,6 +1937,54 @@ fn workflow_fixture(id: &str, name: &str, active: bool) -> Value {
         "nodes": [],
         "connections": {}
     })
+}
+
+fn write_tracked_workflow(root: &Path, alias: &str, id: &str, name: &str) -> PathBuf {
+    let workflow_path = root.join("workflows").join(format!(
+        "{}--{}.workflow.json",
+        name.to_lowercase().replace(' ', "-"),
+        id
+    ));
+    fs::write(
+        &workflow_path,
+        serde_json::to_string_pretty(&json!({
+            "id": id,
+            "name": name,
+            "active": false,
+            "settings": {},
+            "nodes": [],
+            "connections": {}
+        }))
+        .expect("serialize workflow"),
+    )
+    .expect("write tracked workflow");
+
+    fs::write(
+        workflow_path.with_file_name(format!("{}--{}.meta.json", name.to_lowercase().replace(' ', "-"), id)),
+        serde_json::to_string_pretty(&json!({
+            "schema_version": 1,
+            "canonical_version": 1,
+            "hash_algorithm": "sha256",
+            "instance": alias,
+            "workflow_id": id,
+            "local_relpath": format!("workflows/{}--{}.workflow.json", name.to_lowercase().replace(' ', "-"), id),
+            "pulled_at": "2026-03-26T00:00:00Z",
+            "remote_updated_at": null,
+            "remote_hash": "sha256:test"
+        }))
+        .expect("serialize meta"),
+    )
+    .expect("write meta");
+
+    fs::write(
+        root.join(".n8n")
+            .join("cache")
+            .join(format!("{alias}--{id}.workflow.json")),
+        serde_json::to_string_pretty(&workflow_fixture(id, name, false)).expect("serialize cache"),
+    )
+    .expect("write cache");
+
+    workflow_path
 }
 
 fn workflow_with_sensitive_literal() -> Value {
