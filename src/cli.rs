@@ -457,7 +457,7 @@ pub struct CredentialArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum CredentialCommand {
-    /// Set a credential reference on a node
+    /// Set a credential reference on a node using an existing n8n credential ID
     Set(CredentialSetArgs),
 }
 
@@ -467,6 +467,7 @@ pub struct CredentialSetArgs {
     pub node: String,
     #[arg(long = "type")]
     pub credential_type: String,
+    /// Existing credential ID from n8n; this API does not expose credential listing
     #[arg(long = "id")]
     pub credential_id: String,
     #[arg(long)]

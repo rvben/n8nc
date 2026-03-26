@@ -111,6 +111,10 @@ struct WorkflowWebhookRow {
     test_url: Option<String>,
 }
 
+const WORKFLOW_UPDATE_MUTABLE_FIELDS: &[&str] = &["name", "nodes", "connections", "settings"];
+const ACTIVATION_POLL_ATTEMPTS: usize = 8;
+const ACTIVATION_POLL_INTERVAL_MS: u64 = 250;
+
 #[derive(Debug, Clone, Serialize)]
 struct ExecutionListRow {
     id: String,
@@ -1224,8 +1228,10 @@ async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), AppError> {
             )
         })?;
     let remote_workflow = remote.get("data").cloned().unwrap_or(remote);
-    let remote_hash = hash_value(&canonicalize_workflow(&remote_workflow)?)?;
+    let remote_canonical = canonicalize_workflow(&remote_workflow)?;
+    let remote_hash = hash_value(&remote_canonical)?;
     let local_hash = hash_value(&canonical)?;
+    let unsupported_changes = unsupported_push_fields(&canonical, &remote_canonical);
 
     if remote_hash != meta.remote_hash {
         return Err(AppError::conflict(
@@ -1249,9 +1255,28 @@ async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), AppError> {
         return Ok(());
     }
 
-    let updated = client
-        .update_workflow(&meta.workflow_id, &canonical)
-        .await?;
+    if !unsupported_changes.is_empty() {
+        return Err(AppError::validation(
+            "push",
+            format!(
+                "`push` only updates `name`, `nodes`, `connections`, and `settings`. Local changes also modified unsupported field(s): {}.",
+                unsupported_changes.join(", ")
+            ),
+        )
+        .with_suggestion(
+            "Use `activate`/`deactivate` for workflow state changes, or re-pull after editing unsupported fields in n8n.",
+        ));
+    }
+
+    let payload = workflow_update_payload(&workflow)?;
+    client.update_workflow(&meta.workflow_id, &payload).await?;
+    let updated = fetch_workflow_required(
+        &client,
+        &meta.workflow_id,
+        "push",
+        "could not be re-fetched after push",
+    )
+    .await?;
     let stored = store_workflow(&repo, &alias, &updated)?;
     let warnings = sensitive_data_diagnostics(&stored.workflow_path)?;
     let warning_count = warnings.len();
@@ -1328,7 +1353,7 @@ async fn cmd_workflow_create(context: &Context, args: WorkflowCreateArgs) -> Res
 
     let payload = workflow_create_payload(&source_path)?;
     let (client, _, base_url) = remote_client(&repo, Some(&alias), "workflow")?;
-    let mut created = client.create_workflow(&payload).await?;
+    let created = client.create_workflow(&payload).await?;
     let created_id = workflow_id(&created).ok_or_else(|| {
         AppError::api(
             "workflow",
@@ -1337,19 +1362,18 @@ async fn cmd_workflow_create(context: &Context, args: WorkflowCreateArgs) -> Res
         )
     })?;
 
-    if args.activate {
+    let created = if args.activate {
         client.activate_workflow(&created_id).await?;
-        let Some(remote_workflow) = client.get_workflow_by_id(&created_id).await? else {
-            return Err(AppError::not_found(
-                "workflow",
-                format!("Workflow `{created_id}` was created but could not be re-fetched."),
-            ));
-        };
-        created = remote_workflow
-            .get("data")
-            .cloned()
-            .unwrap_or(remote_workflow);
-    }
+        wait_for_workflow_active_state(&client, &created_id, "workflow", true).await?
+    } else {
+        fetch_workflow_required(
+            &client,
+            &created_id,
+            "workflow",
+            "was created but could not be re-fetched",
+        )
+        .await?
+    };
 
     let stored = store_workflow(&repo, &alias, &created)?;
     let (source_removed, cleanup_warning) =
@@ -1747,6 +1771,12 @@ async fn cmd_credential_set(context: &Context, args: CredentialSetArgs) -> Resul
             ),
             ("node".to_string(), json!(args.node)),
             ("credential_type".to_string(), json!(args.credential_type)),
+            (
+                "credential_discovery".to_string(),
+                json!(
+                    "This n8n API does not expose credential listing, so `credential set` requires an existing credential ID from the n8n UI or another trusted source."
+                ),
+            ),
         ],
     )
 }
@@ -1999,7 +2029,8 @@ async fn cmd_diff(context: &Context, args: DiffArgs) -> Result<(), AppError> {
 async fn cmd_activation(context: &Context, args: IdArgs, active: bool) -> Result<(), AppError> {
     let command = if active { "activate" } else { "deactivate" };
     let repo = load_loaded_repo(context)?;
-    let (client, _, base_url) = remote_client(&repo, args.remote.instance.as_deref(), command)?;
+    let alias = resolve_instance_alias(&repo, args.remote.instance.as_deref(), command)?;
+    let (client, _, base_url) = remote_client(&repo, Some(&alias), command)?;
     let workflow = client.resolve_workflow(&args.identifier).await?;
     let workflow_id = workflow_id(&workflow).ok_or_else(|| {
         AppError::api(
@@ -2014,18 +2045,16 @@ async fn cmd_activation(context: &Context, args: IdArgs, active: bool) -> Result
     } else {
         client.deactivate_workflow(&workflow_id).await?;
     }
-    let current = client
-        .get_workflow_by_id(&workflow_id)
-        .await?
-        .ok_or_else(|| {
-            AppError::not_found(
-                command,
-                format!("Workflow `{workflow_id}` could not be re-fetched after {command}."),
-            )
-        })?
-        .get("data")
-        .cloned()
-        .unwrap_or_else(|| workflow.clone());
+    let current = wait_for_workflow_active_state(&client, &workflow_id, command, active).await?;
+    if let Some(path) = find_existing_workflow_path(&repo, &workflow_id) {
+        let meta_path = sidecar_path_for(&path);
+        if meta_path.exists() {
+            let meta = load_meta(&meta_path, command)?;
+            if meta.instance == alias {
+                let _ = store_workflow(&repo, &alias, &current)?;
+            }
+        }
+    }
     let active_state = workflow_active(&current).unwrap_or(active);
     let webhooks = summarize_workflow_webhooks(&current, Some(base_url.as_str()));
 
@@ -2557,6 +2586,66 @@ fn remote_client(
     Ok((client, source, instance.base_url.clone()))
 }
 
+async fn fetch_workflow_required(
+    client: &ApiClient,
+    workflow_id: &str,
+    command: &'static str,
+    context: &'static str,
+) -> Result<Value, AppError> {
+    let remote = client
+        .get_workflow_by_id(workflow_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::not_found(command, format!("Workflow `{workflow_id}` {context}."))
+        })?;
+    Ok(remote.get("data").cloned().unwrap_or(remote))
+}
+
+async fn wait_for_workflow_active_state(
+    client: &ApiClient,
+    workflow_id: &str,
+    command: &'static str,
+    desired_active: bool,
+) -> Result<Value, AppError> {
+    let mut last_workflow = None;
+    let mut observed_active = None;
+
+    for attempt in 0..ACTIVATION_POLL_ATTEMPTS {
+        let current = fetch_workflow_required(
+            client,
+            workflow_id,
+            command,
+            "could not be re-fetched after the state change",
+        )
+        .await?;
+        observed_active = workflow_active(&current);
+        if observed_active == Some(desired_active) {
+            return Ok(current);
+        }
+        last_workflow = Some(current);
+
+        if attempt + 1 < ACTIVATION_POLL_ATTEMPTS {
+            thread::sleep(Duration::from_millis(ACTIVATION_POLL_INTERVAL_MS));
+        }
+    }
+
+    Err(AppError::api(
+        command,
+        "workflow.state_not_converged",
+        format!(
+            "Workflow `{workflow_id}` did not report `{}` after `{command}`.",
+            if desired_active { "active" } else { "inactive" }
+        ),
+    )
+    .with_suggestion("Re-run the command or inspect the workflow with `n8nc get <id>`.")
+    .with_json_data(json!({
+        "workflow_id": workflow_id,
+        "expected_active": desired_active,
+        "observed_active": observed_active,
+        "last_workflow": last_workflow,
+    })))
+}
+
 fn parse_pairs(
     command: &'static str,
     field_name: &'static str,
@@ -2684,6 +2773,73 @@ fn workflow_create_payload(path: &Path) -> Result<Value, AppError> {
 
     normalize_remote_create_payload(&mut payload)?;
     canonicalize_workflow(&payload)
+}
+
+fn workflow_update_payload(workflow: &Value) -> Result<Value, AppError> {
+    let mut payload = canonicalize_workflow(workflow)?;
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| AppError::validation("push", "Workflow payload must be a JSON object."))?;
+    apply_default_workflow_settings(object)?;
+
+    let has_name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_name {
+        return Err(AppError::validation(
+            "push",
+            "Workflow file must include a non-empty `name` before it can be pushed.",
+        ));
+    }
+    if !matches!(object.get("nodes"), Some(Value::Array(_))) {
+        return Err(AppError::validation(
+            "push",
+            "Workflow file must include a `nodes` array before it can be pushed.",
+        ));
+    }
+    if !matches!(object.get("connections"), Some(Value::Object(_))) {
+        return Err(AppError::validation(
+            "push",
+            "Workflow file must include a `connections` object before it can be pushed.",
+        ));
+    }
+
+    normalize_remote_create_payload(&mut payload)?;
+    let payload_object = payload
+        .as_object()
+        .ok_or_else(|| AppError::validation("push", "Workflow payload must be a JSON object."))?;
+    let mut out = serde_json::Map::new();
+    for field in WORKFLOW_UPDATE_MUTABLE_FIELDS {
+        if let Some(value) = payload_object.get(*field) {
+            out.insert((*field).to_string(), value.clone());
+        }
+    }
+
+    canonicalize_workflow(&Value::Object(out))
+}
+
+fn unsupported_push_fields(local: &Value, remote: &Value) -> Vec<String> {
+    let Some(local_object) = local.as_object() else {
+        return Vec::new();
+    };
+    let Some(remote_object) = remote.as_object() else {
+        return Vec::new();
+    };
+
+    let supported: BTreeSet<&str> = WORKFLOW_UPDATE_MUTABLE_FIELDS.iter().copied().collect();
+    let mut keys = BTreeSet::new();
+    for key in local_object.keys() {
+        keys.insert(key.clone());
+    }
+    for key in remote_object.keys() {
+        keys.insert(key.clone());
+    }
+
+    keys.into_iter()
+        .filter(|key| key != "id" && !supported.contains(key.as_str()))
+        .filter(|key| local_object.get(key) != remote_object.get(key))
+        .collect()
 }
 
 fn apply_default_workflow_settings(
@@ -3651,6 +3807,7 @@ mod tests {
     use super::{
         ExecutionListRow, execution_duration_ms, execution_node_rows, format_duration,
         note_new_executions, parse_runs_time_filter, parse_time_window, summarize_sync_states,
+        unsupported_push_fields, workflow_update_payload,
     };
 
     #[test]
@@ -3849,5 +4006,59 @@ mod tests {
         assert_eq!(summary.drifted, 0);
         assert_eq!(summary.conflict, 0);
         assert_eq!(summary.missing_remote, 0);
+    }
+
+    #[test]
+    fn workflow_update_payload_only_keeps_mutable_fields() {
+        let payload = workflow_update_payload(&json!({
+            "id": "wf-1",
+            "name": "Example",
+            "active": true,
+            "description": "ignored",
+            "tags": [{"id": "tag-1"}],
+            "nodes": [],
+            "connections": {},
+            "settings": {},
+            "meta": {"foo": "bar"}
+        }))
+        .expect("update payload");
+
+        assert_eq!(
+            payload,
+            json!({
+                "name": "Example",
+                "settings": {
+                    "executionOrder": "v1",
+                    "saveDataErrorExecution": "all",
+                    "saveDataSuccessExecution": "all",
+                    "saveExecutionProgress": true,
+                    "saveManualExecutions": true
+                },
+                "nodes": [],
+                "connections": {}
+            })
+        );
+    }
+
+    #[test]
+    fn unsupported_push_fields_only_reports_non_mutable_differences() {
+        let local = json!({
+            "id": "wf-1",
+            "name": "Example",
+            "active": true,
+            "nodes": [{"name": "Webhook"}],
+            "connections": {},
+            "settings": {}
+        });
+        let remote = json!({
+            "id": "wf-1",
+            "name": "Example",
+            "active": false,
+            "nodes": [{"name": "Webhook"}],
+            "connections": {},
+            "settings": {}
+        });
+
+        assert_eq!(unsupported_push_fields(&local, &remote), vec!["active"]);
     }
 }
