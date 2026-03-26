@@ -101,20 +101,8 @@ impl ApiClient {
                     )
                 })?;
 
-            for workflow in page_data {
-                if let Some(filter) = &options.name_filter {
-                    let name = workflow
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    if !name
-                        .to_ascii_lowercase()
-                        .contains(&filter.to_ascii_lowercase())
-                    {
-                        continue;
-                    }
-                }
-                results.push(workflow);
+            if append_matching_workflows(&mut results, &page_data, options) {
+                break;
             }
 
             next_cursor = page
@@ -412,4 +400,77 @@ fn parse_error_message(body: &str) -> Option<String> {
 fn parse_body(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(bytes).to_string()))
+}
+
+fn append_matching_workflows(
+    results: &mut Vec<Value>,
+    page_data: &[Value],
+    options: &ListOptions,
+) -> bool {
+    let limit = usize::from(options.limit);
+    for workflow in page_data {
+        if let Some(filter) = &options.name_filter {
+            let name = workflow
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !name
+                .to_ascii_lowercase()
+                .contains(&filter.to_ascii_lowercase())
+            {
+                continue;
+            }
+        }
+        results.push(workflow.clone());
+        if results.len() >= limit {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{ListOptions, append_matching_workflows};
+
+    #[test]
+    fn append_matching_workflows_honors_limit_and_filter() {
+        let page = vec![
+            json!({"id":"a","name":"Alpha"}),
+            json!({"id":"b","name":"Beta"}),
+            json!({"id":"c","name":"Alphabet"}),
+        ];
+
+        let mut limited = Vec::new();
+        let reached_limit = append_matching_workflows(
+            &mut limited,
+            &page,
+            &ListOptions {
+                limit: 2,
+                active: None,
+                name_filter: None,
+            },
+        );
+        assert!(reached_limit);
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited[0]["id"], "a");
+        assert_eq!(limited[1]["id"], "b");
+
+        let mut filtered = Vec::new();
+        let reached_limit = append_matching_workflows(
+            &mut filtered,
+            &page,
+            &ListOptions {
+                limit: 5,
+                active: None,
+                name_filter: Some("alpha".to_string()),
+            },
+        );
+        assert!(!reached_limit);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0]["id"], "a");
+        assert_eq!(filtered[1]["id"], "c");
+    }
 }
