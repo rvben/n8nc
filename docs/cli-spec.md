@@ -127,6 +127,7 @@ Checks currently include:
 - repo `config_file`
 - repo `workflow_dir`
 - repo `cache_dir`
+- repo `sensitive_data`
 - repo `instances`
 - repo `default_instance`
 - per-instance `config`
@@ -138,6 +139,8 @@ Failure behavior:
 - returns exit code `13` when any check fails
 - in JSON mode, returns an error envelope with the full doctor report attached under `data`
 - in human mode, prints the report before returning the failure summary
+
+`repo.sensitive_data` scans tracked `.workflow.json` files and fails when it finds likely inline secrets. It is skipped when the workflow directory is missing.
 
 ## 5. API Assumptions
 
@@ -330,6 +333,17 @@ Additional JSON fields in refresh mode:
 - connection targets point to existing node names
 - if a sidecar exists, `workflow_id` matches the workflow file
 
+`validate` also emits non-fatal warnings for likely sensitive literals in tracked workflow files, including:
+
+- inline private key material
+- URLs with embedded basic-auth credentials
+- token-like literal prefixes such as `sk-`, `ghp_`, `github_pat_`, `xoxb-`, `xoxp-`, and `Bearer ...`
+- literal values stored under field names like `password`, `token`, `secret`, `clientSecret`, or `apiKey`
+
+The scanner intentionally ignores obvious placeholders and common n8n dynamic references such as `={{ ... }}` and `$env.*`.
+
+Warnings do not fail `validate`, but they are returned in human output, JSON output, and the post-write summaries from `pull` and successful `push`.
+
 ## 12. Execution Inspection
 
 `runs ls` returns recent executions from the remote instance.
@@ -475,6 +489,8 @@ Error envelope:
 
 Validation failures and `doctor` failures may also include a `data` object with diagnostics or the full doctor report.
 
+`validate` success and failure payloads include both `error_count` and `warning_count`. `pull` and successful `push` also include `warning_count`, plus `diagnostics` when warnings are present.
+
 ## 14. Exit Codes
 
 - `0`: success
@@ -496,6 +512,7 @@ Validation failures and `doctor` failures may also include a `data` object with 
 - remote drift and API health remain opt-in via `status --refresh`, `diff --refresh`, and `doctor`.
 - `doctor` uses a cheap workflow-list probe and does not verify every endpoint.
 - `diff` is best after a fresh `pull`, because older repos may not have cached base snapshots yet.
+- sensitive-data scanning is heuristic. It is tuned to catch likely mistakes, not to prove a workflow is secret-free.
 
 ## 16. Next Likely Steps
 

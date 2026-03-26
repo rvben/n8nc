@@ -120,6 +120,8 @@ Validate tracked workflows:
 n8nc validate
 ```
 
+`validate` fails on structural errors and emits non-fatal warnings for likely sensitive literals in tracked workflow files.
+
 See which tracked files changed locally:
 
 ```bash
@@ -201,13 +203,16 @@ If remote refresh fails for a tracked workflow, `status --refresh` still returns
 
 `push` uses the sidecar metadata as a lease check and refuses to overwrite a workflow that changed remotely since the last `pull`.
 
+`pull`, successful `push`, and `validate` all scan tracked workflow files for likely sensitive literals such as inline tokens, private keys, and URLs with embedded credentials.
+
 ## Design Notes
 
 - Same-instance first: tracked files are bound to the instance they were pulled from.
 - Agent-safe: every command supports `--json`.
 - Deterministic: workflows are canonicalized before storage and hashing.
 - Explicit refresh: remote drift is only reported when you ask for it with `--refresh`.
-- Fast setup check: `doctor` validates repo layout, token availability, and live API reachability.
+- Sensitive-data aware: `validate` emits warnings, not hard failures, for likely secret literals in tracked workflow files.
+- Fast setup check: `doctor` validates repo layout, token availability, live API reachability, and scans tracked workflow files for likely sensitive literals.
 - Dev-loop friendly: `runs ls`, `runs get --details`, and `runs watch` cover recent execution inspection without leaving the terminal.
 - Time-window aware: `runs ls` and `runs watch` support `--since <RFC3339>` and `--last <window>` with `s`, `m`, `h`, and `d` units.
 - Honest triggering: `trigger` is an HTTP call helper for webhook URLs, not a guessed “execute workflow” API wrapper.
