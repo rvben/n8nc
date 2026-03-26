@@ -26,7 +26,7 @@ use crate::{
         NodeRenameArgs, NodeSetArgs, PullArgs, PushArgs, RunsArgs, RunsCommand, RunsGetArgs,
         RunsListArgs, RunsTimeArgs, RunsWatchArgs, StatusArgs, TriggerArgs, ValidateArgs,
         ValueModeArgs, WorkflowArgs, WorkflowCommand, WorkflowCreateArgs, WorkflowNewArgs,
-        WorkflowShowArgs,
+        WorkflowRemoveArgs, WorkflowShowArgs,
     },
     config::{
         InstanceConfig, LoadedRepo, RepoConfig, ensure_gitignore, ensure_repo_layout, load_repo,
@@ -40,9 +40,9 @@ use crate::{
     error::AppError,
     repo::{
         LocalWorkflowState, RemoteSyncState, build_local_diff, build_refreshed_diff,
-        collect_json_targets, format_json_file, load_meta, load_workflow_file,
-        refresh_local_status, scan_local_status, sidecar_path_for, store_workflow, workflow_active,
-        workflow_id, workflow_name, workflow_updated_at,
+        cache_snapshot_path, collect_json_targets, find_existing_workflow_path, format_json_file,
+        load_meta, load_workflow_file, refresh_local_status, scan_local_status, sidecar_path_for,
+        store_workflow, workflow_active, workflow_id, workflow_name, workflow_updated_at,
     },
     validate::{Severity, sensitive_data_diagnostics, validate_workflow_path},
 };
@@ -209,6 +209,20 @@ struct SyncSummary {
     conflict: usize,
     missing_remote: usize,
     unavailable: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowRemoveResult {
+    target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instance: Option<String>,
+    remote_removed: bool,
+    local_removed: bool,
+    removed_paths: Vec<PathBuf>,
 }
 
 const WEBHOOK_NODE_TYPE: &str = "n8n-nodes-base.webhook";
@@ -1266,6 +1280,7 @@ async fn cmd_workflow(context: &Context, args: WorkflowArgs) -> Result<(), AppEr
         WorkflowCommand::New(args) => cmd_workflow_new(context, args).await,
         WorkflowCommand::Create(args) => cmd_workflow_create(context, args).await,
         WorkflowCommand::Show(args) => cmd_workflow_show(context, args).await,
+        WorkflowCommand::Rm(args) => cmd_workflow_remove(context, args).await,
     }
 }
 
@@ -1423,6 +1438,45 @@ async fn cmd_workflow_show(context: &Context, args: WorkflowShowArgs) -> Result<
         print_workflow_nodes(&nodes);
         print_workflow_connections(&connections);
         print_workflow_webhooks(&webhooks);
+        Ok(())
+    }
+}
+
+async fn cmd_workflow_remove(context: &Context, args: WorkflowRemoveArgs) -> Result<(), AppError> {
+    let target_path = resolve_existing_workflow_path(context, &args.target);
+    let result = if let Some(path) = target_path {
+        remove_workflow_by_path(context, &args, &path).await?
+    } else {
+        remove_workflow_by_identifier(context, &args).await?
+    };
+
+    if context.json {
+        emit_json("workflow", &result)
+    } else {
+        if result.remote_removed {
+            println!(
+                "Deleted remote workflow {}{}.",
+                result
+                    .workflow_id
+                    .as_deref()
+                    .unwrap_or(result.target.as_str()),
+                result
+                    .workflow_name
+                    .as_deref()
+                    .map(|name| format!(" ({name})"))
+                    .unwrap_or_default()
+            );
+        }
+        if result.local_removed {
+            println!("Removed local artifacts:");
+            for path in &result.removed_paths {
+                println!("  {}", path.display());
+            }
+        } else if args.keep_local {
+            println!("Kept local artifacts.");
+        } else if !result.remote_removed {
+            println!("Removed local workflow file.");
+        }
         Ok(())
     }
 }
@@ -2785,6 +2839,16 @@ fn resolve_local_file_path(context: &Context, path: &Path) -> Result<PathBuf, Ap
     Ok(context_root(context)?.join(path))
 }
 
+fn resolve_existing_workflow_path(context: &Context, target: &str) -> Option<PathBuf> {
+    let raw = Path::new(target);
+    let resolved = resolve_local_file_path(context, raw).ok()?;
+    if resolved.is_file() {
+        Some(resolved)
+    } else {
+        None
+    }
+}
+
 fn resolve_new_workflow_path(
     context: &Context,
     explicit: Option<&Path>,
@@ -2865,7 +2929,10 @@ fn resolve_workflow_show_instance(
         return Ok(Some(meta.instance));
     }
 
-    let _ = context;
+    if let Ok(repo) = load_repo(context.repo_root.as_deref()) {
+        return Ok(Some(repo.config.default_instance));
+    }
+
     Ok(None)
 }
 
@@ -2881,6 +2948,162 @@ fn resolve_instance_base_url(
         AppError::config("workflow", format!("Unknown instance alias `{alias}`."))
     })?;
     Ok(Some(instance.base_url.clone()))
+}
+
+async fn remove_workflow_by_path(
+    context: &Context,
+    args: &WorkflowRemoveArgs,
+    path: &Path,
+) -> Result<WorkflowRemoveResult, AppError> {
+    let workflow = canonicalize_workflow(&load_workflow_file(path, "workflow")?)?;
+    let meta_path = sidecar_path_for(path);
+    let meta = if meta_path.exists() {
+        Some(load_meta(&meta_path, "workflow")?)
+    } else {
+        None
+    };
+    let workflow_id = meta
+        .as_ref()
+        .map(|meta| meta.workflow_id.clone())
+        .or_else(|| workflow_id(&workflow));
+    let workflow_name = workflow_name(&workflow);
+    let instance = args
+        .remote
+        .instance
+        .clone()
+        .or_else(|| meta.as_ref().map(|meta| meta.instance.clone()));
+
+    let remote_removed = if args.local_only || meta.is_none() && args.remote.instance.is_none() {
+        false
+    } else {
+        let workflow_id = workflow_id.clone().ok_or_else(|| {
+            AppError::validation(
+                "workflow",
+                format!(
+                    "Cannot delete remote workflow for {} because the local file is missing `id`.",
+                    path.display()
+                ),
+            )
+        })?;
+        let repo = load_loaded_repo(context)?;
+        let (client, _, _) = remote_client(&repo, instance.as_deref(), "workflow")?;
+        client.delete_workflow(&workflow_id).await?;
+        true
+    };
+
+    let removed_paths = if args.keep_local {
+        Vec::new()
+    } else {
+        remove_local_workflow_artifacts(
+            context.repo_root.as_deref(),
+            path,
+            meta.as_ref().map(|meta| meta.instance.as_str()),
+            workflow_id.as_deref(),
+        )?
+    };
+
+    Ok(WorkflowRemoveResult {
+        target: path.display().to_string(),
+        workflow_id,
+        workflow_name,
+        instance,
+        remote_removed,
+        local_removed: !removed_paths.is_empty(),
+        removed_paths,
+    })
+}
+
+async fn remove_workflow_by_identifier(
+    context: &Context,
+    args: &WorkflowRemoveArgs,
+) -> Result<WorkflowRemoveResult, AppError> {
+    let repo = load_loaded_repo(context)?;
+    let alias = resolve_instance_alias(&repo, args.remote.instance.as_deref(), "workflow")?;
+    let (client, _, _) = remote_client(&repo, Some(&alias), "workflow")?;
+    let workflow = client.resolve_workflow(&args.target).await?;
+    let workflow_id = workflow_id(&workflow).ok_or_else(|| {
+        AppError::api(
+            "workflow",
+            "api.invalid_response",
+            "Workflow payload was missing `id`.",
+        )
+    })?;
+    let workflow_name = workflow_name(&workflow);
+    client.delete_workflow(&workflow_id).await?;
+
+    let removed_paths = if args.keep_local {
+        Vec::new()
+    } else if let Some(path) = find_existing_workflow_path(&repo, &workflow_id) {
+        let meta_path = sidecar_path_for(&path);
+        let meta_instance = if meta_path.exists() {
+            Some(load_meta(&meta_path, "workflow")?.instance)
+        } else {
+            Some(alias.clone())
+        };
+        remove_local_workflow_artifacts(
+            Some(&repo.root),
+            &path,
+            meta_instance.as_deref(),
+            Some(&workflow_id),
+        )?
+    } else {
+        Vec::new()
+    };
+
+    Ok(WorkflowRemoveResult {
+        target: args.target.clone(),
+        workflow_id: Some(workflow_id),
+        workflow_name,
+        instance: Some(alias),
+        remote_removed: true,
+        local_removed: !removed_paths.is_empty(),
+        removed_paths,
+    })
+}
+
+fn remove_local_workflow_artifacts(
+    repo_root: Option<&Path>,
+    workflow_path: &Path,
+    instance: Option<&str>,
+    workflow_id: Option<&str>,
+) -> Result<Vec<PathBuf>, AppError> {
+    let mut removed = Vec::new();
+
+    if workflow_path.exists() {
+        fs::remove_file(workflow_path).map_err(|err| {
+            AppError::validation(
+                "workflow",
+                format!("Failed to remove {}: {err}", workflow_path.display()),
+            )
+        })?;
+        removed.push(workflow_path.to_path_buf());
+    }
+
+    let meta_path = sidecar_path_for(workflow_path);
+    if meta_path.exists() {
+        fs::remove_file(&meta_path).map_err(|err| {
+            AppError::validation(
+                "workflow",
+                format!("Failed to remove {}: {err}", meta_path.display()),
+            )
+        })?;
+        removed.push(meta_path);
+    }
+
+    if let (Some(root), Some(instance), Some(workflow_id)) = (repo_root, instance, workflow_id) {
+        let cache_path = cache_snapshot_path(root, instance, workflow_id);
+        if cache_path.exists() {
+            fs::remove_file(&cache_path).map_err(|err| {
+                AppError::validation(
+                    "workflow",
+                    format!("Failed to remove {}: {err}", cache_path.display()),
+                )
+            })?;
+            removed.push(cache_path);
+        }
+    }
+
+    Ok(removed)
 }
 
 fn summarize_workflow_nodes(workflow: &Value) -> Vec<WorkflowNodeRow> {

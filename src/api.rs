@@ -311,6 +311,17 @@ impl ApiClient {
         .map(|_| ())
     }
 
+    pub async fn delete_workflow(&self, workflow_id: &str) -> Result<(), AppError> {
+        self.request_json_optional(
+            Method::DELETE,
+            &format!("workflows/{workflow_id}"),
+            &[],
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub async fn trigger(
         &self,
         target: &str,

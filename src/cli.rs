@@ -253,6 +253,8 @@ pub enum WorkflowCommand {
     Create(WorkflowCreateArgs),
     /// Show a local workflow summary, graph, and webhook URLs
     Show(WorkflowShowArgs),
+    /// Remove a workflow remotely and clean up local artifacts
+    Rm(WorkflowRemoveArgs),
 }
 
 #[derive(Debug, Args)]
@@ -285,6 +287,20 @@ pub struct WorkflowShowArgs {
     #[command(flatten)]
     pub remote: RemoteArgs,
     pub file: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowRemoveArgs {
+    #[command(flatten)]
+    pub remote: RemoteArgs,
+    /// Workflow file path, workflow ID, or exact workflow name
+    pub target: String,
+    /// Remove only local artifacts and skip any remote delete
+    #[arg(long, conflicts_with = "keep_local")]
+    pub local_only: bool,
+    /// Delete remotely but keep local workflow files and metadata
+    #[arg(long, conflicts_with = "local_only")]
+    pub keep_local: bool,
 }
 
 #[derive(Debug, Args)]
