@@ -277,6 +277,51 @@ async fn runs_ls_json_since_filters_across_pages() {
 }
 
 #[tokio::test]
+async fn doctor_json_reports_success() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "wf-1", "name": "Alpha Workflow"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("doctor")
+        .arg("--instance")
+        .arg("mock")
+        .output()
+        .expect("run doctor");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "doctor");
+    assert_eq!(envelope["data"]["selected_instance"], "mock");
+    assert_eq!(envelope["data"]["summary"]["fail"], 0);
+
+    let checks = envelope["data"]["checks"].as_array().expect("check list");
+    assert!(
+        checks
+            .iter()
+            .any(|check| check["name"] == "token" && check["status"] == "ok")
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|check| check["name"] == "api" && check["status"] == "ok")
+    );
+}
+
+#[tokio::test]
 async fn runs_get_json_details_returns_execution_payload() {
     let server = MockServer::start().await;
     let repo = tempdir().expect("tempdir");
@@ -716,6 +761,53 @@ async fn runs_ls_json_rejects_invalid_last_window() {
     );
 }
 
+#[tokio::test]
+async fn doctor_json_reports_failure_with_attached_data() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    let alias = "doctor-missing-token-alias-7f5a1c";
+    write_repo_with_alias(repo.path(), &server.uri(), alias);
+
+    let output = Command::cargo_bin("n8nc")
+        .expect("n8nc binary")
+        .arg("--json")
+        .arg("--repo-root")
+        .arg(repo.path())
+        .arg("doctor")
+        .arg("--instance")
+        .arg(alias)
+        .env_remove("N8NC_TOKEN_DOCTOR_MISSING_TOKEN_ALIAS_7F5A1C")
+        .output()
+        .expect("run doctor failure");
+
+    assert_eq!(output.status.code(), Some(13));
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["command"], "doctor");
+    assert_eq!(envelope["error"]["code"], "doctor.failed");
+    assert_eq!(envelope["data"]["selected_instance"], alias);
+    assert_eq!(envelope["data"]["summary"]["fail"], 1);
+    assert_eq!(envelope["data"]["summary"]["skip"], 1);
+
+    let checks = envelope["data"]["checks"].as_array().expect("check list");
+    let token_check = checks
+        .iter()
+        .find(|check| check["name"] == "token")
+        .expect("token check");
+    assert_eq!(token_check["status"], "fail");
+    assert!(
+        token_check["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("No token configured")
+    );
+    let api_check = checks
+        .iter()
+        .find(|check| check["name"] == "api")
+        .expect("api check");
+    assert_eq!(api_check["status"], "skip");
+}
+
 fn base_command(repo_root: &Path) -> Command {
     let mut command = Command::cargo_bin("n8nc").expect("n8nc binary");
     command
@@ -727,13 +819,18 @@ fn base_command(repo_root: &Path) -> Command {
 }
 
 fn write_repo(root: &Path, base_url: &str) {
+    write_repo_with_alias(root, base_url, "mock");
+}
+
+fn write_repo_with_alias(root: &Path, base_url: &str, alias: &str) {
     fs::create_dir_all(root.join("workflows")).expect("workflow dir");
+    fs::create_dir_all(root.join(".n8n").join("cache")).expect("cache dir");
     let config = format!(
         r#"schema_version = 1
-default_instance = "mock"
+default_instance = "{alias}"
 workflow_dir = "workflows"
 
-[instances.mock]
+[instances.{alias}]
 base_url = "{base_url}"
 api_version = "v1"
 "#

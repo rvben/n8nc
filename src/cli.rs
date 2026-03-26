@@ -27,6 +27,8 @@ pub struct Cli {
 pub enum Command {
     /// Initialize a repository for workflow sync
     Init(InitArgs),
+    /// Check repo, auth, and API connectivity
+    Doctor(DoctorArgs),
     /// Manage credentials for configured instances
     Auth(AuthArgs),
     /// List workflows from a remote instance
@@ -66,6 +68,15 @@ pub struct InitArgs {
     pub workflow_dir: PathBuf,
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    #[command(flatten)]
+    pub remote: RemoteArgs,
+    /// Skip live API checks and only inspect local config and auth state
+    #[arg(long)]
+    pub skip_network: bool,
 }
 
 #[derive(Debug, Args)]

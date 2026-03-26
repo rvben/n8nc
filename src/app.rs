@@ -19,8 +19,8 @@ use crate::{
     },
     canonical::{canonicalize_workflow, hash_value, pretty_json},
     cli::{
-        AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, Cli, Command, DiffArgs, FmtArgs,
-        GetArgs, IdArgs, InitArgs, ListArgs, PullArgs, PushArgs, RunsArgs, RunsCommand,
+        AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, Cli, Command, DiffArgs, DoctorArgs,
+        FmtArgs, GetArgs, IdArgs, InitArgs, ListArgs, PullArgs, PushArgs, RunsArgs, RunsCommand,
         RunsGetArgs, RunsListArgs, RunsTimeArgs, RunsWatchArgs, StatusArgs, TriggerArgs,
         ValidateArgs,
     },
@@ -106,6 +106,42 @@ struct AuthListRow {
     token_source: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DoctorCheckStatus {
+    Ok,
+    Fail,
+    Skip,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorCheck {
+    status: DoctorCheckStatus,
+    scope: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+    name: String,
+    detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suggestion: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorSummary {
+    ok: usize,
+    fail: usize,
+    skip: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorReport {
+    repo_root: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_instance: Option<String>,
+    checks: Vec<DoctorCheck>,
+    summary: DoctorSummary,
+}
+
 #[derive(Debug, Serialize)]
 struct StatusSummary {
     clean: usize,
@@ -133,6 +169,7 @@ pub async fn run(cli: Cli) -> Result<(), AppError> {
 
     match cli.command {
         Command::Init(args) => cmd_init(&context, args).await,
+        Command::Doctor(args) => cmd_doctor(&context, args).await,
         Command::Auth(args) => cmd_auth(&context, args).await,
         Command::Ls(args) => cmd_ls(&context, args).await,
         Command::Get(args) => cmd_get(&context, args).await,
@@ -199,6 +236,25 @@ async fn cmd_init(context: &Context, args: InitArgs) -> Result<(), AppError> {
         println!("Config: {}", root.join("n8n.toml").display());
         println!("Workflow dir: {}", root.join(config.workflow_dir).display());
         Ok(())
+    }
+}
+
+async fn cmd_doctor(context: &Context, args: DoctorArgs) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let report = build_doctor_report(&repo, &args).await?;
+
+    if report.summary.fail == 0 {
+        if context.json {
+            emit_json("doctor", &report)
+        } else {
+            print_doctor_report(&report);
+            Ok(())
+        }
+    } else {
+        if !context.json {
+            print_doctor_report(&report);
+        }
+        Err(doctor_failed_error(&report)?)
     }
 }
 
@@ -306,6 +362,342 @@ async fn cmd_auth_remove(context: &Context, args: AuthAliasArgs) -> Result<(), A
         println!("Removed token for `{alias}`.");
         Ok(())
     }
+}
+
+async fn build_doctor_report(
+    repo: &LoadedRepo,
+    args: &DoctorArgs,
+) -> Result<DoctorReport, AppError> {
+    let selected_instance = args
+        .remote
+        .instance
+        .as_deref()
+        .map(|alias| ensure_alias_exists(repo, alias, "doctor"))
+        .transpose()?;
+    let workflow_dir = repo.root.join(&repo.config.workflow_dir);
+    let cache_dir = repo.root.join(".n8n").join("cache");
+    let mut checks = Vec::new();
+
+    add_doctor_check(
+        &mut checks,
+        if repo.root.join("n8n.toml").is_file() {
+            DoctorCheckStatus::Ok
+        } else {
+            DoctorCheckStatus::Fail
+        },
+        "repo",
+        None,
+        "config_file",
+        format!("Config path: {}", repo.root.join("n8n.toml").display()),
+        Some(
+            "Run `n8nc init --instance <alias> --url <base_url>` to create the repo config."
+                .to_string(),
+        ),
+    );
+    add_doctor_check(
+        &mut checks,
+        if workflow_dir.is_dir() {
+            DoctorCheckStatus::Ok
+        } else {
+            DoctorCheckStatus::Fail
+        },
+        "repo",
+        None,
+        "workflow_dir",
+        format!("Workflow directory: {}", workflow_dir.display()),
+        Some("Create the workflow directory or rerun `n8nc init`.".to_string()),
+    );
+    add_doctor_check(
+        &mut checks,
+        if cache_dir.is_dir() {
+            DoctorCheckStatus::Ok
+        } else {
+            DoctorCheckStatus::Fail
+        },
+        "repo",
+        None,
+        "cache_dir",
+        format!("Cache directory: {}", cache_dir.display()),
+        Some("Create `.n8n/cache` or rerun `n8nc init`.".to_string()),
+    );
+    add_doctor_check(
+        &mut checks,
+        if repo.config.instances.is_empty() {
+            DoctorCheckStatus::Fail
+        } else {
+            DoctorCheckStatus::Ok
+        },
+        "repo",
+        None,
+        "instances",
+        format!("Configured instances: {}", repo.config.instances.len()),
+        Some("Add at least one instance to `n8n.toml`.".to_string()),
+    );
+    add_doctor_check(
+        &mut checks,
+        if repo
+            .config
+            .instances
+            .contains_key(&repo.config.default_instance)
+        {
+            DoctorCheckStatus::Ok
+        } else {
+            DoctorCheckStatus::Fail
+        },
+        "repo",
+        None,
+        "default_instance",
+        format!("Default instance: {}", repo.config.default_instance),
+        Some("Set `default_instance` to one of the configured aliases.".to_string()),
+    );
+
+    let instance_aliases: Vec<String> = match selected_instance.clone() {
+        Some(alias) => vec![alias],
+        None => repo.config.instances.keys().cloned().collect(),
+    };
+
+    for alias in instance_aliases {
+        let Some(instance) = repo.config.instances.get(&alias) else {
+            continue;
+        };
+
+        let client_ready = match ApiClient::new("doctor", instance, "doctor-probe".to_string()) {
+            Ok(_) => {
+                add_doctor_check(
+                    &mut checks,
+                    DoctorCheckStatus::Ok,
+                    "instance",
+                    Some(alias.clone()),
+                    "config",
+                    format!(
+                        "Base URL {} using API version {}.",
+                        instance.base_url, instance.api_version
+                    ),
+                    None,
+                );
+                true
+            }
+            Err(err) => {
+                add_doctor_check(
+                    &mut checks,
+                    DoctorCheckStatus::Fail,
+                    "instance",
+                    Some(alias.clone()),
+                    "config",
+                    err.message,
+                    err.suggestion,
+                );
+                false
+            }
+        };
+
+        let token = match resolve_token(&alias, "doctor") {
+            Ok((token, source)) => {
+                add_doctor_check(
+                    &mut checks,
+                    DoctorCheckStatus::Ok,
+                    "instance",
+                    Some(alias.clone()),
+                    "token",
+                    format!("Token available via {source}."),
+                    None,
+                );
+                Some(token)
+            }
+            Err(err) => {
+                add_doctor_check(
+                    &mut checks,
+                    DoctorCheckStatus::Fail,
+                    "instance",
+                    Some(alias.clone()),
+                    "token",
+                    err.message,
+                    err.suggestion,
+                );
+                None
+            }
+        };
+
+        if args.skip_network {
+            add_doctor_check(
+                &mut checks,
+                DoctorCheckStatus::Skip,
+                "instance",
+                Some(alias.clone()),
+                "api",
+                "Skipped live API check because `--skip-network` was requested.",
+                None,
+            );
+            continue;
+        }
+
+        if !client_ready {
+            add_doctor_check(
+                &mut checks,
+                DoctorCheckStatus::Skip,
+                "instance",
+                Some(alias.clone()),
+                "api",
+                "Skipped live API check because the instance configuration is invalid.",
+                None,
+            );
+            continue;
+        }
+
+        let Some(token) = token else {
+            add_doctor_check(
+                &mut checks,
+                DoctorCheckStatus::Skip,
+                "instance",
+                Some(alias.clone()),
+                "api",
+                "Skipped live API check because no token is configured.",
+                None,
+            );
+            continue;
+        };
+
+        let client = match ApiClient::new("doctor", instance, token) {
+            Ok(client) => client,
+            Err(err) => {
+                add_doctor_check(
+                    &mut checks,
+                    DoctorCheckStatus::Fail,
+                    "instance",
+                    Some(alias.clone()),
+                    "api",
+                    err.message,
+                    err.suggestion,
+                );
+                continue;
+            }
+        };
+
+        match client
+            .list_workflows(&ListOptions {
+                limit: 1,
+                active: None,
+                name_filter: None,
+            })
+            .await
+        {
+            Ok(workflows) => add_doctor_check(
+                &mut checks,
+                DoctorCheckStatus::Ok,
+                "instance",
+                Some(alias.clone()),
+                "api",
+                format!("API reachable (sample_count={}).", workflows.len()),
+                None,
+            ),
+            Err(err) => add_doctor_check(
+                &mut checks,
+                DoctorCheckStatus::Fail,
+                "instance",
+                Some(alias.clone()),
+                "api",
+                err.message,
+                err.suggestion,
+            ),
+        }
+    }
+
+    let summary = summarize_doctor_checks(&checks);
+    Ok(DoctorReport {
+        repo_root: repo.root.clone(),
+        selected_instance,
+        checks,
+        summary,
+    })
+}
+
+fn add_doctor_check(
+    checks: &mut Vec<DoctorCheck>,
+    status: DoctorCheckStatus,
+    scope: &'static str,
+    target: Option<String>,
+    name: impl Into<String>,
+    detail: impl Into<String>,
+    suggestion: Option<String>,
+) {
+    let suggestion = match status {
+        DoctorCheckStatus::Fail => suggestion,
+        DoctorCheckStatus::Ok | DoctorCheckStatus::Skip => None,
+    };
+    checks.push(DoctorCheck {
+        status,
+        scope,
+        target,
+        name: name.into(),
+        detail: detail.into(),
+        suggestion,
+    });
+}
+
+fn summarize_doctor_checks(checks: &[DoctorCheck]) -> DoctorSummary {
+    let mut summary = DoctorSummary {
+        ok: 0,
+        fail: 0,
+        skip: 0,
+    };
+    for check in checks {
+        match check.status {
+            DoctorCheckStatus::Ok => summary.ok += 1,
+            DoctorCheckStatus::Fail => summary.fail += 1,
+            DoctorCheckStatus::Skip => summary.skip += 1,
+        }
+    }
+    summary
+}
+
+fn doctor_failed_error(report: &DoctorReport) -> Result<AppError, AppError> {
+    let plural = if report.summary.fail == 1 { "" } else { "s" };
+    let data = serde_json::to_value(report).map_err(|err| {
+        AppError::api(
+            "doctor",
+            "output.serialize_failed",
+            format!("Failed to serialize doctor report: {err}"),
+        )
+    })?;
+    Ok(AppError::new(
+        13,
+        "doctor",
+        "doctor.failed",
+        format!(
+            "Doctor found {} failing check{}.",
+            report.summary.fail, plural
+        ),
+    )
+    .with_suggestion("Fix the failing checks and rerun `n8nc doctor`.")
+    .with_json_data(data))
+}
+
+fn print_doctor_report(report: &DoctorReport) {
+    println!("Repo root: {}", report.repo_root.display());
+    if let Some(alias) = report.selected_instance.as_deref() {
+        println!("Selected instance: {alias}");
+    }
+    println!(
+        "{:<8} {:<10} {:<16} {:<18} {}",
+        "STATUS", "SCOPE", "TARGET", "CHECK", "DETAIL"
+    );
+    for check in &report.checks {
+        println!(
+            "{:<8} {:<10} {:<16} {:<18} {}",
+            doctor_status_label(check.status),
+            check.scope,
+            check.target.as_deref().unwrap_or("-"),
+            truncate(&check.name, 18),
+            check.detail,
+        );
+        if let Some(suggestion) = &check.suggestion {
+            println!("  {}", suggestion);
+        }
+    }
+    println!(
+        "Summary: ok={}, fail={}, skip={}",
+        report.summary.ok, report.summary.fail, report.summary.skip
+    );
 }
 
 async fn cmd_ls(context: &Context, args: ListArgs) -> Result<(), AppError> {
@@ -1559,6 +1951,14 @@ fn sync_status_label(state: RemoteSyncState) -> &'static str {
         RemoteSyncState::Drifted => "drifted",
         RemoteSyncState::Conflict => "conflict",
         RemoteSyncState::MissingRemote => "missing_remote",
+    }
+}
+
+fn doctor_status_label(status: DoctorCheckStatus) -> &'static str {
+    match status {
+        DoctorCheckStatus::Ok => "ok",
+        DoctorCheckStatus::Fail => "fail",
+        DoctorCheckStatus::Skip => "skip",
     }
 }
 
