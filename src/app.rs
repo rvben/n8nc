@@ -20,12 +20,13 @@ use crate::{
     canonical::{canonicalize_workflow, hash_value, pretty_json},
     cli::{
         AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, Cli, Command, ConnAddArgs, ConnArgs,
-        ConnCommand, CredentialArgs, CredentialCommand, CredentialSetArgs, DiffArgs, DoctorArgs,
-        ExprArgs, ExprCommand, ExprSetArgs, FmtArgs, GetArgs, IdArgs, InitArgs, ListArgs,
-        NodeAddArgs, NodeArgs, NodeCommand, NodeSetArgs, PullArgs, PushArgs, RunsArgs, RunsCommand,
-        RunsGetArgs, RunsListArgs, RunsTimeArgs, RunsWatchArgs, StatusArgs, TriggerArgs,
-        ValidateArgs, ValueModeArgs, WorkflowArgs, WorkflowCommand, WorkflowCreateArgs,
-        WorkflowNewArgs,
+        ConnCommand, ConnRemoveArgs, CredentialArgs, CredentialCommand, CredentialSetArgs,
+        DiffArgs, DoctorArgs, ExprArgs, ExprCommand, ExprSetArgs, FmtArgs, GetArgs, IdArgs,
+        InitArgs, ListArgs, NodeAddArgs, NodeArgs, NodeCommand, NodeListArgs, NodeRemoveArgs,
+        NodeRenameArgs, NodeSetArgs, PullArgs, PushArgs, RunsArgs, RunsCommand, RunsGetArgs,
+        RunsListArgs, RunsTimeArgs, RunsWatchArgs, StatusArgs, TriggerArgs, ValidateArgs,
+        ValueModeArgs, WorkflowArgs, WorkflowCommand, WorkflowCreateArgs, WorkflowNewArgs,
+        WorkflowShowArgs,
     },
     config::{
         InstanceConfig, LoadedRepo, RepoConfig, ensure_gitignore, ensure_repo_layout, load_repo,
@@ -33,7 +34,8 @@ use crate::{
     },
     edit::{
         EditResult, add_connection, add_node, create_workflow, default_workflow_file_name,
-        set_credential_reference, set_node_expression, set_node_value, workflow_id_string,
+        remove_connection, remove_node, rename_node, set_credential_reference, set_node_expression,
+        set_node_value, workflow_id_string,
     },
     error::AppError,
     repo::{
@@ -66,6 +68,47 @@ struct WorkflowListRow {
     name: String,
     active: Option<bool>,
     updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowNodeRow {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    type_version: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    position: Option<Vec<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowConnectionRow {
+    from: String,
+    kind: String,
+    output_index: usize,
+    to: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowWebhookRow {
+    node: String,
+    methods: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    webhook_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    production_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    test_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,6 +210,8 @@ struct SyncSummary {
     missing_remote: usize,
     unavailable: usize,
 }
+
+const WEBHOOK_NODE_TYPE: &str = "n8n-nodes-base.webhook";
 
 pub async fn run(cli: Cli) -> Result<(), AppError> {
     let context = Context {
@@ -1210,6 +1255,7 @@ async fn cmd_workflow(context: &Context, args: WorkflowArgs) -> Result<(), AppEr
     match args.command {
         WorkflowCommand::New(args) => cmd_workflow_new(context, args).await,
         WorkflowCommand::Create(args) => cmd_workflow_create(context, args).await,
+        WorkflowCommand::Show(args) => cmd_workflow_show(context, args).await,
     }
 }
 
@@ -1256,7 +1302,7 @@ async fn cmd_workflow_create(context: &Context, args: WorkflowCreateArgs) -> Res
     }
 
     let payload = workflow_create_payload(&source_path)?;
-    let (client, _, _) = remote_client(&repo, Some(&alias), "workflow")?;
+    let (client, _, base_url) = remote_client(&repo, Some(&alias), "workflow")?;
     let mut created = client.create_workflow(&payload).await?;
     let created_id = workflow_id(&created).ok_or_else(|| {
         AppError::api(
@@ -1286,6 +1332,7 @@ async fn cmd_workflow_create(context: &Context, args: WorkflowCreateArgs) -> Res
 
     let warnings = sensitive_data_diagnostics(&stored.workflow_path)?;
     let warning_count = warnings.len();
+    let webhooks = summarize_workflow_webhooks(&created, Some(base_url.as_str()));
     if context.json {
         let mut data = serde_json::Map::new();
         data.insert("instance".to_string(), json!(alias));
@@ -1295,6 +1342,7 @@ async fn cmd_workflow_create(context: &Context, args: WorkflowCreateArgs) -> Res
         data.insert("meta_path".to_string(), json!(stored.meta_path));
         data.insert("workflow_id".to_string(), json!(stored.meta.workflow_id));
         data.insert("active".to_string(), json!(workflow_active(&created)));
+        data.insert("webhooks".to_string(), json!(webhooks));
         data.insert("warning_count".to_string(), json!(warning_count));
         if warning_count > 0 {
             data.insert("diagnostics".to_string(), json!(warnings));
@@ -1318,15 +1366,86 @@ async fn cmd_workflow_create(context: &Context, args: WorkflowCreateArgs) -> Res
         if let Some(cleanup_warning) = cleanup_warning {
             println!("{cleanup_warning}");
         }
+        print_workflow_webhooks(&webhooks);
         print_sensitive_warning_summary(&stored.workflow_path, warning_count);
+        Ok(())
+    }
+}
+
+async fn cmd_workflow_show(context: &Context, args: WorkflowShowArgs) -> Result<(), AppError> {
+    let file = resolve_local_file_path(context, &args.file)?;
+    let workflow = canonicalize_workflow(&load_workflow_file(&file, "workflow")?)?;
+    let instance = resolve_workflow_show_instance(context, &file, args.remote.instance.as_deref())?;
+    let base_url = resolve_instance_base_url(context, instance.as_deref())?;
+    let nodes = summarize_workflow_nodes(&workflow);
+    let connections = summarize_workflow_connections(&workflow);
+    let webhooks = summarize_workflow_webhooks(&workflow, base_url.as_deref());
+
+    if context.json {
+        emit_json(
+            "workflow",
+            &json!({
+                "workflow_path": file,
+                "workflow_id": workflow_id(&workflow),
+                "name": workflow_name(&workflow),
+                "active": workflow_active(&workflow),
+                "instance": instance,
+                "node_count": nodes.len(),
+                "connection_count": connections.len(),
+                "nodes": nodes,
+                "connections": connections,
+                "webhooks": webhooks,
+            }),
+        )
+    } else {
+        println!(
+            "Workflow: {}",
+            workflow_name(&workflow).unwrap_or_else(|| "<unnamed>".to_string())
+        );
+        println!("File: {}", file.display());
+        if let Some(workflow_id) = workflow_id(&workflow) {
+            println!("ID: {workflow_id}");
+        }
+        println!("Active: {}", workflow_active(&workflow).unwrap_or(false));
+        if let Some(instance) = &instance {
+            println!("Instance: {instance}");
+        }
+        print_workflow_nodes(&nodes);
+        print_workflow_connections(&connections);
+        print_workflow_webhooks(&webhooks);
         Ok(())
     }
 }
 
 async fn cmd_node(context: &Context, args: NodeArgs) -> Result<(), AppError> {
     match args.command {
+        NodeCommand::Ls(args) => cmd_node_ls(context, args).await,
         NodeCommand::Add(args) => cmd_node_add(context, args).await,
         NodeCommand::Set(args) => cmd_node_set(context, args).await,
+        NodeCommand::Rename(args) => cmd_node_rename(context, args).await,
+        NodeCommand::Rm(args) => cmd_node_remove(context, args).await,
+    }
+}
+
+async fn cmd_node_ls(context: &Context, args: NodeListArgs) -> Result<(), AppError> {
+    let file = resolve_local_file_path(context, &args.file)?;
+    let workflow = canonicalize_workflow(&load_workflow_file(&file, "node")?)?;
+    let nodes = summarize_workflow_nodes(&workflow);
+
+    if context.json {
+        emit_json(
+            "node",
+            &json!({
+                "workflow_path": file,
+                "workflow_id": workflow_id(&workflow),
+                "count": nodes.len(),
+                "nodes": nodes,
+            }),
+        )
+    } else {
+        println!("Workflow: {}", file.display());
+        print_workflow_nodes(&nodes);
+        Ok(())
     }
 }
 
@@ -1384,9 +1503,55 @@ async fn cmd_node_set(context: &Context, args: NodeSetArgs) -> Result<(), AppErr
     )
 }
 
+async fn cmd_node_rename(context: &Context, args: NodeRenameArgs) -> Result<(), AppError> {
+    let file = resolve_local_file_path(context, &args.file)?;
+    let result = rename_node(&file, &args.current_name, &args.new_name)?;
+    emit_edit_result(
+        context,
+        "node",
+        if result.changed {
+            "Renamed node in"
+        } else {
+            "No node changes for"
+        },
+        &result,
+        vec![
+            (
+                "workflow_id".to_string(),
+                json!(workflow_id_string(&result.workflow)),
+            ),
+            ("from".to_string(), json!(args.current_name)),
+            ("to".to_string(), json!(args.new_name)),
+        ],
+    )
+}
+
+async fn cmd_node_remove(context: &Context, args: NodeRemoveArgs) -> Result<(), AppError> {
+    let file = resolve_local_file_path(context, &args.file)?;
+    let result = remove_node(&file, &args.node)?;
+    emit_edit_result(
+        context,
+        "node",
+        if result.changed {
+            "Removed node from"
+        } else {
+            "No node changes for"
+        },
+        &result,
+        vec![
+            (
+                "workflow_id".to_string(),
+                json!(workflow_id_string(&result.workflow)),
+            ),
+            ("node".to_string(), json!(args.node)),
+        ],
+    )
+}
+
 async fn cmd_conn(context: &Context, args: ConnArgs) -> Result<(), AppError> {
     match args.command {
         ConnCommand::Add(args) => cmd_conn_add(context, args).await,
+        ConnCommand::Rm(args) => cmd_conn_remove(context, args).await,
     }
 }
 
@@ -1406,6 +1571,40 @@ async fn cmd_conn_add(context: &Context, args: ConnAddArgs) -> Result<(), AppErr
         "conn",
         if result.changed {
             "Updated connections in"
+        } else {
+            "No connection changes for"
+        },
+        &result,
+        vec![
+            (
+                "workflow_id".to_string(),
+                json!(workflow_id_string(&result.workflow)),
+            ),
+            ("from".to_string(), json!(args.from)),
+            ("to".to_string(), json!(args.to)),
+            ("kind".to_string(), json!(args.kind)),
+            ("output_index".to_string(), json!(args.output_index)),
+            ("input_index".to_string(), json!(args.input_index)),
+        ],
+    )
+}
+
+async fn cmd_conn_remove(context: &Context, args: ConnRemoveArgs) -> Result<(), AppError> {
+    let file = resolve_local_file_path(context, &args.file)?;
+    let result = remove_connection(
+        &file,
+        &args.from,
+        &args.to,
+        &args.kind,
+        args.target_kind.as_deref(),
+        args.output_index,
+        args.input_index,
+    )?;
+    emit_edit_result(
+        context,
+        "conn",
+        if result.changed {
+            "Removed connections from"
         } else {
             "No connection changes for"
         },
@@ -1736,7 +1935,7 @@ async fn cmd_diff(context: &Context, args: DiffArgs) -> Result<(), AppError> {
 async fn cmd_activation(context: &Context, args: IdArgs, active: bool) -> Result<(), AppError> {
     let command = if active { "activate" } else { "deactivate" };
     let repo = load_loaded_repo(context)?;
-    let (client, _, _) = remote_client(&repo, args.remote.instance.as_deref(), command)?;
+    let (client, _, base_url) = remote_client(&repo, args.remote.instance.as_deref(), command)?;
     let workflow = client.resolve_workflow(&args.identifier).await?;
     let workflow_id = workflow_id(&workflow).ok_or_else(|| {
         AppError::api(
@@ -1751,31 +1950,53 @@ async fn cmd_activation(context: &Context, args: IdArgs, active: bool) -> Result
     } else {
         client.deactivate_workflow(&workflow_id).await?;
     }
+    let current = client
+        .get_workflow_by_id(&workflow_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::not_found(
+                command,
+                format!("Workflow `{workflow_id}` could not be re-fetched after {command}."),
+            )
+        })?
+        .get("data")
+        .cloned()
+        .unwrap_or_else(|| workflow.clone());
+    let active_state = workflow_active(&current).unwrap_or(active);
+    let webhooks = summarize_workflow_webhooks(&current, Some(base_url.as_str()));
 
     if context.json {
         emit_json(
             command,
-            &json!({"workflow_id": workflow_id, "active": active}),
+            &json!({"workflow_id": workflow_id, "active": active_state, "webhooks": webhooks}),
         )
     } else {
         println!(
             "{} {}.",
-            if active { "Activated" } else { "Deactivated" },
+            if active_state {
+                "Activated"
+            } else {
+                "Deactivated"
+            },
             workflow_id
         );
+        if active_state {
+            print_workflow_webhooks(&webhooks);
+        }
         Ok(())
     }
 }
 
 async fn cmd_trigger(context: &Context, args: TriggerArgs) -> Result<(), AppError> {
     let repo = load_loaded_repo(context)?;
-    let (client, _, _) = remote_client(&repo, args.remote.instance.as_deref(), "trigger")?;
+    let (client, _, base_url) = remote_client(&repo, args.remote.instance.as_deref(), "trigger")?;
     let headers = parse_pairs("trigger", "header", &args.headers, ':')?;
     let query = parse_pairs("trigger", "query", &args.query, '=')?;
     let body = read_request_body(args.data, args.data_file, args.stdin)?;
     let response = client
         .trigger(&args.target, &args.method, &headers, &query, body)
-        .await?;
+        .await
+        .map_err(|err| enrich_trigger_error(err, &base_url, &args.target))?;
 
     if context.json {
         emit_json("trigger", &response)
@@ -2367,7 +2588,54 @@ fn workflow_create_payload(path: &Path) -> Result<Value, AppError> {
         ));
     }
 
-    Ok(payload)
+    normalize_remote_create_payload(&mut payload)?;
+    canonicalize_workflow(&payload)
+}
+
+fn normalize_remote_create_payload(payload: &mut Value) -> Result<(), AppError> {
+    let Some(nodes) = payload.get_mut("nodes").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    for node in nodes {
+        normalize_remote_create_node(node)?;
+    }
+    Ok(())
+}
+
+fn normalize_remote_create_node(node: &mut Value) -> Result<(), AppError> {
+    if node.get("type").and_then(Value::as_str) != Some(WEBHOOK_NODE_TYPE) {
+        return Ok(());
+    }
+    let node_object = node.as_object_mut().ok_or_else(|| {
+        AppError::validation("workflow", "Workflow node entry must be a JSON object.")
+    })?;
+    let parameters = node_object
+        .entry("parameters".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let parameters = parameters.as_object_mut().ok_or_else(|| {
+        AppError::validation("workflow", "Webhook node `parameters` must be an object.")
+    })?;
+    let normalized_path = parameters
+        .get("path")
+        .and_then(Value::as_str)
+        .map(normalize_webhook_path)
+        .filter(|path| !path.is_empty());
+    if let Some(path) = normalized_path {
+        parameters.insert("path".to_string(), Value::String(path.clone()));
+        let existing_webhook_id = node_object
+            .get("webhookId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if existing_webhook_id.is_none() {
+            node_object.insert("webhookId".to_string(), Value::String(path));
+        }
+    }
+    let type_version = node_object.get("typeVersion").and_then(Value::as_f64);
+    if type_version.is_none_or(|version| version < 2.0) {
+        node_object.insert("typeVersion".to_string(), json!(2));
+    }
+    Ok(())
 }
 
 fn read_request_body(
@@ -2517,6 +2785,324 @@ fn finalize_created_workflow_source(
                 source_path.display()
             )),
         ),
+    }
+}
+
+fn resolve_workflow_show_instance(
+    context: &Context,
+    file: &Path,
+    explicit_alias: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    if let Some(alias) = explicit_alias {
+        return Ok(Some(alias.to_string()));
+    }
+
+    let meta_path = sidecar_path_for(file);
+    if meta_path.exists() {
+        let meta = load_meta(&meta_path, "workflow")?;
+        return Ok(Some(meta.instance));
+    }
+
+    let _ = context;
+    Ok(None)
+}
+
+fn resolve_instance_base_url(
+    context: &Context,
+    alias: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    let Some(alias) = alias else {
+        return Ok(None);
+    };
+    let repo = load_loaded_repo(context)?;
+    let instance = repo.config.instances.get(alias).ok_or_else(|| {
+        AppError::config("workflow", format!("Unknown instance alias `{alias}`."))
+    })?;
+    Ok(Some(instance.base_url.clone()))
+}
+
+fn summarize_workflow_nodes(workflow: &Value) -> Vec<WorkflowNodeRow> {
+    let mut rows = workflow
+        .get("nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|node| WorkflowNodeRow {
+            name: node
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("<unnamed>")
+                .to_string(),
+            node_id: value_string(node, "id"),
+            node_type: value_string(node, "type"),
+            type_version: node.get("typeVersion").and_then(Value::as_f64),
+            position: node.get("position").and_then(parse_position),
+            disabled: node.get("disabled").and_then(Value::as_bool),
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
+    rows
+}
+
+fn summarize_workflow_connections(workflow: &Value) -> Vec<WorkflowConnectionRow> {
+    let mut rows = Vec::new();
+    let Some(connections) = workflow.get("connections").and_then(Value::as_object) else {
+        return rows;
+    };
+
+    for (from, kinds) in connections {
+        let Some(kinds) = kinds.as_object() else {
+            continue;
+        };
+        for (kind, branches) in kinds {
+            let Some(branches) = branches.as_array() else {
+                continue;
+            };
+            for (output_index, branch) in branches.iter().enumerate() {
+                let Some(entries) = branch.as_array() else {
+                    continue;
+                };
+                for entry in entries {
+                    let Some(to) = entry.get("node").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    rows.push(WorkflowConnectionRow {
+                        from: from.clone(),
+                        kind: kind.clone(),
+                        output_index,
+                        to: to.to_string(),
+                        target_kind: value_string(entry, "type"),
+                        input_index: entry
+                            .get("index")
+                            .and_then(Value::as_u64)
+                            .map(|value| value as usize),
+                    });
+                }
+            }
+        }
+    }
+
+    rows.sort_by(|left, right| {
+        (
+            left.from.as_str(),
+            left.kind.as_str(),
+            left.output_index,
+            left.to.as_str(),
+            left.input_index.unwrap_or(usize::MAX),
+        )
+            .cmp(&(
+                right.from.as_str(),
+                right.kind.as_str(),
+                right.output_index,
+                right.to.as_str(),
+                right.input_index.unwrap_or(usize::MAX),
+            ))
+    });
+    rows
+}
+
+fn summarize_workflow_webhooks(
+    workflow: &Value,
+    base_url: Option<&str>,
+) -> Vec<WorkflowWebhookRow> {
+    let mut rows = workflow
+        .get("nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|node| node.get("type").and_then(Value::as_str) == Some(WEBHOOK_NODE_TYPE))
+        .map(|node| {
+            let node_name = node
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("<unnamed>")
+                .to_string();
+            let path = node
+                .get("parameters")
+                .and_then(Value::as_object)
+                .and_then(|parameters| parameters.get("path"))
+                .and_then(Value::as_str)
+                .map(normalize_webhook_path)
+                .filter(|path| !path.is_empty());
+            let methods = webhook_methods(node);
+            let production_url = path
+                .as_deref()
+                .zip(base_url)
+                .map(|(path, base)| format!("{}/webhook/{}", base.trim_end_matches('/'), path));
+            let test_url = path.as_deref().zip(base_url).map(|(path, base)| {
+                format!("{}/webhook-test/{}", base.trim_end_matches('/'), path)
+            });
+
+            WorkflowWebhookRow {
+                node: node_name,
+                methods,
+                path,
+                webhook_id: value_string(node, "webhookId"),
+                production_url,
+                test_url,
+            }
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.node.cmp(&right.node));
+    rows
+}
+
+fn parse_position(value: &Value) -> Option<Vec<i64>> {
+    let position = value.as_array()?;
+    let coords = position
+        .iter()
+        .map(|entry| entry.as_i64())
+        .collect::<Option<Vec<_>>>()?;
+    if coords.is_empty() {
+        None
+    } else {
+        Some(coords)
+    }
+}
+
+fn webhook_methods(node: &Value) -> Vec<String> {
+    let Some(parameters) = node.get("parameters").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    if let Some(method) = parameters.get("httpMethod").and_then(Value::as_str) {
+        return vec![method.to_string()];
+    }
+    parameters
+        .get("httpMethods")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn print_workflow_nodes(rows: &[WorkflowNodeRow]) {
+    if rows.is_empty() {
+        println!("Nodes: none");
+        return;
+    }
+
+    println!("Nodes:");
+    println!(
+        "{:<24} {:<28} {:<10} {:<14} {}",
+        "NAME", "TYPE", "VERSION", "POSITION", "DISABLED"
+    );
+    for row in rows {
+        let position = row
+            .position
+            .as_ref()
+            .map(|coords| {
+                coords
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_else(|| "-".to_string());
+        let version = row
+            .type_version
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:<24} {:<28} {:<10} {:<14} {}",
+            truncate(&row.name, 24),
+            truncate(row.node_type.as_deref().unwrap_or("-"), 28),
+            truncate(&version, 10),
+            truncate(&position, 14),
+            row.disabled.unwrap_or(false)
+        );
+    }
+}
+
+fn print_workflow_connections(rows: &[WorkflowConnectionRow]) {
+    if rows.is_empty() {
+        println!("Connections: none");
+        return;
+    }
+
+    println!("Connections:");
+    println!(
+        "{:<24} {:<10} {:<6} {:<24} {:<12} {}",
+        "FROM", "KIND", "OUT", "TO", "TARGET", "IN"
+    );
+    for row in rows {
+        println!(
+            "{:<24} {:<10} {:<6} {:<24} {:<12} {}",
+            truncate(&row.from, 24),
+            truncate(&row.kind, 10),
+            row.output_index,
+            truncate(&row.to, 24),
+            truncate(row.target_kind.as_deref().unwrap_or("-"), 12),
+            row.input_index
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+    }
+}
+
+fn print_workflow_webhooks(rows: &[WorkflowWebhookRow]) {
+    if rows.is_empty() {
+        return;
+    }
+
+    println!("Webhooks:");
+    for row in rows {
+        let methods = if row.methods.is_empty() {
+            "-".to_string()
+        } else {
+            row.methods.join(",")
+        };
+        println!(
+            "  {} [{}] path={} webhook_id={}",
+            row.node,
+            methods,
+            row.path.as_deref().unwrap_or("-"),
+            row.webhook_id.as_deref().unwrap_or("-"),
+        );
+        if let Some(url) = &row.production_url {
+            println!("  production: {url}");
+        }
+        if let Some(url) = &row.test_url {
+            println!("  test: {url}");
+        }
+    }
+}
+
+fn normalize_webhook_path(path: &str) -> String {
+    path.trim_matches('/').to_string()
+}
+
+fn enrich_trigger_error(mut err: AppError, base_url: &str, target: &str) -> AppError {
+    if err.command != "trigger" || !err.code.starts_with("trigger.http_404") {
+        return err;
+    }
+
+    let resolved_path = resolve_trigger_path(base_url, target);
+    if let Some(path) = &resolved_path {
+        if path.starts_with("/webhook-test/") {
+            err.suggestion = Some(
+                "Test webhook URLs only work while the workflow is listening in test mode in n8n. Use the editor test listener or call the production `/webhook/...` URL for active workflows.".to_string(),
+            );
+        } else if path.starts_with("/webhook/") {
+            err.suggestion = Some(
+                "Production webhook 404s usually mean the path is wrong, the workflow is inactive, or n8n has not registered the webhook yet. Check `n8nc workflow show <file>` for the expected URL and re-activate the workflow if needed.".to_string(),
+            );
+        }
+    }
+    err
+}
+
+fn resolve_trigger_path(base_url: &str, target: &str) -> Option<String> {
+    if target.starts_with("http://") || target.starts_with("https://") {
+        reqwest::Url::parse(target)
+            .ok()
+            .map(|url| url.path().to_string())
+    } else {
+        reqwest::Url::parse(base_url)
+            .ok()
+            .and_then(|base| base.join(target.trim_start_matches('/')).ok())
+            .map(|url| url.path().to_string())
     }
 }
 

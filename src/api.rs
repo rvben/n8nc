@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, time::Duration};
 use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode, Url};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{config::InstanceConfig, error::AppError};
 
@@ -351,6 +351,7 @@ impl ApiClient {
             url.query_pairs_mut().append_pair(key, value);
         }
 
+        let request_path = url.path().to_string();
         let mut request = self.client.request(method, url);
         for (key, value) in headers {
             request = request.header(key, value);
@@ -384,11 +385,20 @@ impl ApiClient {
         let body = parse_body(bytes.as_ref());
 
         if !status.is_success() {
-            return Err(AppError::api(
+            let mut error = AppError::api(
                 self.command,
                 format!("trigger.http_{}", status.as_u16()),
-                format!("Webhook returned HTTP {}.", status.as_u16()),
-            ));
+                format_trigger_http_error(status, &request_path, &body),
+            )
+            .with_json_data(json!({
+                "status": status.as_u16(),
+                "headers": headers,
+                "body": body,
+            }));
+            if let Some(suggestion) = trigger_error_suggestion(status, &request_path) {
+                error = error.with_suggestion(suggestion);
+            }
+            return Err(error);
         }
 
         Ok(TriggerResponse {
@@ -499,6 +509,46 @@ fn parse_error_message(body: &str) -> Option<String> {
 fn parse_body(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(bytes).to_string()))
+}
+
+fn format_trigger_http_error(status: StatusCode, path: &str, body: &Value) -> String {
+    let mut message = format!("Webhook returned HTTP {} for `{path}`.", status.as_u16());
+    let body_summary = summarize_trigger_body(body);
+    if !body_summary.is_empty() {
+        message.push_str(" Response body: ");
+        message.push_str(&body_summary);
+    }
+    message
+}
+
+fn summarize_trigger_body(body: &Value) -> String {
+    match body {
+        Value::Null => String::new(),
+        Value::String(text) => text.trim().chars().take(200).collect(),
+        Value::Object(object) => object
+            .get("message")
+            .and_then(Value::as_str)
+            .map(|text| text.trim().chars().take(200).collect())
+            .unwrap_or_else(|| body.to_string().chars().take(200).collect()),
+        _ => body.to_string().chars().take(200).collect(),
+    }
+}
+
+fn trigger_error_suggestion(status: StatusCode, path: &str) -> Option<&'static str> {
+    if status != StatusCode::NOT_FOUND {
+        return None;
+    }
+    if path.starts_with("/webhook-test/") {
+        return Some(
+            "Test webhook URLs only work while the workflow is listening in test mode in n8n.",
+        );
+    }
+    if path.starts_with("/webhook/") {
+        return Some(
+            "Production webhook 404s usually mean the path is wrong, the workflow is inactive, or n8n has not registered the webhook yet.",
+        );
+    }
+    None
 }
 
 fn append_matching_workflows(

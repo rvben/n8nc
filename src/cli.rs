@@ -251,6 +251,8 @@ pub enum WorkflowCommand {
     New(WorkflowNewArgs),
     /// Create a remote workflow from a local file and start tracking it
     Create(WorkflowCreateArgs),
+    /// Show a local workflow summary, graph, and webhook URLs
+    Show(WorkflowShowArgs),
 }
 
 #[derive(Debug, Args)]
@@ -279,6 +281,13 @@ pub struct WorkflowCreateArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct WorkflowShowArgs {
+    #[command(flatten)]
+    pub remote: RemoteArgs,
+    pub file: PathBuf,
+}
+
+#[derive(Debug, Args)]
 pub struct NodeArgs {
     #[command(subcommand)]
     pub command: NodeCommand,
@@ -286,10 +295,21 @@ pub struct NodeArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum NodeCommand {
+    /// List nodes in a local workflow file
+    Ls(NodeListArgs),
     /// Add a node to a local workflow file
     Add(NodeAddArgs),
     /// Set a node field or parameter path
     Set(NodeSetArgs),
+    /// Rename a node and rewrite connection references
+    Rename(NodeRenameArgs),
+    /// Remove a node and all of its connections
+    Rm(NodeRemoveArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct NodeListArgs {
+    pub file: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -299,8 +319,8 @@ pub struct NodeAddArgs {
     pub name: String,
     #[arg(long = "type")]
     pub node_type: String,
-    #[arg(long, default_value_t = 1.0)]
-    pub type_version: f64,
+    #[arg(long)]
+    pub type_version: Option<f64>,
     #[arg(long, default_value_t = 0)]
     pub x: i64,
     #[arg(long, default_value_t = 0)]
@@ -318,6 +338,19 @@ pub struct NodeSetArgs {
     pub value: Option<String>,
     #[command(flatten)]
     pub mode: ValueModeArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct NodeRenameArgs {
+    pub file: PathBuf,
+    pub current_name: String,
+    pub new_name: String,
+}
+
+#[derive(Debug, Args)]
+pub struct NodeRemoveArgs {
+    pub file: PathBuf,
+    pub node: String,
 }
 
 #[derive(Debug, Args)]
@@ -342,6 +375,8 @@ pub struct ConnArgs {
 pub enum ConnCommand {
     /// Add a connection between two nodes
     Add(ConnAddArgs),
+    /// Remove a connection between two nodes
+    Rm(ConnRemoveArgs),
 }
 
 #[derive(Debug, Args)]
@@ -359,6 +394,23 @@ pub struct ConnAddArgs {
     pub output_index: usize,
     #[arg(long, default_value_t = 0)]
     pub input_index: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct ConnRemoveArgs {
+    pub file: PathBuf,
+    #[arg(long)]
+    pub from: String,
+    #[arg(long)]
+    pub to: String,
+    #[arg(long, default_value = "main")]
+    pub kind: String,
+    #[arg(long)]
+    pub target_kind: Option<String>,
+    #[arg(long)]
+    pub output_index: Option<usize>,
+    #[arg(long)]
+    pub input_index: Option<usize>,
 }
 
 #[derive(Debug, Args)]
