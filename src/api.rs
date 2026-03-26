@@ -352,11 +352,17 @@ impl ApiClient {
         }
 
         let request_path = url.path().to_string();
+        let has_content_type = headers
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case("content-type"));
         let mut request = self.client.request(method, url);
         for (key, value) in headers {
             request = request.header(key, value);
         }
         if let Some(body) = body {
+            if !has_content_type && body_looks_like_json(&body) {
+                request = request.header("Content-Type", "application/json");
+            }
             request = request.body(body);
         }
 
@@ -509,6 +515,10 @@ fn parse_error_message(body: &str) -> Option<String> {
 fn parse_body(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(bytes).to_string()))
+}
+
+fn body_looks_like_json(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(bytes).is_ok()
 }
 
 fn format_trigger_http_error(status: StatusCode, path: &str, body: &Value) -> String {

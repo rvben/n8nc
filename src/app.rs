@@ -34,8 +34,8 @@ use crate::{
     },
     edit::{
         EditResult, add_connection, add_node, create_workflow, default_workflow_file_name,
-        remove_connection, remove_node, rename_node, set_credential_reference, set_node_expression,
-        set_node_value, workflow_id_string,
+        default_workflow_settings, remove_connection, remove_node, rename_node,
+        set_credential_reference, set_node_expression, set_node_value, workflow_id_string,
     },
     error::AppError,
     repo::{
@@ -943,9 +943,16 @@ async fn cmd_runs_ls(context: &Context, args: RunsListArgs) -> Result<(), AppErr
         args.limit,
     )
     .await?;
+    let note = execution_history_note(&client, workflow_id.as_deref(), &rows).await?;
 
     if context.json {
-        emit_json("runs", &json!({ "count": rows.len(), "executions": rows }))
+        let mut data = serde_json::Map::new();
+        data.insert("count".to_string(), json!(rows.len()));
+        data.insert("executions".to_string(), json!(rows));
+        if let Some(note) = note {
+            data.insert("note".to_string(), json!(note));
+        }
+        emit_json("runs", &Value::Object(data))
     } else {
         if let Some(workflow) = args.workflow.as_deref() {
             println!("Workflow filter: {workflow}");
@@ -955,6 +962,9 @@ async fn cmd_runs_ls(context: &Context, args: RunsListArgs) -> Result<(), AppErr
         }
         if let Some(since_label) = time_filter.describe(&since) {
             println!("{since_label}");
+        }
+        if let Some(note) = note {
+            println!("Note: {note}");
         }
         print_execution_rows(&rows);
         Ok(())
@@ -2212,6 +2222,41 @@ async fn fetch_execution_rows(
         .collect())
 }
 
+async fn execution_history_note(
+    client: &ApiClient,
+    workflow_id: Option<&str>,
+    rows: &[ExecutionListRow],
+) -> Result<Option<String>, AppError> {
+    if !rows.is_empty() {
+        return Ok(None);
+    }
+    let Some(workflow_id) = workflow_id else {
+        return Ok(None);
+    };
+    let Some(workflow) = client.get_workflow_by_id(workflow_id).await? else {
+        return Ok(None);
+    };
+    let workflow = workflow.get("data").unwrap_or(&workflow);
+    if !workflow_active(workflow).unwrap_or(false) {
+        return Ok(None);
+    }
+
+    let save_success = workflow
+        .get("settings")
+        .and_then(Value::as_object)
+        .and_then(|settings| settings.get("saveDataSuccessExecution"))
+        .and_then(Value::as_str);
+
+    if save_success == Some("all") {
+        return Ok(None);
+    }
+
+    Ok(Some(format!(
+        "Workflow settings do not explicitly save successful production executions (`saveDataSuccessExecution = {}`). Successful runs may not appear in `runs ls`.",
+        save_success.unwrap_or("unset"),
+    )))
+}
+
 async fn workflow_name_for_execution(
     client: &ApiClient,
     execution: &Value,
@@ -2558,12 +2603,7 @@ fn workflow_create_payload(path: &Path) -> Result<Value, AppError> {
     })?;
     object.remove("id");
     object.remove("active");
-    if !object.contains_key("settings") {
-        object.insert(
-            "settings".to_string(),
-            Value::Object(serde_json::Map::new()),
-        );
-    }
+    apply_default_workflow_settings(object)?;
 
     let has_name = object
         .get("name")
@@ -2590,6 +2630,28 @@ fn workflow_create_payload(path: &Path) -> Result<Value, AppError> {
 
     normalize_remote_create_payload(&mut payload)?;
     canonicalize_workflow(&payload)
+}
+
+fn apply_default_workflow_settings(
+    object: &mut serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    let settings = object
+        .entry("settings".to_string())
+        .or_insert_with(default_workflow_settings);
+    let settings_object = settings.as_object_mut().ok_or_else(|| {
+        AppError::validation("workflow", "Workflow `settings` field must be an object.")
+    })?;
+
+    for (key, value) in default_workflow_settings()
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        settings_object
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
+    Ok(())
 }
 
 fn normalize_remote_create_payload(payload: &mut Value) -> Result<(), AppError> {

@@ -56,7 +56,7 @@ pub fn create_workflow(
             .unwrap_or_else(|| generated_local_id("draft")),
         "name": name,
         "active": active,
-        "settings": {},
+        "settings": default_workflow_settings(),
         "nodes": [],
         "connections": {}
     }))?;
@@ -364,6 +364,16 @@ pub fn remove_connection(
 
 pub fn default_workflow_file_name(name: &str, workflow_id: &str) -> String {
     format!("{}--{}.workflow.json", slugify(name), workflow_id)
+}
+
+pub fn default_workflow_settings() -> Value {
+    json!({
+        "executionOrder": "v1",
+        "saveDataErrorExecution": "all",
+        "saveDataSuccessExecution": "all",
+        "saveManualExecutions": true,
+        "saveExecutionProgress": true
+    })
 }
 
 fn set_node_value_inner(
@@ -979,8 +989,8 @@ mod tests {
 
     use super::{
         add_connection, add_node, create_workflow, default_workflow_file_name,
-        normalize_expression, parse_path, remove_connection, remove_node, rename_node,
-        set_credential_reference, set_node_expression, set_node_value,
+        default_workflow_settings, normalize_expression, parse_path, remove_connection,
+        remove_node, rename_node, set_credential_reference, set_node_expression, set_node_value,
     };
     use crate::repo::load_workflow_file;
 
@@ -998,6 +1008,10 @@ mod tests {
         assert_eq!(
             result.workflow.get("name").and_then(|value| value.as_str()),
             Some("Order Alert")
+        );
+        assert_eq!(
+            result.workflow.get("settings"),
+            Some(&default_workflow_settings())
         );
         assert!(path.exists());
     }
