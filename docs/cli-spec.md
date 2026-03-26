@@ -11,6 +11,7 @@ It is intentionally narrower than the original brainstorm. The tool is now speci
 - listing workflows from a configured n8n instance
 - listing recent executions and fetching one execution by ID
 - fetching one workflow into a canonical local artifact
+- creating local workflow drafts and editing local workflow JSON structurally
 - validating and formatting local workflow files
 - pushing a tracked workflow back safely
 - activating and deactivating workflows
@@ -20,7 +21,7 @@ It is intentionally narrower than the original brainstorm. The tool is now speci
 
 - promoting a workflow across multiple environments
 - remapping credential IDs or project bindings between instances
-- creating a new workflow from a local file
+- creating a remote workflow from a local file through the public API
 - generic execution control through undocumented or unverified endpoints
 
 ## 2. Command Surface
@@ -42,6 +43,12 @@ n8nc
 ├── runs watch
 ├── pull
 ├── push
+├── workflow new
+├── node add
+├── node set
+├── conn add
+├── expr set
+├── credential set
 ├── status
 ├── diff
 ├── activate
@@ -90,6 +97,8 @@ workflows/<slug>--<workflow_id>.meta.json
 ```
 
 The path is intentionally environment-neutral, but the sidecar binds the file to the instance it came from. That keeps the Git history of a single instance clean while making the current scope explicit.
+
+`workflow new` creates a local `.workflow.json` draft without a sidecar. Drafts are editable, formattable, and validatable, but they remain `untracked` until a future remote-create flow exists.
 
 The cache stores one canonical base snapshot per tracked workflow:
 
@@ -320,7 +329,47 @@ Additional JSON fields in refresh mode:
 - `remote_changed_sections`
 - optional `remote_patch`
 
-## 11. Validation
+## 11. Local Authoring
+
+The local authoring surface in `0.1.x` is intentionally narrow and file-based.
+
+Current commands:
+
+- `workflow new <name> [--path <path>] [--id <id>] [--active]`
+- `node add <file> --name <name> --type <node_type> [--type-version <number>] [--x <int>] [--y <int>] [--disabled]`
+- `node set <file> <node> <path> [value] [--json-value|--number|--bool|--null]`
+- `expr set <file> <node> <path> <expression>`
+- `credential set <file> <node> --type <credential_type> --id <credential_id> [--name <credential_name>]`
+- `conn add <file> --from <node> --to <node> [--kind <type>] [--target-kind <type>] [--output-index <n>] [--input-index <n>]`
+
+Behavior:
+
+- all edit commands operate on local workflow files only
+- edit commands rewrite the file in canonical JSON form after each successful mutation
+- tracked sidecars are left untouched, so tracked files become locally `modified` until they are pushed
+- edit commands also run the sensitive-data scanner after write and include `warning_count` in JSON output
+
+Path rules for `node set` and `expr set`:
+
+- `url` means `parameters.url`
+- `options.timeout` means `parameters.options.timeout`
+- explicit top-level node fields such as `position`, `disabled`, `typeVersion`, `notes`, `alwaysOutputData`, and retry-related fields are supported directly
+- `id`, `name`, `type`, and `credentials` are intentionally blocked from `node set`
+
+Expression rules:
+
+- if the input already looks like `={{ ... }}`, it is preserved
+- if the input looks like `{{ ... }}`, the CLI prefixes `=`
+- otherwise the CLI wraps the value as `={{...}}`
+
+Connection rules:
+
+- source and target node names must already exist
+- duplicate connection edges are deduplicated
+- the default source output type is `main`
+- the default target input type is the same as `--kind`
+
+## 12. Validation
 
 `validate` currently checks:
 
@@ -344,7 +393,7 @@ The scanner intentionally ignores obvious placeholders and common n8n dynamic re
 
 Warnings do not fail `validate`, but they are returned in human output, JSON output, and the post-write summaries from `pull` and successful `push`.
 
-## 12. Execution Inspection
+## 13. Execution Inspection
 
 `runs ls` returns recent executions from the remote instance.
 
@@ -435,7 +484,7 @@ The current diagnostics model is intentionally simple:
 - optional JSON path
 - optional suggestion
 
-## 12. Triggering
+## 14. Triggering
 
 The user concern that started this implementation was valid: developers need more than `pull` and `push`.
 
@@ -456,7 +505,7 @@ The current answer is:
 
 This avoids pretending there is a stable public “run workflow by ID” endpoint when that has not been verified in the implementation.
 
-## 13. JSON Contract
+## 15. JSON Contract
 
 Every command supports `--json`.
 
@@ -491,7 +540,14 @@ Validation failures and `doctor` failures may also include a `data` object with 
 
 `validate` success and failure payloads include both `error_count` and `warning_count`. `pull` and successful `push` also include `warning_count`, plus `diagnostics` when warnings are present.
 
-## 14. Exit Codes
+Local edit command success payloads include:
+
+- `workflow_path`
+- `changed`
+- `warning_count`
+- command-specific fields such as `workflow_id`, `node`, `path`, `from`, `to`, or `credential_type`
+
+## 16. Exit Codes
 
 - `0`: success
 - `2`: usage error
@@ -504,21 +560,23 @@ Validation failures and `doctor` failures may also include a `data` object with 
 - `12`: conflict refusal
 - `13`: doctor failures
 
-## 15. Known Limits
+## 17. Known Limits
 
 - The tool is currently strongest when a repo mirrors one n8n instance.
+- `workflow new` creates local drafts only. There is still no public-API-backed remote create flow.
 - `tags` are preserved structurally, not normalized semantically.
 - `ls` assumes a paginated workflow list response with `data` and optional `nextCursor`.
 - remote drift and API health remain opt-in via `status --refresh`, `diff --refresh`, and `doctor`.
 - `doctor` uses a cheap workflow-list probe and does not verify every endpoint.
 - `diff` is best after a fresh `pull`, because older repos may not have cached base snapshots yet.
 - sensitive-data scanning is heuristic. It is tuned to catch likely mistakes, not to prove a workflow is secret-free.
+- the current node-editing surface does not support renaming nodes safely yet because that also requires coordinated connection-key updates.
 
-## 16. Next Likely Steps
+## 18. Next Likely Steps
 
 The next improvements that fit the current design are:
 
-1. workflow creation from local files
+1. remote workflow creation from local files
 2. shell completions and packaging
 3. richer execution actions if public endpoints are verified
 4. more contract snapshot coverage for agent-facing JSON

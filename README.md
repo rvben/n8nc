@@ -9,6 +9,7 @@ The binary is `n8nc`.
 `n8nc` is two things:
 
 - a same-instance Git sync tool for workflows you want to track locally
+- a local authoring CLI for draft workflows and structured node edits
 - a development CLI for common remote interactions like listing workflows, fetching one, activating it, and calling webhook trigger URLs
 
 This is intentionally narrower than a full deployment platform.
@@ -30,6 +31,12 @@ Implemented commands:
 - `runs watch`
 - `pull`
 - `push`
+- `workflow new`
+- `node add`
+- `node set`
+- `conn add`
+- `expr set`
+- `credential set`
 - `status`
 - `diff`
 - `activate`
@@ -41,7 +48,7 @@ Implemented commands:
 Not implemented yet:
 
 - environment promotion across `dev/staging/prod`
-- workflow creation from local files
+- remote workflow creation from local files
 - a generic “run workflow by ID” command through the public API
 
 For triggering during development, use `trigger` against a webhook or test webhook URL.
@@ -122,6 +129,42 @@ n8nc validate
 
 `validate` fails on structural errors and emits non-fatal warnings for likely sensitive literals in tracked workflow files.
 
+Create a local workflow draft:
+
+```bash
+n8nc workflow new "Order Alert"
+```
+
+Add a node to a local workflow file:
+
+```bash
+n8nc node add workflows/order-alert--wf-draft.workflow.json --name "HTTP Request" --type n8n-nodes-base.httpRequest --type-version 4.2 --x 300 --y 160
+```
+
+Set a node parameter path:
+
+```bash
+n8nc node set workflows/order-alert--wf-draft.workflow.json "HTTP Request" url https://example.com
+```
+
+Set an expression on a node path:
+
+```bash
+n8nc expr set workflows/order-alert--wf-draft.workflow.json "HTTP Request" authentication '{{$json.authMode}}'
+```
+
+Set a credential reference on a node:
+
+```bash
+n8nc credential set workflows/order-alert--wf-draft.workflow.json "HTTP Request" --type httpBasicAuth --id cred-123 --name "Primary Basic Auth"
+```
+
+Connect two nodes:
+
+```bash
+n8nc conn add workflows/order-alert--wf-draft.workflow.json --from "Start" --to "HTTP Request"
+```
+
 See which tracked files changed locally:
 
 ```bash
@@ -177,6 +220,8 @@ workflows/<workflow-slug>--<workflow-id>.workflow.json
 workflows/<workflow-slug>--<workflow-id>.meta.json
 ```
 
+`workflow new` creates a local `.workflow.json` draft without a sidecar. It is editable, formattable, and validatable, but `push` still only supports updating workflows that were previously pulled and tracked.
+
 The sidecar stores:
 
 - the instance alias
@@ -210,12 +255,15 @@ If remote refresh fails for a tracked workflow, `status --refresh` still returns
 - Same-instance first: tracked files are bound to the instance they were pulled from.
 - Agent-safe: every command supports `--json`.
 - Deterministic: workflows are canonicalized before storage and hashing.
+- Local authoring first: `workflow new`, `node add`, `node set`, `expr set`, `credential set`, and `conn add` edit local workflow files directly.
 - Explicit refresh: remote drift is only reported when you ask for it with `--refresh`.
 - Sensitive-data aware: `validate` emits warnings, not hard failures, for likely secret literals in tracked workflow files.
 - Fast setup check: `doctor` validates repo layout, token availability, live API reachability, and scans tracked workflow files for likely sensitive literals.
 - Dev-loop friendly: `runs ls`, `runs get --details`, and `runs watch` cover recent execution inspection without leaving the terminal.
 - Time-window aware: `runs ls` and `runs watch` support `--since <RFC3339>` and `--last <window>` with `s`, `m`, `h`, and `d` units.
 - Honest triggering: `trigger` is an HTTP call helper for webhook URLs, not a guessed “execute workflow” API wrapper.
+
+`node set` and `expr set` default unknown paths to `parameters.*`, so `url` means `parameters.url` and `options.timeout` means `parameters.options.timeout`.
 
 `runs watch --json` emits one compact JSON envelope per poll. The first event is `snapshot`; later events are `update` when new executions appear or `heartbeat` when the latest window is unchanged.
 
