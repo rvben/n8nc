@@ -175,11 +175,11 @@ Each pulled workflow has a committed sidecar:
 
 The important field is `remote_hash`. It is the lease token used by `push`.
 
-## 8. Local Status Model
+## 8. Status Model
 
-`status` is local-only in `0.1.x`. It does not claim to know whether the remote instance drifted unless a future `--refresh` mode is added.
+`status` is local by default in `0.1.x`.
 
-Current local states:
+Base local states:
 
 - `clean`: workflow file and sidecar are valid, and the local canonical hash matches the recorded `remote_hash`
 - `modified`: workflow file and sidecar are valid, and the local canonical hash differs from the recorded `remote_hash`
@@ -195,6 +195,18 @@ Current local states:
 - unsupported `canonical_version`
 - unsupported `hash_algorithm`
 - validation errors such as missing node targets
+
+`status --refresh` adds live remote sync classification for entries that are already `clean` or `modified`.
+
+Remote sync states:
+
+- `clean`: local file still matches the remote lease recorded in the sidecar
+- `modified`: local file changed, but the remote still matches the recorded lease
+- `drifted`: local file is unchanged, but the remote no longer matches the recorded lease
+- `conflict`: both local file and remote changed since the last pull or successful push
+- `missing_remote`: the tracked workflow no longer exists remotely
+
+Entries that cannot be refreshed, such as `untracked`, `invalid`, or `orphaned_meta`, remain visible with their local state and count toward the refresh summary as `unavailable`.
 
 ## 9. Push Safety Model
 
@@ -217,9 +229,9 @@ Outcomes:
 
 After a successful push, the CLI re-writes the workflow and sidecar from the server response so local state stays canonical.
 
-## 10. Local Diff Model
+## 10. Diff Model
 
-`diff` is also local-only in `0.1.x`.
+`diff` is local by default in `0.1.x`.
 
 It compares:
 
@@ -244,6 +256,26 @@ The JSON output includes:
 - `base_snapshot_available`
 - `changed_sections`
 - optional `patch`
+
+`diff --refresh` keeps the base snapshot comparison and also fetches the current remote workflow by ID.
+
+Additional human output in refresh mode:
+
+- remote sync state
+- remote hash
+- remote update timestamp when present
+- changed top-level sections between the current remote workflow and the local file
+- unified `remote` vs `local` patch when both sides are available and differ
+
+Additional JSON fields in refresh mode:
+
+- `status.sync_state`
+- `status.remote_hash`
+- `status.remote_updated_at`
+- `status.remote_detail`
+- `remote_comparison_available`
+- `remote_changed_sections`
+- optional `remote_patch`
 
 ## 11. Validation
 

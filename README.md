@@ -80,10 +80,22 @@ See which tracked files changed locally:
 n8nc status
 ```
 
+Refresh tracked workflows against the current remote state:
+
+```bash
+n8nc status --refresh
+```
+
 Inspect one tracked workflow against its cached base snapshot:
 
 ```bash
 n8nc diff workflows/order-alert--abc123.workflow.json
+```
+
+Compare one tracked workflow against the current remote workflow too:
+
+```bash
+n8nc diff workflows/order-alert--abc123.workflow.json --refresh
 ```
 
 Push a tracked workflow back:
@@ -127,7 +139,19 @@ The sidecar stores:
 
 The cache stores the last pulled canonical workflow snapshot for local `diff`.
 
-`status` is intentionally local-only in `0.1.x`: it reports whether tracked files are `clean`, `modified`, `untracked`, `invalid`, or `orphaned_meta` without claiming remote drift knowledge.
+`status` is local by default in `0.1.x`: it reports whether tracked files are `clean`, `modified`, `untracked`, `invalid`, or `orphaned_meta`.
+
+`status --refresh` adds live remote sync states for tracked workflows:
+
+- `clean`
+- `modified`
+- `drifted`
+- `conflict`
+- `missing_remote`
+
+Entries that cannot be compared remotely still show their local state and count toward the refresh summary as `unavailable`.
+
+`diff` is local by default. `diff --refresh` adds a second comparison against the current remote workflow and shows a remote/local patch when the workflow is still remotely available.
 
 `push` uses the sidecar metadata as a lease check and refuses to overwrite a workflow that changed remotely since the last `pull`.
 
@@ -136,6 +160,7 @@ The cache stores the last pulled canonical workflow snapshot for local `diff`.
 - Same-instance first: tracked files are bound to the instance they were pulled from.
 - Agent-safe: every command supports `--json`.
 - Deterministic: workflows are canonicalized before storage and hashing.
+- Explicit refresh: remote drift is only reported when you ask for it with `--refresh`.
 - Honest triggering: `trigger` is an HTTP call helper for webhook URLs, not a guessed “execute workflow” API wrapper.
 
 ## Spec
