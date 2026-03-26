@@ -775,18 +775,43 @@ async fn cmd_diff(context: &Context, args: DiffArgs) -> Result<(), AppError> {
     }
     let diff = if args.refresh {
         let local = build_local_diff(&repo, &file)?;
-        if let (Some(instance), Some(workflow_id)) = (
-            local.status.instance.as_deref(),
-            local.status.workflow_id.as_deref(),
-        ) {
-            let client = client_for_instance(&repo, instance, "diff", &mut BTreeMap::new())?;
-            let remote = client.get_workflow_by_id(workflow_id).await?;
-            let remote_workflow = remote
-                .as_ref()
-                .map(|value| value.get("data").unwrap_or(value));
-            build_refreshed_diff("diff", &repo, &file, remote_workflow)?
-        } else {
+        if !is_refreshable_remote_status(&local.status) {
             local
+        } else {
+            match (
+                local.status.instance.clone(),
+                local.status.workflow_id.clone(),
+            ) {
+                (Some(instance), Some(workflow_id)) => {
+                    match client_for_instance(&repo, &instance, "diff", &mut BTreeMap::new()) {
+                        Ok(client) => match client.get_workflow_by_id(&workflow_id).await {
+                            Ok(remote) => {
+                                let remote_workflow = remote
+                                    .as_ref()
+                                    .map(|value| value.get("data").unwrap_or(value));
+                                match build_refreshed_diff("diff", &repo, &file, remote_workflow) {
+                                    Ok(diff) => diff,
+                                    Err(err) => {
+                                        return_diff_with_refresh_error(local, Some(&instance), err)
+                                    }
+                                }
+                            }
+                            Err(err) => return_diff_with_refresh_error(local, Some(&instance), err),
+                        },
+                        Err(err) => return_diff_with_refresh_error(local, Some(&instance), err),
+                    }
+                }
+                (None, _) => with_remote_refresh_unavailable_diff(
+                    local,
+                    "Remote refresh unavailable: tracked workflow is missing an instance alias."
+                        .to_string(),
+                ),
+                (_, None) => with_remote_refresh_unavailable_diff(
+                    local,
+                    "Remote refresh unavailable: tracked workflow is missing a workflow ID."
+                        .to_string(),
+                ),
+            }
         }
     } else {
         build_local_diff(&repo, &file)?
@@ -1378,6 +1403,9 @@ fn summarize_sync_states(statuses: &[crate::repo::LocalStatusEntry]) -> SyncSumm
         unavailable: 0,
     };
     for status in statuses {
+        if !is_refreshable_remote_status(status) {
+            continue;
+        }
         match status.sync_state {
             Some(RemoteSyncState::Clean) => summary.clean += 1,
             Some(RemoteSyncState::Modified) => summary.modified += 1,
@@ -1410,38 +1438,112 @@ fn sync_status_label(state: RemoteSyncState) -> &'static str {
     }
 }
 
+fn is_refreshable_remote_status(status: &crate::repo::LocalStatusEntry) -> bool {
+    matches!(
+        status.state,
+        LocalWorkflowState::Clean | LocalWorkflowState::Modified
+    )
+}
+
+fn remote_refresh_detail(instance: Option<&str>, message: &str) -> String {
+    match instance {
+        Some(instance) => format!("Remote refresh unavailable for `{instance}`: {message}"),
+        None => format!("Remote refresh unavailable: {message}"),
+    }
+}
+
+fn with_remote_refresh_unavailable_status(
+    status: &crate::repo::LocalStatusEntry,
+    detail: String,
+) -> crate::repo::LocalStatusEntry {
+    let mut status = status.clone();
+    status.sync_state = None;
+    status.remote_hash = None;
+    status.remote_updated_at = None;
+    status.remote_detail = Some(detail);
+    status
+}
+
+fn with_remote_refresh_unavailable_diff(
+    mut diff: crate::repo::LocalDiff,
+    detail: String,
+) -> crate::repo::LocalDiff {
+    diff.status = with_remote_refresh_unavailable_status(&diff.status, detail);
+    diff.remote_comparison_available = false;
+    diff.remote_changed_sections.clear();
+    diff.remote_patch = None;
+    diff
+}
+
+fn return_diff_with_refresh_error(
+    diff: crate::repo::LocalDiff,
+    instance: Option<&str>,
+    err: AppError,
+) -> crate::repo::LocalDiff {
+    with_remote_refresh_unavailable_diff(diff, remote_refresh_detail(instance, &err.message))
+}
+
 async fn refresh_statuses(
     repo: &LoadedRepo,
     statuses: &[crate::repo::LocalStatusEntry],
     command: &'static str,
 ) -> Result<Vec<crate::repo::LocalStatusEntry>, AppError> {
-    let mut clients = BTreeMap::new();
+    let mut clients: BTreeMap<String, Result<ApiClient, AppError>> = BTreeMap::new();
     let mut refreshed = Vec::with_capacity(statuses.len());
 
     for status in statuses {
-        if !matches!(
-            status.state,
-            LocalWorkflowState::Clean | LocalWorkflowState::Modified
-        ) {
+        if !is_refreshable_remote_status(status) {
             refreshed.push(status.clone());
             continue;
         }
 
         let Some(instance) = status.instance.as_deref() else {
-            refreshed.push(status.clone());
+            refreshed.push(with_remote_refresh_unavailable_status(
+                status,
+                "Remote refresh unavailable: tracked workflow is missing an instance alias."
+                    .to_string(),
+            ));
             continue;
         };
         let Some(workflow_id) = status.workflow_id.as_deref() else {
-            refreshed.push(status.clone());
+            refreshed.push(with_remote_refresh_unavailable_status(
+                status,
+                "Remote refresh unavailable: tracked workflow is missing a workflow ID."
+                    .to_string(),
+            ));
             continue;
         };
 
-        let client = client_for_instance(repo, instance, command, &mut clients)?;
-        let remote = client.get_workflow_by_id(workflow_id).await?;
+        let client = match client_for_instance(repo, instance, command, &mut clients) {
+            Ok(client) => client,
+            Err(err) => {
+                refreshed.push(with_remote_refresh_unavailable_status(
+                    status,
+                    remote_refresh_detail(Some(instance), &err.message),
+                ));
+                continue;
+            }
+        };
+        let remote = match client.get_workflow_by_id(workflow_id).await {
+            Ok(remote) => remote,
+            Err(err) => {
+                refreshed.push(with_remote_refresh_unavailable_status(
+                    status,
+                    remote_refresh_detail(Some(instance), &err.message),
+                ));
+                continue;
+            }
+        };
         let remote_workflow = remote
             .as_ref()
             .map(|value| value.get("data").unwrap_or(value));
-        refreshed.push(refresh_local_status(command, status, remote_workflow)?);
+        match refresh_local_status(command, status, remote_workflow) {
+            Ok(status) => refreshed.push(status),
+            Err(err) => refreshed.push(with_remote_refresh_unavailable_status(
+                status,
+                remote_refresh_detail(Some(instance), &err.message),
+            )),
+        }
     }
 
     Ok(refreshed)
@@ -1451,15 +1553,15 @@ fn client_for_instance(
     repo: &LoadedRepo,
     instance: &str,
     command: &'static str,
-    clients: &mut BTreeMap<String, ApiClient>,
+    clients: &mut BTreeMap<String, Result<ApiClient, AppError>>,
 ) -> Result<ApiClient, AppError> {
     if let Some(client) = clients.get(instance) {
-        return Ok(client.clone());
+        return client.clone();
     }
 
-    let (client, _, _) = remote_client(repo, Some(instance), command)?;
-    clients.insert(instance.to_string(), client.clone());
-    Ok(client)
+    let resolved = remote_client(repo, Some(instance), command).map(|(client, _, _)| client);
+    clients.insert(instance.to_string(), resolved.clone());
+    resolved
 }
 
 fn truncate(input: &str, width: usize) -> String {
@@ -1498,9 +1600,11 @@ mod tests {
 
     use std::collections::BTreeSet;
 
+    use crate::repo::{LocalStatusEntry, LocalWorkflowState, RemoteSyncState};
+
     use super::{
         ExecutionListRow, execution_duration_ms, execution_node_rows, format_duration,
-        note_new_executions,
+        note_new_executions, summarize_sync_states,
     };
 
     #[test]
@@ -1596,5 +1700,80 @@ mod tests {
         assert_eq!(new_rows[0].id, "101");
         assert!(known_ids.contains("100"));
         assert!(known_ids.contains("101"));
+    }
+
+    #[test]
+    fn summarize_sync_states_only_counts_refreshable_workflows() {
+        let statuses = vec![
+            LocalStatusEntry {
+                state: LocalWorkflowState::Clean,
+                file: "workflows/clean.workflow.json".into(),
+                sidecar: None,
+                workflow_id: Some("wf-clean".to_string()),
+                name: Some("Clean".to_string()),
+                instance: Some("prod".to_string()),
+                local_hash: None,
+                recorded_hash: None,
+                detail: None,
+                sync_state: Some(RemoteSyncState::Clean),
+                remote_hash: None,
+                remote_updated_at: None,
+                remote_detail: None,
+            },
+            LocalStatusEntry {
+                state: LocalWorkflowState::Modified,
+                file: "workflows/modified.workflow.json".into(),
+                sidecar: None,
+                workflow_id: Some("wf-modified".to_string()),
+                name: Some("Modified".to_string()),
+                instance: Some("prod".to_string()),
+                local_hash: None,
+                recorded_hash: None,
+                detail: None,
+                sync_state: None,
+                remote_hash: None,
+                remote_updated_at: None,
+                remote_detail: Some("Remote refresh unavailable".to_string()),
+            },
+            LocalStatusEntry {
+                state: LocalWorkflowState::Untracked,
+                file: "workflows/untracked.workflow.json".into(),
+                sidecar: None,
+                workflow_id: Some("wf-untracked".to_string()),
+                name: Some("Untracked".to_string()),
+                instance: None,
+                local_hash: None,
+                recorded_hash: None,
+                detail: Some("No metadata sidecar found.".to_string()),
+                sync_state: None,
+                remote_hash: None,
+                remote_updated_at: None,
+                remote_detail: None,
+            },
+            LocalStatusEntry {
+                state: LocalWorkflowState::OrphanedMeta,
+                file: "workflows/orphaned.meta.json".into(),
+                sidecar: None,
+                workflow_id: Some("wf-orphaned".to_string()),
+                name: None,
+                instance: Some("prod".to_string()),
+                local_hash: None,
+                recorded_hash: None,
+                detail: Some("Metadata sidecar has no matching workflow file.".to_string()),
+                sync_state: None,
+                remote_hash: None,
+                remote_updated_at: None,
+                remote_detail: None,
+            },
+        ];
+
+        let summary = summarize_sync_states(&statuses);
+
+        assert_eq!(summary.clean, 1);
+        assert_eq!(summary.unavailable, 1);
+        assert_eq!(summary.modified, 0);
+        assert_eq!(summary.drifted, 0);
+        assert_eq!(summary.conflict, 0);
+        assert_eq!(summary.missing_remote, 0);
     }
 }

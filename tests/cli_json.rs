@@ -402,6 +402,163 @@ async fn runs_watch_json_emits_update_for_new_execution() {
     assert_eq!(events[1]["data"]["new_executions"][0]["id"], "101");
 }
 
+#[tokio::test]
+async fn status_refresh_json_degrades_when_remote_lookup_fails() {
+    let setup_server = MockServer::start().await;
+    let error_server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &setup_server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": workflow_fixture("wf-1", "Alpha Workflow", false)
+        })))
+        .mount(&setup_server)
+        .await;
+
+    let pull_output = base_command(repo.path())
+        .arg("pull")
+        .arg("--instance")
+        .arg("mock")
+        .arg("wf-1")
+        .output()
+        .expect("pull workflow for refresh status test");
+    assert!(pull_output.status.success());
+
+    fs::write(
+        repo.path()
+            .join("workflows")
+            .join("untracked--wf-local.workflow.json"),
+        serde_json::to_string_pretty(&workflow_fixture("wf-local", "Local Only", false))
+            .expect("serialize untracked workflow"),
+    )
+    .expect("write untracked workflow");
+
+    write_repo(repo.path(), &error_server.uri());
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_json(json!({"message": "backend unavailable"})),
+        )
+        .mount(&error_server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("status")
+        .arg("--refresh")
+        .output()
+        .expect("run status refresh");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "status");
+    assert_eq!(envelope["data"]["summary"]["clean"], 1);
+    assert_eq!(envelope["data"]["summary"]["untracked"], 1);
+    assert_eq!(envelope["data"]["sync_summary"]["unavailable"], 1);
+
+    let workflows = envelope["data"]["workflows"]
+        .as_array()
+        .expect("workflow list");
+    let tracked = workflows
+        .iter()
+        .find(|row| row["workflow_id"] == "wf-1")
+        .expect("tracked workflow row");
+    assert_eq!(tracked["state"], "clean");
+    assert!(tracked.get("sync_state").is_none());
+    assert!(
+        tracked["remote_detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("backend unavailable")
+    );
+
+    let untracked = workflows
+        .iter()
+        .find(|row| row["workflow_id"] == "wf-local")
+        .expect("untracked workflow row");
+    assert_eq!(untracked["state"], "untracked");
+    assert!(untracked.get("remote_detail").is_none());
+}
+
+#[tokio::test]
+async fn diff_refresh_json_preserves_local_diff_when_remote_lookup_fails() {
+    let setup_server = MockServer::start().await;
+    let error_server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &setup_server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": workflow_fixture("wf-1", "Alpha Workflow", false)
+        })))
+        .mount(&setup_server)
+        .await;
+
+    let pull_output = base_command(repo.path())
+        .arg("pull")
+        .arg("--instance")
+        .arg("mock")
+        .arg("wf-1")
+        .output()
+        .expect("pull workflow for refresh diff test");
+    assert!(pull_output.status.success());
+    let pull_envelope = parse_json(&pull_output.stdout);
+    let workflow_path = pull_envelope["data"]["workflow_path"]
+        .as_str()
+        .expect("workflow path");
+
+    fs::write(
+        workflow_path,
+        serde_json::to_string_pretty(&workflow_fixture("wf-1", "Alpha Workflow", true))
+            .expect("serialize modified workflow"),
+    )
+    .expect("write modified workflow");
+
+    write_repo(repo.path(), &error_server.uri());
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(
+            ResponseTemplate::new(500).set_body_json(json!({"message": "backend unavailable"})),
+        )
+        .mount(&error_server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("diff")
+        .arg("--refresh")
+        .arg(workflow_path)
+        .output()
+        .expect("run diff refresh");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "diff");
+    assert_eq!(envelope["data"]["status"]["state"], "modified");
+    assert_eq!(envelope["data"]["remote_comparison_available"], false);
+    assert_eq!(envelope["data"]["base_snapshot_available"], true);
+    assert!(
+        envelope["data"]["patch"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--- base")
+    );
+    assert!(
+        envelope["data"]["status"]["remote_detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("backend unavailable")
+    );
+    assert!(envelope["data"].get("remote_patch").is_none());
+}
+
 fn base_command(repo_root: &Path) -> Command {
     let mut command = Command::cargo_bin("n8nc").expect("n8nc binary");
     command
@@ -425,6 +582,16 @@ api_version = "v1"
 "#
     );
     fs::write(root.join("n8n.toml"), config).expect("write n8n.toml");
+}
+
+fn workflow_fixture(id: &str, name: &str, active: bool) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "active": active,
+        "nodes": [],
+        "connections": {}
+    })
 }
 
 fn parse_json(bytes: &[u8]) -> Value {
