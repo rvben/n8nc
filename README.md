@@ -33,9 +33,14 @@ Implemented commands:
 - `push`
 - `workflow new`
 - `workflow create`
+- `workflow show`
+- `node ls`
 - `node add`
 - `node set`
+- `node rename`
+- `node rm`
 - `conn add`
+- `conn rm`
 - `expr set`
 - `credential set`
 - `status`
@@ -49,10 +54,9 @@ Implemented commands:
 Not implemented yet:
 
 - environment promotion across `dev/staging/prod`
-- structured rename/remove operations for nodes and connections
 - a generic “run workflow by ID” command through the public API
 
-For triggering during development, use `trigger` against a webhook or test webhook URL.
+For triggering during development, use `trigger` against a webhook or test webhook URL. Webhook `404`s now include the resolved path, response body, and a suggestion that distinguishes production `/webhook/...` URLs from `/webhook-test/...` URLs.
 
 ## Quickstart
 
@@ -142,6 +146,24 @@ Publish that draft to n8n and start tracking it:
 n8nc workflow create workflows/order-alert--wf-draft.workflow.json --instance prod
 ```
 
+Publish and activate a webhook workflow and get the resolved webhook URL back:
+
+```bash
+n8nc workflow create workflows/order-alert--wf-draft.workflow.json --instance prod --activate
+```
+
+Inspect a local workflow summary, graph edges, and webhook URLs:
+
+```bash
+n8nc workflow show workflows/order-alert--abc123.workflow.json
+```
+
+List nodes in a local workflow file:
+
+```bash
+n8nc node ls workflows/order-alert--wf-draft.workflow.json
+```
+
 Add a node to a local workflow file:
 
 ```bash
@@ -152,6 +174,13 @@ Set a node parameter path:
 
 ```bash
 n8nc node set workflows/order-alert--wf-draft.workflow.json "HTTP Request" url https://example.com
+```
+
+Rename or remove a node safely:
+
+```bash
+n8nc node rename workflows/order-alert--wf-draft.workflow.json "HTTP Request" "Fetch Orders"
+n8nc node rm workflows/order-alert--wf-draft.workflow.json "Fetch Orders"
 ```
 
 Set an expression on a node path:
@@ -170,6 +199,12 @@ Connect two nodes:
 
 ```bash
 n8nc conn add workflows/order-alert--wf-draft.workflow.json --from "Start" --to "HTTP Request"
+```
+
+Remove one edge from a branch:
+
+```bash
+n8nc conn rm workflows/order-alert--wf-draft.workflow.json --from "Start" --to "HTTP Request" --output-index 0 --input-index 0
 ```
 
 See which tracked files changed locally:
@@ -229,6 +264,13 @@ workflows/<workflow-slug>--<workflow-id>.meta.json
 
 `workflow new` creates a local `.workflow.json` draft without a sidecar. `workflow create` turns a sidecar-free local file into a tracked workflow by creating it remotely, writing the tracked file plus sidecar, and removing the original in-repo draft when the tracked path changes.
 
+Webhook nodes get safer defaults in the local authoring flow:
+
+- `node add --type n8n-nodes-base.webhook` defaults to `typeVersion = 2`
+- webhook nodes automatically get a `webhookId`
+- setting `path` normalizes leading and trailing slashes and keeps `webhookId` in sync while it still uses the auto-derived value
+- `workflow create`, `workflow show`, and `activate` surface resolved webhook URLs
+
 The sidecar stores:
 
 - the instance alias
@@ -262,8 +304,9 @@ If remote refresh fails for a tracked workflow, `status --refresh` still returns
 - Same-instance first: tracked files are bound to the instance they were pulled from.
 - Agent-safe: every command supports `--json`.
 - Deterministic: workflows are canonicalized before storage and hashing.
-- Local authoring first: `workflow new`, `node add`, `node set`, `expr set`, `credential set`, and `conn add` edit local workflow files directly.
+- Local authoring first: `workflow new`, `workflow show`, `node ls`, `node add`, `node set`, `node rename`, `node rm`, `expr set`, `credential set`, `conn add`, and `conn rm` edit local workflow files directly.
 - Draft-to-tracked flow: `workflow create` publishes a local draft through the official workflow-create API and converts it into a tracked file plus sidecar.
+- Better webhook ergonomics: webhook nodes are normalized for remote creation, publish and activate return the resolved URLs, and webhook trigger failures explain likely `404` causes.
 - Explicit refresh: remote drift is only reported when you ask for it with `--refresh`.
 - Sensitive-data aware: `validate` emits warnings, not hard failures, for likely secret literals in tracked workflow files.
 - Fast setup check: `doctor` validates repo layout, token availability, live API reachability, and scans tracked workflow files for likely sensitive literals.

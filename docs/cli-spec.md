@@ -22,7 +22,6 @@ It is intentionally narrower than the original brainstorm. The tool is now speci
 
 - promoting a workflow across multiple environments
 - remapping credential IDs or project bindings between instances
-- renaming or removing nodes safely across connection-key rewrites
 - generic execution control through undocumented or unverified endpoints
 
 ## 2. Command Surface
@@ -46,9 +45,14 @@ n8nc
 ├── push
 ├── workflow new
 ├── workflow create
+├── workflow show
+├── node ls
 ├── node add
 ├── node set
+├── node rename
+├── node rm
 ├── conn add
+├── conn rm
 ├── expr set
 ├── credential set
 ├── status
@@ -339,11 +343,16 @@ Current commands:
 
 - `workflow new <name> [--path <path>] [--id <id>] [--active]`
 - `workflow create <file> --instance <alias> [--activate]`
+- `workflow show <file> [--instance <alias>]`
+- `node ls <file>`
 - `node add <file> --name <name> --type <node_type> [--type-version <number>] [--x <int>] [--y <int>] [--disabled]`
 - `node set <file> <node> <path> [value] [--json-value|--number|--bool|--null]`
+- `node rename <file> <current_name> <new_name>`
+- `node rm <file> <node>`
 - `expr set <file> <node> <path> <expression>`
 - `credential set <file> <node> --type <credential_type> --id <credential_id> [--name <credential_name>]`
 - `conn add <file> --from <node> --to <node> [--kind <type>] [--target-kind <type>] [--output-index <n>] [--input-index <n>]`
+- `conn rm <file> --from <node> --to <node> [--kind <type>] [--target-kind <type>] [--output-index <n>] [--input-index <n>]`
 
 Behavior:
 
@@ -351,9 +360,18 @@ Behavior:
 - edit commands rewrite the file in canonical JSON form after each successful mutation
 - tracked sidecars are left untouched, so tracked files become locally `modified` until they are pushed
 - edit commands also run the sensitive-data scanner after write and include `warning_count` in JSON output
+- `workflow show` summarizes local nodes, edges, and webhook URLs, using the explicit `--instance` or the tracked sidecar instance when available
 - `workflow create` requires a repo because it writes the new tracked file and sidecar into the configured workflow directory
 - `workflow create` refuses files that already have a sidecar and expects you to use `push` for tracked workflows
-- `workflow create` removes local `id` and `active` before the create request, ensures `settings` exists, and stores the server response as the new source of truth
+- `workflow create` removes local `id` and `active` before the create request, ensures `settings` exists, normalizes webhook nodes for remote creation, and stores the server response as the new source of truth
+
+Webhook-specific behavior:
+
+- `node add --type n8n-nodes-base.webhook` defaults `typeVersion` to `2`
+- webhook nodes get an auto-derived `webhookId`
+- setting `path` normalizes leading and trailing slashes
+- when `webhookId` still uses the auto-derived value, changing `path` updates `webhookId` too
+- `workflow create`, `workflow show`, and `activate` return resolved production and test webhook URLs when a base URL is available
 
 Path rules for `node set` and `expr set`:
 
@@ -374,6 +392,9 @@ Connection rules:
 - duplicate connection edges are deduplicated
 - the default source output type is `main`
 - the default target input type is the same as `--kind`
+- `node rename` rewrites the node name, outbound connection key, and inbound edge targets
+- `node rm` removes the node, its outbound key, and inbound edges pointing at it
+- `conn rm` removes matching edges without disturbing other edges in the same branch
 
 ## 12. Validation
 
@@ -509,6 +530,12 @@ The current answer is:
 - repeated `--query key=value`
 - request body from `--data`, `--data-file`, or `--stdin`
 
+Webhook-specific error handling:
+
+- non-2xx responses include the resolved request path and a summarized response body in the error message
+- `404` responses for `/webhook-test/...` explain that test listeners must be active in the n8n editor
+- `404` responses for `/webhook/...` explain that the path may be wrong, the workflow may be inactive, or n8n may not have registered the webhook yet
+
 This avoids pretending there is a stable public “run workflow by ID” endpoint when that has not been verified in the implementation.
 
 ## 15. JSON Contract
@@ -560,6 +587,7 @@ Local edit command success payloads include:
 - `source_removed`
 - `meta_path`
 - optional `active`
+- optional `webhooks`
 
 ## 16. Exit Codes
 
@@ -584,14 +612,14 @@ Local edit command success payloads include:
 - `doctor` uses a cheap workflow-list probe and does not verify every endpoint.
 - `diff` is best after a fresh `pull`, because older repos may not have cached base snapshots yet.
 - sensitive-data scanning is heuristic. It is tuned to catch likely mistakes, not to prove a workflow is secret-free.
-- the current node-editing surface does not support renaming nodes safely yet because that also requires coordinated connection-key updates.
+- workflow deletion is still outside the CLI even though the public delete endpoint was used in manual verification.
 
 ## 18. Next Likely Steps
 
 The next improvements that fit the current design are:
 
-1. `node rename`, `node rm`, and `conn rm`
-2. shell completions and packaging
-3. workflow deletion if the public delete endpoint is verified in the CLI
-4. more contract snapshot coverage for agent-facing JSON
+1. shell completions and packaging
+2. workflow deletion through the public delete endpoint
+3. more contract snapshot coverage for agent-facing JSON
+4. richer workflow inspection or graph rendering in human output
 5. only after that: a real environment-promotion model with explicit mappings and lock files
