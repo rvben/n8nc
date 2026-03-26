@@ -140,6 +140,8 @@ Create a local workflow draft:
 n8nc workflow new "Order Alert"
 ```
 
+New drafts default to execution-saving settings that make fresh workflows visible in `runs ls` on instances where n8n does not save successful executions by default.
+
 Publish that draft to n8n and start tracking it:
 
 ```bash
@@ -264,6 +266,14 @@ workflows/<workflow-slug>--<workflow-id>.meta.json
 
 `workflow new` creates a local `.workflow.json` draft without a sidecar. `workflow create` turns a sidecar-free local file into a tracked workflow by creating it remotely, writing the tracked file plus sidecar, and removing the original in-repo draft when the tracked path changes.
 
+Drafts and create payloads now also fill in execution-saving workflow settings when they are missing:
+
+- `executionOrder = "v1"`
+- `saveDataSuccessExecution = "all"`
+- `saveDataErrorExecution = "all"`
+- `saveManualExecutions = true`
+- `saveExecutionProgress = true`
+
 Webhook nodes get safer defaults in the local authoring flow:
 
 - `node add --type n8n-nodes-base.webhook` defaults to `typeVersion = 2`
@@ -299,6 +309,8 @@ If remote refresh fails for a tracked workflow, `status --refresh` still returns
 
 `pull`, successful `push`, and `validate` all scan tracked workflow files for likely sensitive literals such as inline tokens, private keys, and URLs with embedded credentials.
 
+When `runs ls --workflow ...` returns no rows for an active workflow whose settings do not explicitly save successful production executions, the CLI includes a note explaining that successful runs may be omitted from execution history.
+
 ## Design Notes
 
 - Same-instance first: tracked files are bound to the instance they were pulled from.
@@ -307,12 +319,14 @@ If remote refresh fails for a tracked workflow, `status --refresh` still returns
 - Local authoring first: `workflow new`, `workflow show`, `node ls`, `node add`, `node set`, `node rename`, `node rm`, `expr set`, `credential set`, `conn add`, and `conn rm` edit local workflow files directly.
 - Draft-to-tracked flow: `workflow create` publishes a local draft through the official workflow-create API and converts it into a tracked file plus sidecar.
 - Better webhook ergonomics: webhook nodes are normalized for remote creation, publish and activate return the resolved URLs, and webhook trigger failures explain likely `404` causes.
+- Better execution ergonomics: new drafts default to saved successful executions, and `runs ls` explains one common “why is history empty?” workflow-settings pitfall.
 - Explicit refresh: remote drift is only reported when you ask for it with `--refresh`.
 - Sensitive-data aware: `validate` emits warnings, not hard failures, for likely secret literals in tracked workflow files.
 - Fast setup check: `doctor` validates repo layout, token availability, live API reachability, and scans tracked workflow files for likely sensitive literals.
 - Dev-loop friendly: `runs ls`, `runs get --details`, and `runs watch` cover recent execution inspection without leaving the terminal.
 - Time-window aware: `runs ls` and `runs watch` support `--since <RFC3339>` and `--last <window>` with `s`, `m`, `h`, and `d` units.
 - Honest triggering: `trigger` is an HTTP call helper for webhook URLs, not a guessed “execute workflow” API wrapper.
+- Smarter trigger bodies: when `--data` or `--data-file` contains JSON and you did not set `Content-Type` yourself, `trigger` sends `application/json`.
 
 `node set` and `expr set` default unknown paths to `parameters.*`, so `url` means `parameters.url` and `options.timeout` means `parameters.options.timeout`.
 

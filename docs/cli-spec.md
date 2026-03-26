@@ -106,6 +106,14 @@ The path is intentionally environment-neutral, but the sidecar binds the file to
 
 `workflow new` creates a local `.workflow.json` draft without a sidecar. `workflow create` takes a sidecar-free local file, creates it remotely, writes the tracked workflow file plus sidecar, and removes the original in-repo draft when the tracked target path changes.
 
+New drafts and create payloads fill in these workflow settings when they are missing:
+
+- `executionOrder = "v1"`
+- `saveDataSuccessExecution = "all"`
+- `saveDataErrorExecution = "all"`
+- `saveManualExecutions = true`
+- `saveExecutionProgress = true`
+
 The cache stores one canonical base snapshot per tracked workflow:
 
 ```text
@@ -363,7 +371,7 @@ Behavior:
 - `workflow show` summarizes local nodes, edges, and webhook URLs, using the explicit `--instance` or the tracked sidecar instance when available
 - `workflow create` requires a repo because it writes the new tracked file and sidecar into the configured workflow directory
 - `workflow create` refuses files that already have a sidecar and expects you to use `push` for tracked workflows
-- `workflow create` removes local `id` and `active` before the create request, ensures `settings` exists, normalizes webhook nodes for remote creation, and stores the server response as the new source of truth
+- `workflow create` removes local `id` and `active` before the create request, ensures execution-saving `settings` defaults exist, normalizes webhook nodes for remote creation, and stores the server response as the new source of truth
 
 Webhook-specific behavior:
 
@@ -455,6 +463,8 @@ List rows currently include:
 - started and stopped timestamps
 - computed duration in milliseconds when both timestamps exist
 
+If `runs ls --workflow ...` returns zero rows for an active workflow whose settings do not explicitly save successful production executions, the CLI includes a note explaining that successful runs may not appear in history.
+
 `runs get <execution-id>` returns the execution summary.
 
 `runs get <execution-id> --details` fetches the detailed execution payload and, in human output, summarizes:
@@ -529,6 +539,8 @@ The current answer is:
 - repeated `--header key:value`
 - repeated `--query key=value`
 - request body from `--data`, `--data-file`, or `--stdin`
+
+If the request body looks like JSON and no `Content-Type` header was provided explicitly, `trigger` sends `Content-Type: application/json`.
 
 Webhook-specific error handling:
 
