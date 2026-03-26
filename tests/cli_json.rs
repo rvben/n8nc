@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -91,6 +92,46 @@ impl Match for WorkflowSettingsMatcher {
 }
 
 #[derive(Debug)]
+struct WorkflowUpdatePayloadMatcher {
+    expected_name: &'static str,
+    expected_path: &'static str,
+}
+
+impl Match for WorkflowUpdatePayloadMatcher {
+    fn matches(&self, request: &Request) -> bool {
+        let Ok(payload) = serde_json::from_slice::<Value>(&request.body) else {
+            return false;
+        };
+        let Some(object) = payload.as_object() else {
+            return false;
+        };
+        let keys = object.keys().cloned().collect::<BTreeSet<_>>();
+        if keys
+            != BTreeSet::from([
+                "connections".to_string(),
+                "name".to_string(),
+                "nodes".to_string(),
+                "settings".to_string(),
+            ])
+        {
+            return false;
+        }
+        if payload.get("name").and_then(Value::as_str) != Some(self.expected_name) {
+            return false;
+        }
+        payload
+            .get("nodes")
+            .and_then(Value::as_array)
+            .and_then(|nodes| nodes.first())
+            .and_then(|node| node.get("parameters"))
+            .and_then(Value::as_object)
+            .and_then(|parameters| parameters.get("path"))
+            .and_then(Value::as_str)
+            == Some(self.expected_path)
+    }
+}
+
+#[derive(Debug)]
 struct EchoJsonResponder;
 
 impl Respond for EchoJsonResponder {
@@ -144,6 +185,20 @@ impl Respond for SequenceResponder {
             })
         };
         ResponseTemplate::new(200).set_body_json(body)
+    }
+}
+
+#[derive(Debug)]
+struct JsonSequenceResponder {
+    calls: Arc<AtomicUsize>,
+    responses: Vec<Value>,
+}
+
+impl Respond for JsonSequenceResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let index = call.min(self.responses.len().saturating_sub(1));
+        ResponseTemplate::new(200).set_body_json(self.responses[index].clone())
     }
 }
 
@@ -1024,6 +1079,25 @@ async fn workflow_create_json_promotes_draft_to_tracked_workflow() {
                 "active": false
             }
         })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-remote"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-remote",
+                "name": "Order Alert",
+                "nodes": [],
+                "connections": {},
+                "settings": {},
+                "active": false,
+                "tags": []
+            }
+        })))
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -1054,6 +1128,9 @@ async fn workflow_create_json_promotes_draft_to_tracked_workflow() {
     let meta = read_json_file(Path::new(meta_path));
     assert_eq!(meta["workflow_id"], "wf-remote");
     assert_eq!(meta["instance"], "mock");
+
+    let workflow = read_json_file(Path::new(workflow_path));
+    assert_eq!(workflow["tags"], json!([]));
 }
 
 #[tokio::test]
@@ -1190,6 +1267,37 @@ async fn workflow_create_json_emits_webhook_urls_and_normalizes_payload() {
                 "settings": {}
             }
         })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-webhook"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-webhook",
+                "name": "Incoming Webhook",
+                "active": false,
+                "nodes": [
+                    {
+                        "id": "node-1",
+                        "name": "Webhook",
+                        "type": "n8n-nodes-base.webhook",
+                        "typeVersion": 2,
+                        "position": [0, 0],
+                        "webhookId": "orders/new",
+                        "parameters": {
+                            "path": "orders/new",
+                            "httpMethod": "POST"
+                        }
+                    }
+                ],
+                "connections": {},
+                "settings": {}
+            }
+        })))
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -1317,6 +1425,312 @@ async fn workflow_show_uses_default_instance_for_local_draft_urls() {
 }
 
 #[tokio::test]
+async fn push_json_sanitizes_update_payload_and_refetches_remote() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(JsonSequenceResponder {
+            calls: calls.clone(),
+            responses: vec![
+                json!({
+                    "data": {
+                        "id": "wf-1",
+                        "name": "Incoming Webhook",
+                        "active": false,
+                        "tags": [],
+                        "nodes": [
+                            {
+                                "id": "node-1",
+                                "name": "Webhook",
+                                "type": "n8n-nodes-base.webhook",
+                                "typeVersion": 2,
+                                "position": [0, 0],
+                                "webhookId": "orders/new",
+                                "parameters": {
+                                    "path": "orders/new",
+                                    "httpMethod": "POST"
+                                }
+                            }
+                        ],
+                        "connections": {},
+                        "settings": {}
+                    }
+                }),
+                json!({
+                    "data": {
+                        "id": "wf-1",
+                        "name": "Incoming Webhook",
+                        "active": false,
+                        "tags": [],
+                        "nodes": [
+                            {
+                                "id": "node-1",
+                                "name": "Webhook",
+                                "type": "n8n-nodes-base.webhook",
+                                "typeVersion": 2,
+                                "position": [0, 0],
+                                "webhookId": "orders/new",
+                                "parameters": {
+                                    "path": "orders/new",
+                                    "httpMethod": "POST"
+                                }
+                            }
+                        ],
+                        "connections": {},
+                        "settings": {}
+                    }
+                }),
+                json!({
+                    "data": {
+                        "id": "wf-1",
+                        "name": "Incoming Webhook",
+                        "active": false,
+                        "tags": [],
+                        "nodes": [
+                            {
+                                "id": "node-1",
+                                "name": "Webhook",
+                                "type": "n8n-nodes-base.webhook",
+                                "typeVersion": 2,
+                                "position": [0, 0],
+                                "webhookId": "orders/new-2",
+                                "parameters": {
+                                    "path": "orders/new-2",
+                                    "httpMethod": "POST"
+                                }
+                            }
+                        ],
+                        "connections": {},
+                        "settings": {}
+                    }
+                }),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(WorkflowUpdatePayloadMatcher {
+            expected_name: "Incoming Webhook",
+            expected_path: "orders/new-2",
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-1",
+                "name": "Incoming Webhook",
+                "active": false,
+                "tags": [],
+                "nodes": [
+                    {
+                        "id": "node-1",
+                        "name": "Webhook",
+                        "type": "n8n-nodes-base.webhook",
+                        "typeVersion": 2,
+                        "position": [0, 0],
+                        "webhookId": "orders/new-2",
+                        "parameters": {
+                            "path": "orders/new-2",
+                            "httpMethod": "POST"
+                        }
+                    }
+                ],
+                "connections": {},
+                "settings": {}
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let pull_output = base_command(repo.path())
+        .arg("pull")
+        .arg("wf-1")
+        .output()
+        .expect("run pull");
+    assert!(pull_output.status.success());
+    let pull_envelope = parse_json(&pull_output.stdout);
+    let workflow_path = pull_envelope["data"]["workflow_path"]
+        .as_str()
+        .expect("workflow path");
+
+    let edit_output = base_command(repo.path())
+        .arg("node")
+        .arg("set")
+        .arg("workflows/incoming-webhook--wf-1.workflow.json")
+        .arg("Webhook")
+        .arg("parameters.path")
+        .arg("orders/new-2")
+        .output()
+        .expect("run node set before push");
+    assert!(edit_output.status.success());
+
+    let push_output = base_command(repo.path())
+        .arg("push")
+        .arg("workflows/incoming-webhook--wf-1.workflow.json")
+        .output()
+        .expect("run push");
+    assert!(push_output.status.success());
+    let envelope = parse_json(&push_output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["changed"], true);
+
+    let workflow = read_json_file(Path::new(workflow_path));
+    assert_eq!(workflow["nodes"][0]["parameters"]["path"], "orders/new-2");
+    assert_eq!(workflow["tags"], json!([]));
+}
+
+#[tokio::test]
+async fn push_json_rejects_unsupported_top_level_changes() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-1",
+                "name": "Example",
+                "active": false,
+                "nodes": [],
+                "connections": {},
+                "settings": {}
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let pull_output = base_command(repo.path())
+        .arg("pull")
+        .arg("wf-1")
+        .output()
+        .expect("run pull");
+    assert!(pull_output.status.success());
+
+    let workflow_path = repo
+        .path()
+        .join("workflows")
+        .join("example--wf-1.workflow.json");
+    let mut workflow = read_json_file(&workflow_path);
+    workflow["active"] = json!(true);
+    fs::write(
+        &workflow_path,
+        serde_json::to_string_pretty(&workflow).expect("serialize modified workflow"),
+    )
+    .expect("write modified workflow");
+
+    let push_output = base_command(repo.path())
+        .arg("push")
+        .arg("workflows/example--wf-1.workflow.json")
+        .output()
+        .expect("run push unsupported field");
+
+    assert_eq!(push_output.status.code(), Some(10));
+    let envelope = parse_json(&push_output.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["command"], "push");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("unsupported field(s): active")
+    );
+}
+
+#[tokio::test]
+async fn deactivate_json_waits_for_remote_state_and_updates_tracked_file() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    let tracked_path = write_tracked_workflow(repo.path(), "mock", "wf-1", "Deactivate Me");
+    fs::write(
+        &tracked_path,
+        serde_json::to_string_pretty(&json!({
+            "id": "wf-1",
+            "name": "Deactivate Me",
+            "active": true,
+            "settings": {},
+            "nodes": [],
+            "connections": {}
+        }))
+        .expect("serialize tracked workflow"),
+    )
+    .expect("write tracked workflow");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(JsonSequenceResponder {
+            calls: calls.clone(),
+            responses: vec![
+                json!({
+                    "data": {
+                        "id": "wf-1",
+                        "name": "Deactivate Me",
+                        "active": true,
+                        "settings": {},
+                        "nodes": [],
+                        "connections": {}
+                    }
+                }),
+                json!({
+                    "data": {
+                        "id": "wf-1",
+                        "name": "Deactivate Me",
+                        "active": true,
+                        "settings": {},
+                        "nodes": [],
+                        "connections": {}
+                    }
+                }),
+                json!({
+                    "data": {
+                        "id": "wf-1",
+                        "name": "Deactivate Me",
+                        "active": false,
+                        "settings": {},
+                        "nodes": [],
+                        "connections": {}
+                    }
+                }),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/wf-1/deactivate"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("deactivate")
+        .arg("wf-1")
+        .output()
+        .expect("run deactivate");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["active"], false);
+
+    let tracked = read_json_file(&tracked_path);
+    assert_eq!(tracked["active"], false);
+}
+
+#[tokio::test]
 async fn node_add_and_set_json_update_local_workflow() {
     let server = MockServer::start().await;
     let repo = tempdir().expect("tempdir");
@@ -1421,6 +1835,13 @@ async fn expr_set_json_wraps_expression_and_credential_set_updates_reference() {
         .output()
         .expect("run credential set");
     assert!(credential_output.status.success());
+    let credential_envelope = parse_json(&credential_output.stdout);
+    assert!(
+        credential_envelope["data"]["credential_discovery"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("does not expose credential listing")
+    );
 
     let workflow = read_json_file(&repo.path().join("workflows").join("example.workflow.json"));
     let node = workflow["nodes"]
