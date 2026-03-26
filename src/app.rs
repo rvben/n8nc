@@ -1,8 +1,10 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
     path::{Path, PathBuf},
+    thread,
+    time::Duration,
 };
 
 use chrono::DateTime;
@@ -19,7 +21,7 @@ use crate::{
     cli::{
         AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, Cli, Command, DiffArgs, FmtArgs,
         GetArgs, IdArgs, InitArgs, ListArgs, PullArgs, PushArgs, RunsArgs, RunsCommand,
-        RunsGetArgs, RunsListArgs, StatusArgs, TriggerArgs, ValidateArgs,
+        RunsGetArgs, RunsListArgs, RunsWatchArgs, StatusArgs, TriggerArgs, ValidateArgs,
     },
     config::{
         InstanceConfig, LoadedRepo, RepoConfig, ensure_gitignore, ensure_repo_layout, load_repo,
@@ -58,7 +60,7 @@ struct WorkflowListRow {
     updated_at: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ExecutionListRow {
     id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,7 +81,7 @@ struct ExecutionListRow {
     duration_ms: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct ExecutionNodeRow {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -348,69 +350,100 @@ async fn cmd_runs(context: &Context, args: RunsArgs) -> Result<(), AppError> {
     match args.command {
         RunsCommand::Ls(args) => cmd_runs_ls(context, args).await,
         RunsCommand::Get(args) => cmd_runs_get(context, args).await,
+        RunsCommand::Watch(args) => cmd_runs_watch(context, args).await,
     }
 }
 
 async fn cmd_runs_ls(context: &Context, args: RunsListArgs) -> Result<(), AppError> {
     let repo = load_loaded_repo(context)?;
     let (client, _, _) = remote_client(&repo, args.remote.instance.as_deref(), "runs")?;
-
-    let workflow_id = if let Some(identifier) = args.workflow.as_deref() {
-        let workflow = client.resolve_workflow(identifier).await?;
-        workflow_id(&workflow)
-    } else {
-        None
-    };
-
-    let executions = client
-        .list_executions(&ExecutionListOptions {
-            limit: args.limit.clamp(1, 250),
-            workflow_id,
-            status: args.status,
-        })
-        .await?;
-    let workflow_names = workflow_names_for_executions(&client, &executions).await?;
-
-    let rows: Vec<ExecutionListRow> = executions
-        .into_iter()
-        .map(|execution| {
-            let workflow_id = value_string(&execution, "workflowId");
-            ExecutionListRow {
-                id: value_string(&execution, "id").unwrap_or_default(),
-                workflow_name: workflow_id
-                    .as_ref()
-                    .and_then(|id| workflow_names.get(id).cloned()),
-                workflow_id,
-                status: value_string(&execution, "status"),
-                mode: value_string(&execution, "mode"),
-                started_at: value_string(&execution, "startedAt"),
-                stopped_at: value_string(&execution, "stoppedAt"),
-                wait_till: value_string(&execution, "waitTill"),
-                duration_ms: execution_duration_ms(&execution),
-            }
-        })
-        .collect();
+    let workflow_id = resolve_execution_workflow_id(&client, args.workflow.as_deref()).await?;
+    let rows = fetch_execution_rows(
+        &client,
+        workflow_id.as_deref(),
+        args.status.as_deref(),
+        args.limit,
+    )
+    .await?;
 
     if context.json {
         emit_json("runs", &json!({ "count": rows.len(), "executions": rows }))
     } else {
-        println!(
-            "{:<10} {:<10} {:<10} {:<10} {:<24} {}",
-            "ID", "STATUS", "MODE", "DURATION", "STARTED", "WORKFLOW"
-        );
-        for row in rows {
-            println!(
-                "{:<10} {:<10} {:<10} {:<10} {:<24} {}",
-                truncate(&row.id, 10),
-                truncate(row.status.as_deref().unwrap_or("-"), 10),
-                truncate(row.mode.as_deref().unwrap_or("-"), 10),
-                truncate(&format_duration(row.duration_ms), 10),
-                truncate(row.started_at.as_deref().unwrap_or("-"), 24),
-                execution_workflow_label(&row)
-            );
-        }
+        print_execution_rows(&rows);
         Ok(())
     }
+}
+
+async fn cmd_runs_watch(context: &Context, args: RunsWatchArgs) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let alias = resolve_instance_alias(&repo, args.remote.instance.as_deref(), "runs")?;
+    let (client, _, _) = remote_client(&repo, Some(&alias), "runs")?;
+    let workflow_id = resolve_execution_workflow_id(&client, args.workflow.as_deref()).await?;
+    let mut known_ids = BTreeSet::new();
+    let mut poll = 0u32;
+
+    loop {
+        poll += 1;
+        let rows = fetch_execution_rows(
+            &client,
+            workflow_id.as_deref(),
+            args.status.as_deref(),
+            args.limit,
+        )
+        .await?;
+        let new_rows = note_new_executions(&rows, &mut known_ids);
+        let event = if poll == 1 {
+            "snapshot"
+        } else if new_rows.is_empty() {
+            "heartbeat"
+        } else {
+            "update"
+        };
+
+        if context.json {
+            emit_json_line(
+                "runs",
+                &json!({
+                    "event": event,
+                    "poll": poll,
+                    "interval_seconds": args.interval.max(1),
+                    "count": rows.len(),
+                    "new_count": new_rows.len(),
+                    "executions": rows,
+                    "new_executions": new_rows,
+                }),
+            )?;
+        } else if poll == 1 {
+            println!(
+                "Watching executions on `{alias}` every {}s. Press Ctrl-C to stop.",
+                args.interval.max(1)
+            );
+            if let Some(workflow) = args.workflow.as_deref() {
+                println!("Workflow filter: {workflow}");
+            }
+            if let Some(status) = args.status.as_deref() {
+                println!("Status filter: {status}");
+            }
+            if rows.is_empty() {
+                println!("No executions found.");
+            } else {
+                println!("Current executions:");
+                print_execution_rows(&rows);
+            }
+        } else if !new_rows.is_empty() {
+            println!();
+            println!("New executions:");
+            print_execution_rows(&new_rows);
+        }
+
+        if args.iterations.is_some_and(|iterations| poll >= iterations) {
+            break;
+        }
+
+        thread::sleep(Duration::from_secs(args.interval.max(1)));
+    }
+
+    Ok(())
 }
 
 async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppError> {
@@ -1033,6 +1066,53 @@ async fn workflow_names_for_executions(
     Ok(names)
 }
 
+async fn resolve_execution_workflow_id(
+    client: &ApiClient,
+    workflow: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    let Some(identifier) = workflow else {
+        return Ok(None);
+    };
+    let workflow = client.resolve_workflow(identifier).await?;
+    Ok(workflow_id(&workflow))
+}
+
+async fn fetch_execution_rows(
+    client: &ApiClient,
+    workflow_id: Option<&str>,
+    status: Option<&str>,
+    limit: u16,
+) -> Result<Vec<ExecutionListRow>, AppError> {
+    let executions = client
+        .list_executions(&ExecutionListOptions {
+            limit: limit.clamp(1, 250),
+            workflow_id: workflow_id.map(ToOwned::to_owned),
+            status: status.map(ToOwned::to_owned),
+        })
+        .await?;
+    let workflow_names = workflow_names_for_executions(client, &executions).await?;
+
+    Ok(executions
+        .into_iter()
+        .map(|execution| {
+            let workflow_id = value_string(&execution, "workflowId");
+            ExecutionListRow {
+                id: value_string(&execution, "id").unwrap_or_default(),
+                workflow_name: workflow_id
+                    .as_ref()
+                    .and_then(|id| workflow_names.get(id).cloned()),
+                workflow_id,
+                status: value_string(&execution, "status"),
+                mode: value_string(&execution, "mode"),
+                started_at: value_string(&execution, "startedAt"),
+                stopped_at: value_string(&execution, "stoppedAt"),
+                wait_till: value_string(&execution, "waitTill"),
+                duration_ms: execution_duration_ms(&execution),
+            }
+        })
+        .collect())
+}
+
 async fn workflow_name_for_execution(
     client: &ApiClient,
     execution: &Value,
@@ -1126,6 +1206,37 @@ fn execution_workflow_label(row: &ExecutionListRow) -> String {
     }
 }
 
+fn print_execution_rows(rows: &[ExecutionListRow]) {
+    println!(
+        "{:<10} {:<10} {:<10} {:<10} {:<24} {}",
+        "ID", "STATUS", "MODE", "DURATION", "STARTED", "WORKFLOW"
+    );
+    for row in rows {
+        println!(
+            "{:<10} {:<10} {:<10} {:<10} {:<24} {}",
+            truncate(&row.id, 10),
+            truncate(row.status.as_deref().unwrap_or("-"), 10),
+            truncate(row.mode.as_deref().unwrap_or("-"), 10),
+            truncate(&format_duration(row.duration_ms), 10),
+            truncate(row.started_at.as_deref().unwrap_or("-"), 24),
+            execution_workflow_label(row)
+        );
+    }
+}
+
+fn note_new_executions(
+    rows: &[ExecutionListRow],
+    known_ids: &mut BTreeSet<String>,
+) -> Vec<ExecutionListRow> {
+    let mut new_rows = Vec::new();
+    for row in rows {
+        if known_ids.insert(row.id.clone()) {
+            new_rows.push(row.clone());
+        }
+    }
+    new_rows
+}
+
 fn value_string(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -1208,6 +1319,25 @@ fn emit_json<T: Serialize>(command: &'static str, data: &T) -> Result<(), AppErr
         data,
     };
     let rendered = serde_json::to_string_pretty(&envelope).map_err(|err| {
+        AppError::api(
+            command,
+            "output.serialize_failed",
+            format!("Failed to serialize JSON output: {err}"),
+        )
+    })?;
+    println!("{rendered}");
+    Ok(())
+}
+
+fn emit_json_line<T: Serialize>(command: &'static str, data: &T) -> Result<(), AppError> {
+    let envelope = Envelope {
+        ok: true,
+        command,
+        version: env!("CARGO_PKG_VERSION"),
+        contract_version: 1,
+        data,
+    };
+    let rendered = serde_json::to_string(&envelope).map_err(|err| {
         AppError::api(
             command,
             "output.serialize_failed",
@@ -1366,7 +1496,12 @@ fn absolutize(root: &Path, path: &Path) -> PathBuf {
 mod tests {
     use serde_json::json;
 
-    use super::{execution_duration_ms, execution_node_rows, format_duration};
+    use std::collections::BTreeSet;
+
+    use super::{
+        ExecutionListRow, execution_duration_ms, execution_node_rows, format_duration,
+        note_new_executions,
+    };
 
     #[test]
     fn execution_duration_uses_started_and_stopped_times() {
@@ -1425,5 +1560,41 @@ mod tests {
         assert_eq!(rows[1].status.as_deref(), Some("error"));
         assert_eq!(rows[1].execution_time_ms, Some(3));
         assert_eq!(rows[1].output_items, 1);
+    }
+
+    #[test]
+    fn note_new_executions_only_returns_unseen_rows() {
+        let rows = vec![
+            ExecutionListRow {
+                id: "101".to_string(),
+                workflow_id: Some("wf-1".to_string()),
+                workflow_name: Some("Alpha".to_string()),
+                status: Some("success".to_string()),
+                mode: Some("trigger".to_string()),
+                started_at: Some("2026-03-26T12:00:00.000Z".to_string()),
+                stopped_at: Some("2026-03-26T12:00:00.100Z".to_string()),
+                wait_till: None,
+                duration_ms: Some(100),
+            },
+            ExecutionListRow {
+                id: "100".to_string(),
+                workflow_id: Some("wf-1".to_string()),
+                workflow_name: Some("Alpha".to_string()),
+                status: Some("success".to_string()),
+                mode: Some("trigger".to_string()),
+                started_at: Some("2026-03-26T11:59:00.000Z".to_string()),
+                stopped_at: Some("2026-03-26T11:59:00.100Z".to_string()),
+                wait_till: None,
+                duration_ms: Some(100),
+            },
+        ];
+        let mut known_ids = BTreeSet::from(["100".to_string()]);
+
+        let new_rows = note_new_executions(&rows, &mut known_ids);
+
+        assert_eq!(new_rows.len(), 1);
+        assert_eq!(new_rows[0].id, "101");
+        assert!(known_ids.contains("100"));
+        assert!(known_ids.contains("101"));
     }
 }

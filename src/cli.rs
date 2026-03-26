@@ -140,6 +140,8 @@ pub enum RunsCommand {
     Ls(RunsListArgs),
     /// Get one execution by ID
     Get(RunsGetArgs),
+    /// Watch recent executions for changes
+    Watch(RunsWatchArgs),
 }
 
 #[derive(Debug, Args)]
@@ -164,6 +166,26 @@ pub struct RunsGetArgs {
     /// Include detailed execution data and workflow metadata
     #[arg(long)]
     pub details: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RunsWatchArgs {
+    #[command(flatten)]
+    pub remote: RemoteArgs,
+    /// Filter by workflow ID or exact workflow name
+    #[arg(long, value_name = "ID_OR_NAME")]
+    pub workflow: Option<String>,
+    /// Filter by execution status, for example `success`, `error`, or `waiting`
+    #[arg(long)]
+    pub status: Option<String>,
+    #[arg(long, default_value_t = 20)]
+    pub limit: u16,
+    /// Poll interval in seconds
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..))]
+    pub interval: u64,
+    /// Number of polls to perform before exiting
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub iterations: Option<u32>,
 }
 
 #[derive(Debug, Args)]

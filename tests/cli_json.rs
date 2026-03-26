@@ -1,10 +1,17 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
 use tempfile::tempdir;
 use wiremock::{
-    Match, Mock, MockServer, Request, ResponseTemplate,
+    Match, Mock, MockServer, Request, Respond, ResponseTemplate,
     matchers::{header, method, path, query_param},
 };
 
@@ -17,6 +24,53 @@ impl Match for MissingQueryParam {
             .url
             .query_pairs()
             .any(|(key, _)| key.as_ref() == self.0)
+    }
+}
+
+#[derive(Debug)]
+struct SequenceResponder {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Respond for SequenceResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let body = if call == 0 {
+            json!({
+                "data": [
+                    {
+                        "id": "100",
+                        "workflowId": "wf-1",
+                        "status": "success",
+                        "mode": "trigger",
+                        "startedAt": "2026-03-26T12:00:00.000Z",
+                        "stoppedAt": "2026-03-26T12:00:00.100Z"
+                    }
+                ]
+            })
+        } else {
+            json!({
+                "data": [
+                    {
+                        "id": "101",
+                        "workflowId": "wf-1",
+                        "status": "success",
+                        "mode": "trigger",
+                        "startedAt": "2026-03-26T12:00:01.000Z",
+                        "stoppedAt": "2026-03-26T12:00:01.150Z"
+                    },
+                    {
+                        "id": "100",
+                        "workflowId": "wf-1",
+                        "status": "success",
+                        "mode": "trigger",
+                        "startedAt": "2026-03-26T12:00:00.000Z",
+                        "stoppedAt": "2026-03-26T12:00:00.100Z"
+                    }
+                ]
+            })
+        };
+        ResponseTemplate::new(200).set_body_json(body)
     }
 }
 
@@ -234,6 +288,120 @@ async fn runs_get_json_not_found_emits_error_envelope() {
     );
 }
 
+#[tokio::test]
+async fn runs_watch_json_emits_snapshot_for_single_iteration() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "101",
+                    "workflowId": "wf-1",
+                    "status": "success",
+                    "mode": "trigger",
+                    "startedAt": "2026-03-26T12:00:00.000Z",
+                    "stoppedAt": "2026-03-26T12:00:00.250Z"
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-1",
+                "name": "Alpha Workflow"
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("runs")
+        .arg("watch")
+        .arg("--instance")
+        .arg("mock")
+        .arg("--limit")
+        .arg("2")
+        .arg("--iterations")
+        .arg("1")
+        .output()
+        .expect("run runs watch");
+
+    assert!(output.status.success());
+    let events = parse_json_lines(&output.stdout);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["ok"], true);
+    assert_eq!(events[0]["command"], "runs");
+    assert_eq!(events[0]["data"]["event"], "snapshot");
+    assert_eq!(events[0]["data"]["new_count"], 1);
+    assert_eq!(
+        events[0]["data"]["executions"][0]["workflow_name"],
+        "Alpha Workflow"
+    );
+}
+
+#[tokio::test]
+async fn runs_watch_json_emits_update_for_new_execution() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "2"))
+        .respond_with(SequenceResponder {
+            calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-1",
+                "name": "Alpha Workflow"
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("runs")
+        .arg("watch")
+        .arg("--instance")
+        .arg("mock")
+        .arg("--limit")
+        .arg("2")
+        .arg("--interval")
+        .arg("1")
+        .arg("--iterations")
+        .arg("2")
+        .output()
+        .expect("run runs watch update");
+
+    assert!(output.status.success());
+    let events = parse_json_lines(&output.stdout);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["data"]["event"], "snapshot");
+    assert_eq!(events[0]["data"]["new_count"], 1);
+    assert_eq!(events[1]["data"]["event"], "update");
+    assert_eq!(events[1]["data"]["new_count"], 1);
+    assert_eq!(events[1]["data"]["new_executions"][0]["id"], "101");
+}
+
 fn base_command(repo_root: &Path) -> Command {
     let mut command = Command::cargo_bin("n8nc").expect("n8nc binary");
     command
@@ -261,4 +429,12 @@ api_version = "v1"
 
 fn parse_json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("valid json output")
+}
+
+fn parse_json_lines(bytes: &[u8]) -> Vec<Value> {
+    std::str::from_utf8(bytes)
+        .expect("utf8 output")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("valid json line"))
+        .collect()
 }
