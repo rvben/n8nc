@@ -26,6 +26,7 @@ Implemented commands:
 - `get`
 - `runs ls`
 - `runs get`
+- `runs watch`
 - `pull`
 - `push`
 - `status`
@@ -80,6 +81,18 @@ Inspect one execution with node-level details:
 
 ```bash
 n8nc runs get <execution-id> --instance prod --details
+```
+
+Watch recent executions as they appear:
+
+```bash
+n8nc runs watch --instance prod --workflow "Homelab: Container Restart Alert"
+```
+
+Use finite polling for scripts or tests:
+
+```bash
+n8nc runs watch --instance prod --limit 5 --interval 1 --iterations 2 --json
 ```
 
 Validate tracked workflows:
@@ -175,8 +188,10 @@ Entries that cannot be compared remotely still show their local state and count 
 - Agent-safe: every command supports `--json`.
 - Deterministic: workflows are canonicalized before storage and hashing.
 - Explicit refresh: remote drift is only reported when you ask for it with `--refresh`.
-- Dev-loop friendly: `runs ls` and `runs get --details` cover recent execution inspection without leaving the terminal.
+- Dev-loop friendly: `runs ls`, `runs get --details`, and `runs watch` cover recent execution inspection without leaving the terminal.
 - Honest triggering: `trigger` is an HTTP call helper for webhook URLs, not a guessed “execute workflow” API wrapper.
+
+`runs watch --json` emits one compact JSON envelope per poll. The first event is `snapshot`; later events are `update` when new executions appear or `heartbeat` when the latest window is unchanged.
 
 ## Spec
 

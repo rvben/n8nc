@@ -38,6 +38,7 @@ n8nc
 ├── get
 ├── runs ls
 ├── runs get
+├── runs watch
 ├── pull
 ├── push
 ├── status
@@ -331,6 +332,38 @@ List rows currently include:
 - node-level execution status
 - node execution time
 - output item counts per node based on `data.resultData.runData`
+
+`runs watch` polls the execution list repeatedly and is intended for active debugging sessions.
+
+Current supported options:
+
+- `--workflow <id-or-exact-name>`
+- `--status <value>`
+- `--limit`
+- `--interval <seconds>`
+- `--iterations <count>`
+
+Human output behavior:
+
+- first poll prints the current execution window
+- later polls print only newly seen executions
+- no output is emitted for unchanged polls after the initial snapshot
+
+JSON output behavior:
+
+- emits one compact JSON envelope per poll
+- first poll uses `event = "snapshot"`
+- later polls use `event = "update"` when new executions appear
+- later polls use `event = "heartbeat"` when no new execution IDs appear
+
+Each JSON watch event currently includes:
+
+- `poll`
+- `interval_seconds`
+- `count`
+- `new_count`
+- `executions`
+- `new_executions`
 
 The current diagnostics model is intentionally simple:
 
