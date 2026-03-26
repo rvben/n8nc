@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, time::Duration};
 
+use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode, Url};
 use serde::Serialize;
 use serde_json::Value;
@@ -34,6 +35,7 @@ pub struct ExecutionListOptions {
     pub limit: u16,
     pub workflow_id: Option<String>,
     pub status: Option<String>,
+    pub since: Option<DateTime<Utc>>,
 }
 
 impl ApiClient {
@@ -165,8 +167,15 @@ impl ApiClient {
                         "Expected a paginated execution list response.",
                     )
                 })?;
+            let page_crossed_since_cutoff = options
+                .since
+                .as_ref()
+                .is_some_and(|since| page_crosses_since_cutoff(&page_data, since));
 
-            if append_capped_values(&mut results, &page_data, usize::from(options.limit)) {
+            if append_matching_executions(&mut results, &page_data, options) {
+                break;
+            }
+            if page_crossed_since_cutoff {
                 break;
             }
 
@@ -512,6 +521,7 @@ fn append_matching_workflows(
     false
 }
 
+#[cfg(test)]
 fn append_capped_values(results: &mut Vec<Value>, page_data: &[Value], limit: usize) -> bool {
     for value in page_data {
         results.push(value.clone());
@@ -522,8 +532,57 @@ fn append_capped_values(results: &mut Vec<Value>, page_data: &[Value], limit: us
     false
 }
 
+fn append_matching_executions(
+    results: &mut Vec<Value>,
+    page_data: &[Value],
+    options: &ExecutionListOptions,
+) -> bool {
+    let limit = usize::from(options.limit);
+    for execution in page_data {
+        if !execution_matches_time_filter(execution, options.since.as_ref()) {
+            continue;
+        }
+        results.push(execution.clone());
+        if results.len() >= limit {
+            return true;
+        }
+    }
+    false
+}
+
+fn execution_matches_time_filter(execution: &Value, since: Option<&DateTime<Utc>>) -> bool {
+    let Some(since) = since else {
+        return true;
+    };
+    let Some(timestamp) = execution_filter_timestamp(execution) else {
+        return false;
+    };
+    timestamp >= *since
+}
+
+fn execution_filter_timestamp(execution: &Value) -> Option<DateTime<Utc>> {
+    for key in ["startedAt", "waitTill", "stoppedAt"] {
+        let Some(raw) = execution.get(key).and_then(Value::as_str) else {
+            continue;
+        };
+        if let Ok(timestamp) = DateTime::parse_from_rfc3339(raw) {
+            return Some(timestamp.with_timezone(&Utc));
+        }
+    }
+    None
+}
+
+fn page_crosses_since_cutoff(page_data: &[Value], since: &DateTime<Utc>) -> bool {
+    page_data
+        .iter()
+        .rev()
+        .find_map(execution_filter_timestamp)
+        .is_some_and(|oldest| oldest < *since)
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::{DateTime, Utc};
     use serde_json::json;
     use wiremock::{
         Match, Mock, MockServer, Request, ResponseTemplate,
@@ -534,7 +593,8 @@ mod tests {
 
     use super::{
         ApiClient, ExecutionListOptions, ListOptions, append_capped_values,
-        append_matching_workflows,
+        append_matching_executions, append_matching_workflows, execution_filter_timestamp,
+        page_crosses_since_cutoff,
     };
 
     #[derive(Debug)]
@@ -601,6 +661,61 @@ mod tests {
         assert_eq!(values[1]["id"], "b");
     }
 
+    #[test]
+    fn append_matching_executions_honors_since_filter() {
+        let page = vec![
+            json!({"id":"a","startedAt":"2026-03-26T12:00:00Z"}),
+            json!({"id":"b","waitTill":"2026-03-26T12:05:00Z"}),
+            json!({"id":"c","startedAt":"2026-03-26T11:59:59Z"}),
+            json!({"id":"d"}),
+        ];
+        let since = DateTime::parse_from_rfc3339("2026-03-26T12:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        let mut executions = Vec::new();
+
+        let reached_limit = append_matching_executions(
+            &mut executions,
+            &page,
+            &ExecutionListOptions {
+                limit: 2,
+                workflow_id: None,
+                status: None,
+                since: Some(since),
+            },
+        );
+
+        assert!(reached_limit);
+        assert_eq!(executions.len(), 2);
+        assert_eq!(executions[0]["id"], "a");
+        assert_eq!(executions[1]["id"], "b");
+    }
+
+    #[test]
+    fn execution_filter_timestamp_prefers_started_then_wait_then_stopped() {
+        let execution = json!({
+            "waitTill": "2026-03-26T12:05:00Z",
+            "startedAt": "2026-03-26T12:00:00Z",
+            "stoppedAt": "2026-03-26T12:10:00Z"
+        });
+        let timestamp = execution_filter_timestamp(&execution).expect("timestamp");
+
+        assert_eq!(timestamp.to_rfc3339(), "2026-03-26T12:00:00+00:00");
+    }
+
+    #[test]
+    fn page_crosses_since_cutoff_when_oldest_timestamp_is_older() {
+        let since = DateTime::parse_from_rfc3339("2026-03-26T12:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        let page = vec![
+            json!({"id":"1","startedAt":"2026-03-26T12:05:00Z"}),
+            json!({"id":"2","startedAt":"2026-03-26T11:59:59Z"}),
+        ];
+
+        assert!(page_crosses_since_cutoff(&page, &since));
+    }
+
     #[tokio::test]
     async fn list_executions_follows_cursor_and_respects_limit() {
         let server = MockServer::start().await;
@@ -642,6 +757,7 @@ mod tests {
                 limit: 3,
                 workflow_id: None,
                 status: Some("success".to_string()),
+                since: None,
             })
             .await
             .expect("list executions");
@@ -650,6 +766,96 @@ mod tests {
         assert_eq!(executions[0]["id"], "1");
         assert_eq!(executions[1]["id"], "2");
         assert_eq!(executions[2]["id"], "3");
+    }
+
+    #[tokio::test]
+    async fn list_executions_pages_until_since_filter_fills_limit() {
+        let server = MockServer::start().await;
+        let client = test_client(&server);
+        let since = DateTime::parse_from_rfc3339("2026-03-26T12:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/executions"))
+            .and(header("x-n8n-api-key", "test-token"))
+            .and(query_param("limit", "3"))
+            .and(MissingQueryParam("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    {"id": "1", "startedAt": "2026-03-26T12:02:00Z"},
+                    {"id": "2", "startedAt": "2026-03-26T12:01:00Z"}
+                ],
+                "nextCursor": "next-1"
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/executions"))
+            .and(header("x-n8n-api-key", "test-token"))
+            .and(query_param("limit", "3"))
+            .and(query_param("cursor", "next-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    {"id": "3", "waitTill": "2026-03-26T12:00:30Z"},
+                    {"id": "4", "startedAt": "2026-03-26T11:59:00Z"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let executions = client
+            .list_executions(&ExecutionListOptions {
+                limit: 3,
+                workflow_id: None,
+                status: None,
+                since: Some(since),
+            })
+            .await
+            .expect("list executions");
+
+        assert_eq!(executions.len(), 3);
+        assert_eq!(executions[0]["id"], "1");
+        assert_eq!(executions[1]["id"], "2");
+        assert_eq!(executions[2]["id"], "3");
+    }
+
+    #[tokio::test]
+    async fn list_executions_stops_after_page_crosses_since_cutoff() {
+        let server = MockServer::start().await;
+        let client = test_client(&server);
+        let since = DateTime::parse_from_rfc3339("2026-03-26T12:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/executions"))
+            .and(header("x-n8n-api-key", "test-token"))
+            .and(query_param("limit", "3"))
+            .and(MissingQueryParam("cursor"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    {"id": "1", "startedAt": "2026-03-26T12:01:00Z"},
+                    {"id": "2", "startedAt": "2026-03-26T11:59:00Z"}
+                ],
+                "nextCursor": "next-1"
+            })))
+            .mount(&server)
+            .await;
+
+        let executions = client
+            .list_executions(&ExecutionListOptions {
+                limit: 3,
+                workflow_id: None,
+                status: None,
+                since: Some(since),
+            })
+            .await
+            .expect("list executions");
+
+        assert_eq!(executions.len(), 1);
+        assert_eq!(executions[0]["id"], "1");
     }
 
     #[tokio::test]

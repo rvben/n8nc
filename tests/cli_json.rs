@@ -201,6 +201,82 @@ async fn runs_ls_json_resolves_workflow_name() {
 }
 
 #[tokio::test]
+async fn runs_ls_json_since_filters_across_pages() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "3"))
+        .and(MissingQueryParam("cursor"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "102",
+                    "status": "success",
+                    "mode": "trigger",
+                    "startedAt": "2026-03-26T12:02:00.000Z"
+                },
+                {
+                    "id": "101",
+                    "status": "success",
+                    "mode": "trigger",
+                    "startedAt": "2026-03-26T12:01:00.000Z"
+                }
+            ],
+            "nextCursor": "next-1"
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "3"))
+        .and(query_param("cursor", "next-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "100",
+                    "status": "success",
+                    "mode": "trigger",
+                    "waitTill": "2026-03-26T12:00:30.000Z"
+                },
+                {
+                    "id": "099",
+                    "status": "success",
+                    "mode": "trigger",
+                    "startedAt": "2026-03-26T11:59:00.000Z"
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("runs")
+        .arg("ls")
+        .arg("--instance")
+        .arg("mock")
+        .arg("--limit")
+        .arg("3")
+        .arg("--since")
+        .arg("2026-03-26T12:00:00Z")
+        .output()
+        .expect("run runs ls since");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["count"], 3);
+    assert_eq!(envelope["data"]["executions"][0]["id"], "102");
+    assert_eq!(envelope["data"]["executions"][1]["id"], "101");
+    assert_eq!(envelope["data"]["executions"][2]["id"], "100");
+}
+
+#[tokio::test]
 async fn runs_get_json_details_returns_execution_payload() {
     let server = MockServer::start().await;
     let repo = tempdir().expect("tempdir");
@@ -348,6 +424,58 @@ async fn runs_watch_json_emits_snapshot_for_single_iteration() {
         events[0]["data"]["executions"][0]["workflow_name"],
         "Alpha Workflow"
     );
+}
+
+#[tokio::test]
+async fn runs_watch_json_since_filters_snapshot() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "101",
+                    "status": "success",
+                    "mode": "trigger",
+                    "startedAt": "2026-03-26T12:00:00.000Z"
+                },
+                {
+                    "id": "100",
+                    "status": "success",
+                    "mode": "trigger",
+                    "startedAt": "2026-03-26T11:59:59.000Z"
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("runs")
+        .arg("watch")
+        .arg("--instance")
+        .arg("mock")
+        .arg("--limit")
+        .arg("2")
+        .arg("--since")
+        .arg("2026-03-26T12:00:00Z")
+        .arg("--iterations")
+        .arg("1")
+        .output()
+        .expect("run runs watch since");
+
+    assert!(output.status.success());
+    let events = parse_json_lines(&output.stdout);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["data"]["event"], "snapshot");
+    assert_eq!(events[0]["data"]["count"], 1);
+    assert_eq!(events[0]["data"]["new_count"], 1);
+    assert_eq!(events[0]["data"]["executions"][0]["id"], "101");
 }
 
 #[tokio::test]
@@ -557,6 +685,35 @@ async fn diff_refresh_json_preserves_local_diff_when_remote_lookup_fails() {
             .contains("backend unavailable")
     );
     assert!(envelope["data"].get("remote_patch").is_none());
+}
+
+#[tokio::test]
+async fn runs_ls_json_rejects_invalid_last_window() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    let output = base_command(repo.path())
+        .arg("runs")
+        .arg("ls")
+        .arg("--instance")
+        .arg("mock")
+        .arg("--last")
+        .arg("10x")
+        .output()
+        .expect("run runs ls invalid last");
+
+    assert_eq!(output.status.code(), Some(2));
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["command"], "runs");
+    assert_eq!(envelope["error"]["code"], "usage.invalid");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("`--last` must use one of these units")
+    );
 }
 
 fn base_command(repo_root: &Path) -> Command {

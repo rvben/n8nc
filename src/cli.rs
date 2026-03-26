@@ -133,6 +133,16 @@ pub struct RunsArgs {
     pub command: RunsCommand,
 }
 
+#[derive(Debug, Args, Clone)]
+pub struct RunsTimeArgs {
+    /// Only include executions at or after this RFC3339 timestamp
+    #[arg(long, value_name = "RFC3339", conflicts_with = "last")]
+    pub since: Option<String>,
+    /// Only include executions from the last window, for example `15m`, `2h`, or `1d`
+    #[arg(long, value_name = "WINDOW", conflicts_with = "since")]
+    pub last: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum RunsCommand {
     /// List recent executions
@@ -148,6 +158,8 @@ pub enum RunsCommand {
 pub struct RunsListArgs {
     #[command(flatten)]
     pub remote: RemoteArgs,
+    #[command(flatten)]
+    pub time: RunsTimeArgs,
     /// Filter by workflow ID or exact workflow name
     #[arg(long, value_name = "ID_OR_NAME")]
     pub workflow: Option<String>,
@@ -172,6 +184,8 @@ pub struct RunsGetArgs {
 pub struct RunsWatchArgs {
     #[command(flatten)]
     pub remote: RemoteArgs,
+    #[command(flatten)]
+    pub time: RunsTimeArgs,
     /// Filter by workflow ID or exact workflow name
     #[arg(long, value_name = "ID_OR_NAME")]
     pub workflow: Option<String>,

@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::DateTime;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -21,7 +21,8 @@ use crate::{
     cli::{
         AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, Cli, Command, DiffArgs, FmtArgs,
         GetArgs, IdArgs, InitArgs, ListArgs, PullArgs, PushArgs, RunsArgs, RunsCommand,
-        RunsGetArgs, RunsListArgs, RunsWatchArgs, StatusArgs, TriggerArgs, ValidateArgs,
+        RunsGetArgs, RunsListArgs, RunsTimeArgs, RunsWatchArgs, StatusArgs, TriggerArgs,
+        ValidateArgs,
     },
     config::{
         InstanceConfig, LoadedRepo, RepoConfig, ensure_gitignore, ensure_repo_layout, load_repo,
@@ -89,6 +90,13 @@ struct ExecutionNodeRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_time_ms: Option<i64>,
     output_items: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RunsTimeFilter {
+    since: Option<DateTime<Utc>>,
+    last: Option<ChronoDuration>,
+    last_label: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -358,10 +366,13 @@ async fn cmd_runs_ls(context: &Context, args: RunsListArgs) -> Result<(), AppErr
     let repo = load_loaded_repo(context)?;
     let (client, _, _) = remote_client(&repo, args.remote.instance.as_deref(), "runs")?;
     let workflow_id = resolve_execution_workflow_id(&client, args.workflow.as_deref()).await?;
+    let time_filter = parse_runs_time_filter("runs", &args.time)?;
+    let since = time_filter.effective_since();
     let rows = fetch_execution_rows(
         &client,
         workflow_id.as_deref(),
         args.status.as_deref(),
+        since.clone(),
         args.limit,
     )
     .await?;
@@ -369,6 +380,15 @@ async fn cmd_runs_ls(context: &Context, args: RunsListArgs) -> Result<(), AppErr
     if context.json {
         emit_json("runs", &json!({ "count": rows.len(), "executions": rows }))
     } else {
+        if let Some(workflow) = args.workflow.as_deref() {
+            println!("Workflow filter: {workflow}");
+        }
+        if let Some(status) = args.status.as_deref() {
+            println!("Status filter: {status}");
+        }
+        if let Some(since_label) = time_filter.describe(&since) {
+            println!("{since_label}");
+        }
         print_execution_rows(&rows);
         Ok(())
     }
@@ -379,15 +399,18 @@ async fn cmd_runs_watch(context: &Context, args: RunsWatchArgs) -> Result<(), Ap
     let alias = resolve_instance_alias(&repo, args.remote.instance.as_deref(), "runs")?;
     let (client, _, _) = remote_client(&repo, Some(&alias), "runs")?;
     let workflow_id = resolve_execution_workflow_id(&client, args.workflow.as_deref()).await?;
+    let time_filter = parse_runs_time_filter("runs", &args.time)?;
     let mut known_ids = BTreeSet::new();
     let mut poll = 0u32;
 
     loop {
         poll += 1;
+        let since = time_filter.effective_since();
         let rows = fetch_execution_rows(
             &client,
             workflow_id.as_deref(),
             args.status.as_deref(),
+            since,
             args.limit,
         )
         .await?;
@@ -423,6 +446,9 @@ async fn cmd_runs_watch(context: &Context, args: RunsWatchArgs) -> Result<(), Ap
             }
             if let Some(status) = args.status.as_deref() {
                 println!("Status filter: {status}");
+            }
+            if let Some(since_label) = time_filter.describe(&since) {
+                println!("{since_label}");
             }
             if rows.is_empty() {
                 println!("No executions found.");
@@ -1106,6 +1132,7 @@ async fn fetch_execution_rows(
     client: &ApiClient,
     workflow_id: Option<&str>,
     status: Option<&str>,
+    since: Option<DateTime<Utc>>,
     limit: u16,
 ) -> Result<Vec<ExecutionListRow>, AppError> {
     let executions = client
@@ -1113,6 +1140,7 @@ async fn fetch_execution_rows(
             limit: limit.clamp(1, 250),
             workflow_id: workflow_id.map(ToOwned::to_owned),
             status: status.map(ToOwned::to_owned),
+            since,
         })
         .await?;
     let workflow_names = workflow_names_for_executions(client, &executions).await?;
@@ -1207,6 +1235,102 @@ fn execution_duration_ms(execution: &Value) -> Option<i64> {
     let started = DateTime::parse_from_rfc3339(&started).ok()?;
     let stopped = DateTime::parse_from_rfc3339(&stopped).ok()?;
     Some((stopped - started).num_milliseconds())
+}
+
+fn parse_runs_time_filter(
+    command: &'static str,
+    args: &RunsTimeArgs,
+) -> Result<RunsTimeFilter, AppError> {
+    let since = args
+        .since
+        .as_deref()
+        .map(|value| parse_rfc3339_timestamp(command, "--since", value))
+        .transpose()?;
+    let last = args
+        .last
+        .as_deref()
+        .map(|value| parse_time_window(command, value))
+        .transpose()?;
+
+    Ok(RunsTimeFilter {
+        since,
+        last,
+        last_label: args.last.clone(),
+    })
+}
+
+fn parse_rfc3339_timestamp(
+    command: &'static str,
+    flag: &'static str,
+    value: &str,
+) -> Result<DateTime<Utc>, AppError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|err| {
+            AppError::usage(
+                command,
+                format!("`{flag}` must be an RFC3339 timestamp: {err}"),
+            )
+        })
+}
+
+fn parse_time_window(command: &'static str, value: &str) -> Result<ChronoDuration, AppError> {
+    if value.len() < 2 {
+        return Err(AppError::usage(
+            command,
+            "`--last` must use an integer and a unit like `15m`, `2h`, or `1d`.",
+        ));
+    }
+
+    let (amount, unit) = value.split_at(value.len() - 1);
+    let amount: i64 = amount.parse().map_err(|_| {
+        AppError::usage(
+            command,
+            "`--last` must start with a whole number, for example `15m` or `2h`.",
+        )
+    })?;
+    if amount <= 0 {
+        return Err(AppError::usage(
+            command,
+            "`--last` must be greater than zero.",
+        ));
+    }
+
+    let duration = match unit.to_ascii_lowercase().as_str() {
+        "s" => ChronoDuration::try_seconds(amount),
+        "m" => ChronoDuration::try_minutes(amount),
+        "h" => ChronoDuration::try_hours(amount),
+        "d" => ChronoDuration::try_days(amount),
+        _ => None,
+    };
+
+    duration.ok_or_else(|| {
+        AppError::usage(
+            command,
+            "`--last` must use one of these units: `s`, `m`, `h`, `d`.",
+        )
+    })
+}
+
+impl RunsTimeFilter {
+    fn effective_since(&self) -> Option<DateTime<Utc>> {
+        self.since
+            .as_ref()
+            .cloned()
+            .or_else(|| self.last.map(|window| Utc::now() - window))
+    }
+
+    fn describe(&self, since: &Option<DateTime<Utc>>) -> Option<String> {
+        if let Some(since) = self.since.as_ref() {
+            return Some(format!("Since: {}", since.to_rfc3339()));
+        }
+        if let Some(last) = self.last_label.as_deref() {
+            return Some(format!("Window: last {last}"));
+        }
+        since
+            .as_ref()
+            .map(|value| format!("Since: {}", value.to_rfc3339()))
+    }
 }
 
 fn format_duration(duration_ms: Option<i64>) -> String {
@@ -1600,11 +1724,12 @@ mod tests {
 
     use std::collections::BTreeSet;
 
+    use crate::cli::RunsTimeArgs;
     use crate::repo::{LocalStatusEntry, LocalWorkflowState, RemoteSyncState};
 
     use super::{
         ExecutionListRow, execution_duration_ms, execution_node_rows, format_duration,
-        note_new_executions, summarize_sync_states,
+        note_new_executions, parse_runs_time_filter, parse_time_window, summarize_sync_states,
     };
 
     #[test]
@@ -1700,6 +1825,34 @@ mod tests {
         assert_eq!(new_rows[0].id, "101");
         assert!(known_ids.contains("100"));
         assert!(known_ids.contains("101"));
+    }
+
+    #[test]
+    fn parse_time_window_accepts_supported_units() {
+        assert_eq!(
+            parse_time_window("runs", "15m").expect("15m").num_minutes(),
+            15
+        );
+        assert_eq!(parse_time_window("runs", "2h").expect("2h").num_hours(), 2);
+        assert_eq!(parse_time_window("runs", "1d").expect("1d").num_days(), 1);
+    }
+
+    #[test]
+    fn parse_runs_time_filter_rejects_invalid_since() {
+        let err = parse_runs_time_filter(
+            "runs",
+            &RunsTimeArgs {
+                since: Some("tomorrow morning".to_string()),
+                last: None,
+            },
+        )
+        .expect_err("invalid since should fail");
+
+        assert_eq!(err.code, "usage.invalid");
+        assert!(
+            err.message
+                .contains("`--since` must be an RFC3339 timestamp")
+        );
     }
 
     #[test]
