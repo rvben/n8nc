@@ -5,11 +5,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use chrono::DateTime;
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
-    api::{ApiClient, ListOptions},
+    api::{ApiClient, ExecutionListOptions, ListOptions},
     auth::{
         ensure_alias_exists, list_auth_statuses, read_token_from_stdin, remove_token,
         resolve_token, store_token,
@@ -17,8 +18,8 @@ use crate::{
     canonical::{canonicalize_workflow, hash_value, pretty_json},
     cli::{
         AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, Cli, Command, DiffArgs, FmtArgs,
-        GetArgs, IdArgs, InitArgs, ListArgs, PullArgs, PushArgs, StatusArgs, TriggerArgs,
-        ValidateArgs,
+        GetArgs, IdArgs, InitArgs, ListArgs, PullArgs, PushArgs, RunsArgs, RunsCommand,
+        RunsGetArgs, RunsListArgs, StatusArgs, TriggerArgs, ValidateArgs,
     },
     config::{
         InstanceConfig, LoadedRepo, RepoConfig, ensure_gitignore, ensure_repo_layout, load_repo,
@@ -58,6 +59,37 @@ struct WorkflowListRow {
 }
 
 #[derive(Debug, Serialize)]
+struct ExecutionListRow {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stopped_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wait_till: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExecutionNodeRow {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_time_ms: Option<i64>,
+    output_items: usize,
+}
+
+#[derive(Debug, Serialize)]
 struct AuthListRow {
     alias: String,
     base_url: String,
@@ -94,6 +126,7 @@ pub async fn run(cli: Cli) -> Result<(), AppError> {
         Command::Auth(args) => cmd_auth(&context, args).await,
         Command::Ls(args) => cmd_ls(&context, args).await,
         Command::Get(args) => cmd_get(&context, args).await,
+        Command::Runs(args) => cmd_runs(&context, args).await,
         Command::Pull(args) => cmd_pull(&context, args).await,
         Command::Push(args) => cmd_push(&context, args).await,
         Command::Status(args) => cmd_status(&context, args).await,
@@ -306,6 +339,145 @@ async fn cmd_ls(context: &Context, args: ListArgs) -> Result<(), AppError> {
                 row.updated_at.unwrap_or_else(|| "-".to_string()),
                 row.name
             );
+        }
+        Ok(())
+    }
+}
+
+async fn cmd_runs(context: &Context, args: RunsArgs) -> Result<(), AppError> {
+    match args.command {
+        RunsCommand::Ls(args) => cmd_runs_ls(context, args).await,
+        RunsCommand::Get(args) => cmd_runs_get(context, args).await,
+    }
+}
+
+async fn cmd_runs_ls(context: &Context, args: RunsListArgs) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let (client, _, _) = remote_client(&repo, args.remote.instance.as_deref(), "runs")?;
+
+    let workflow_id = if let Some(identifier) = args.workflow.as_deref() {
+        let workflow = client.resolve_workflow(identifier).await?;
+        workflow_id(&workflow)
+    } else {
+        None
+    };
+
+    let executions = client
+        .list_executions(&ExecutionListOptions {
+            limit: args.limit.clamp(1, 250),
+            workflow_id,
+            status: args.status,
+        })
+        .await?;
+    let workflow_names = workflow_names_for_executions(&client, &executions).await?;
+
+    let rows: Vec<ExecutionListRow> = executions
+        .into_iter()
+        .map(|execution| {
+            let workflow_id = value_string(&execution, "workflowId");
+            ExecutionListRow {
+                id: value_string(&execution, "id").unwrap_or_default(),
+                workflow_name: workflow_id
+                    .as_ref()
+                    .and_then(|id| workflow_names.get(id).cloned()),
+                workflow_id,
+                status: value_string(&execution, "status"),
+                mode: value_string(&execution, "mode"),
+                started_at: value_string(&execution, "startedAt"),
+                stopped_at: value_string(&execution, "stoppedAt"),
+                wait_till: value_string(&execution, "waitTill"),
+                duration_ms: execution_duration_ms(&execution),
+            }
+        })
+        .collect();
+
+    if context.json {
+        emit_json("runs", &json!({ "count": rows.len(), "executions": rows }))
+    } else {
+        println!(
+            "{:<10} {:<10} {:<10} {:<10} {:<24} {}",
+            "ID", "STATUS", "MODE", "DURATION", "STARTED", "WORKFLOW"
+        );
+        for row in rows {
+            println!(
+                "{:<10} {:<10} {:<10} {:<10} {:<24} {}",
+                truncate(&row.id, 10),
+                truncate(row.status.as_deref().unwrap_or("-"), 10),
+                truncate(row.mode.as_deref().unwrap_or("-"), 10),
+                truncate(&format_duration(row.duration_ms), 10),
+                truncate(row.started_at.as_deref().unwrap_or("-"), 24),
+                execution_workflow_label(&row)
+            );
+        }
+        Ok(())
+    }
+}
+
+async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let (client, _, _) = remote_client(&repo, args.remote.instance.as_deref(), "runs")?;
+    let execution = client
+        .get_execution(&args.execution_id, args.details)
+        .await?
+        .ok_or_else(|| {
+            AppError::not_found(
+                "runs",
+                format!("Execution `{}` was not found.", args.execution_id),
+            )
+        })?;
+
+    if context.json {
+        emit_json("runs", &json!({ "execution": execution }))
+    } else {
+        let workflow_id = value_string(&execution, "workflowId");
+        let workflow_name = workflow_name_for_execution(&client, &execution).await?;
+        println!(
+            "Execution: {}",
+            value_string(&execution, "id").unwrap_or(args.execution_id)
+        );
+        if let Some(status) = value_string(&execution, "status") {
+            println!("Status: {status}");
+        }
+        if let Some(mode) = value_string(&execution, "mode") {
+            println!("Mode: {mode}");
+        }
+        match (workflow_name.as_deref(), workflow_id.as_deref()) {
+            (Some(name), Some(id)) => println!("Workflow: {name} ({id})"),
+            (Some(name), None) => println!("Workflow: {name}"),
+            (None, Some(id)) => println!("Workflow ID: {id}"),
+            (None, None) => {}
+        }
+        if let Some(started_at) = value_string(&execution, "startedAt") {
+            println!("Started: {started_at}");
+        }
+        if let Some(stopped_at) = value_string(&execution, "stoppedAt") {
+            println!("Stopped: {stopped_at}");
+        }
+        if let Some(wait_till) = value_string(&execution, "waitTill") {
+            println!("Wait Till: {wait_till}");
+        }
+        if let Some(duration_ms) = execution_duration_ms(&execution) {
+            println!("Duration: {}", format_duration(Some(duration_ms)));
+        }
+
+        if args.details {
+            let nodes = execution_node_rows(&execution);
+            if !nodes.is_empty() {
+                println!();
+                println!(
+                    "{:<32} {:<10} {:<10} {}",
+                    "NODE", "STATUS", "TIME", "OUTPUTS"
+                );
+                for node in nodes {
+                    println!(
+                        "{:<32} {:<10} {:<10} {}",
+                        truncate(&node.name, 32),
+                        truncate(node.status.as_deref().unwrap_or("-"), 10),
+                        truncate(&format_duration(node.execution_time_ms), 10),
+                        node.output_items
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -838,6 +1010,129 @@ async fn cmd_validate(context: &Context, args: ValidateArgs) -> Result<(), AppEr
     }
 }
 
+async fn workflow_names_for_executions(
+    client: &ApiClient,
+    executions: &[Value],
+) -> Result<BTreeMap<String, String>, AppError> {
+    let mut names = BTreeMap::new();
+    for workflow_id in executions
+        .iter()
+        .filter_map(|execution| value_string(execution, "workflowId"))
+    {
+        if names.contains_key(&workflow_id) {
+            continue;
+        }
+        let Some(workflow) = client.get_workflow_by_id(&workflow_id).await? else {
+            continue;
+        };
+        let workflow = workflow.get("data").unwrap_or(&workflow);
+        if let Some(name) = workflow_name(workflow) {
+            names.insert(workflow_id, name);
+        }
+    }
+    Ok(names)
+}
+
+async fn workflow_name_for_execution(
+    client: &ApiClient,
+    execution: &Value,
+) -> Result<Option<String>, AppError> {
+    if let Some(name) = execution
+        .get("workflowData")
+        .and_then(|workflow| workflow.get("name"))
+        .and_then(Value::as_str)
+    {
+        return Ok(Some(name.to_string()));
+    }
+
+    let Some(workflow_id) = value_string(execution, "workflowId") else {
+        return Ok(None);
+    };
+    let Some(workflow) = client.get_workflow_by_id(&workflow_id).await? else {
+        return Ok(None);
+    };
+    Ok(workflow_name(workflow.get("data").unwrap_or(&workflow)))
+}
+
+fn execution_node_rows(execution: &Value) -> Vec<ExecutionNodeRow> {
+    let Some(run_data) = execution
+        .get("data")
+        .and_then(|data| data.get("resultData"))
+        .and_then(|result| result.get("runData"))
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+
+    let mut rows = Vec::new();
+    for (name, runs) in run_data {
+        let Some(last_run) = runs.as_array().and_then(|entries| entries.last()) else {
+            continue;
+        };
+        rows.push(ExecutionNodeRow {
+            name: name.clone(),
+            status: value_string(last_run, "executionStatus")
+                .or_else(|| value_string(last_run, "status")),
+            execution_time_ms: last_run.get("executionTime").and_then(Value::as_i64),
+            output_items: count_output_items(
+                last_run
+                    .get("data")
+                    .and_then(|data| data.get("main"))
+                    .unwrap_or(&Value::Null),
+            ),
+        });
+    }
+    rows
+}
+
+fn count_output_items(main: &Value) -> usize {
+    main.as_array()
+        .map(|branches| {
+            branches
+                .iter()
+                .map(|branch| branch.as_array().map_or(0, Vec::len))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn execution_duration_ms(execution: &Value) -> Option<i64> {
+    let started = value_string(execution, "startedAt")?;
+    let stopped = value_string(execution, "stoppedAt")?;
+    let started = DateTime::parse_from_rfc3339(&started).ok()?;
+    let stopped = DateTime::parse_from_rfc3339(&stopped).ok()?;
+    Some((stopped - started).num_milliseconds())
+}
+
+fn format_duration(duration_ms: Option<i64>) -> String {
+    let Some(duration_ms) = duration_ms else {
+        return "-".to_string();
+    };
+    if duration_ms < 1_000 {
+        format!("{duration_ms}ms")
+    } else if duration_ms < 60_000 {
+        format!("{:.2}s", duration_ms as f64 / 1_000.0)
+    } else {
+        format!("{:.2}m", duration_ms as f64 / 60_000.0)
+    }
+}
+
+fn execution_workflow_label(row: &ExecutionListRow) -> String {
+    match (row.workflow_name.as_deref(), row.workflow_id.as_deref()) {
+        (Some(name), Some(id)) => format!("{name} ({id})"),
+        (Some(name), None) => name.to_string(),
+        (None, Some(id)) => id.to_string(),
+        (None, None) => "-".to_string(),
+    }
+}
+
+fn value_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 fn load_loaded_repo(context: &Context) -> Result<LoadedRepo, AppError> {
     load_repo(context.repo_root.as_deref())
 }
@@ -1064,5 +1359,71 @@ fn absolutize(root: &Path, path: &Path) -> PathBuf {
         path.to_path_buf()
     } else {
         root.join(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{execution_duration_ms, execution_node_rows, format_duration};
+
+    #[test]
+    fn execution_duration_uses_started_and_stopped_times() {
+        let execution = json!({
+            "startedAt": "2026-03-26T12:00:00.000Z",
+            "stoppedAt": "2026-03-26T12:00:01.250Z"
+        });
+
+        assert_eq!(execution_duration_ms(&execution), Some(1_250));
+        assert_eq!(format_duration(Some(1_250)), "1.25s");
+    }
+
+    #[test]
+    fn execution_node_rows_summarize_last_run_data() {
+        let execution = json!({
+            "data": {
+                "resultData": {
+                    "runData": {
+                        "First Node": [
+                            {
+                                "executionStatus": "success",
+                                "executionTime": 12,
+                                "data": {
+                                    "main": [
+                                        [{"json": {"ok": true}}, {"json": {"ok": true}}],
+                                        []
+                                    ]
+                                }
+                            }
+                        ],
+                        "Second Node": [
+                            {
+                                "executionStatus": "error",
+                                "executionTime": 3,
+                                "data": {
+                                    "main": [
+                                        [],
+                                        [{"json": {"ok": false}}]
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+
+        let rows = execution_node_rows(&execution);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "First Node");
+        assert_eq!(rows[0].status.as_deref(), Some("success"));
+        assert_eq!(rows[0].execution_time_ms, Some(12));
+        assert_eq!(rows[0].output_items, 2);
+        assert_eq!(rows[1].name, "Second Node");
+        assert_eq!(rows[1].status.as_deref(), Some("error"));
+        assert_eq!(rows[1].execution_time_ms, Some(3));
+        assert_eq!(rows[1].output_items, 1);
     }
 }

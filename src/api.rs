@@ -29,6 +29,13 @@ pub struct ListOptions {
     pub name_filter: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ExecutionListOptions {
+    pub limit: u16,
+    pub workflow_id: Option<String>,
+    pub status: Option<String>,
+}
+
 impl ApiClient {
     pub fn new(
         command: &'static str,
@@ -117,9 +124,85 @@ impl ApiClient {
         Ok(results)
     }
 
+    pub async fn list_executions(
+        &self,
+        options: &ExecutionListOptions,
+    ) -> Result<Vec<Value>, AppError> {
+        if options.limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut query = vec![("limit".to_string(), options.limit.to_string())];
+        if let Some(workflow_id) = &options.workflow_id {
+            query.push(("workflowId".to_string(), workflow_id.clone()));
+        }
+        if let Some(status) = &options.status {
+            query.push(("status".to_string(), status.clone()));
+        }
+
+        let mut next_cursor: Option<String> = None;
+        let mut results = Vec::new();
+
+        loop {
+            let mut page_query = query.clone();
+            if let Some(cursor) = &next_cursor {
+                page_query.push(("cursor".to_string(), cursor.clone()));
+            }
+
+            let page = self
+                .request_json(Method::GET, "executions", &page_query, None)
+                .await?;
+
+            let page_data = page
+                .get("data")
+                .and_then(Value::as_array)
+                .cloned()
+                .or_else(|| page.as_array().cloned())
+                .ok_or_else(|| {
+                    AppError::api(
+                        self.command,
+                        "api.invalid_response",
+                        "Expected a paginated execution list response.",
+                    )
+                })?;
+
+            if append_capped_values(&mut results, &page_data, usize::from(options.limit)) {
+                break;
+            }
+
+            next_cursor = page
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            if next_cursor.is_none() {
+                break;
+            }
+        }
+
+        Ok(results)
+    }
+
     pub async fn get_workflow_by_id(&self, workflow_id: &str) -> Result<Option<Value>, AppError> {
         self.request_json_optional(Method::GET, &format!("workflows/{workflow_id}"), &[], None)
             .await
+    }
+
+    pub async fn get_execution(
+        &self,
+        execution_id: &str,
+        include_data: bool,
+    ) -> Result<Option<Value>, AppError> {
+        let mut query = Vec::new();
+        if include_data {
+            query.push(("includeData".to_string(), "true".to_string()));
+        }
+        self.request_json_optional(
+            Method::GET,
+            &format!("executions/{execution_id}"),
+            &query,
+            None,
+        )
+        .await
     }
 
     pub async fn resolve_workflow(&self, identifier: &str) -> Result<Value, AppError> {
@@ -429,11 +512,21 @@ fn append_matching_workflows(
     false
 }
 
+fn append_capped_values(results: &mut Vec<Value>, page_data: &[Value], limit: usize) -> bool {
+    for value in page_data {
+        results.push(value.clone());
+        if results.len() >= limit {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::{ListOptions, append_matching_workflows};
+    use super::{ListOptions, append_capped_values, append_matching_workflows};
 
     #[test]
     fn append_matching_workflows_honors_limit_and_filter() {
@@ -472,5 +565,18 @@ mod tests {
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0]["id"], "a");
         assert_eq!(filtered[1]["id"], "c");
+    }
+
+    #[test]
+    fn append_capped_values_stops_at_limit() {
+        let page = vec![json!({"id":"a"}), json!({"id":"b"}), json!({"id":"c"})];
+        let mut values = Vec::new();
+
+        let reached_limit = append_capped_values(&mut values, &page, 2);
+
+        assert!(reached_limit);
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0]["id"], "a");
+        assert_eq!(values[1]["id"], "b");
     }
 }

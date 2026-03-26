@@ -34,6 +34,8 @@ pub enum Command {
     Ls(ListArgs),
     /// Get a workflow and print canonical JSON
     Get(GetArgs),
+    /// Inspect recent workflow executions
+    Runs(RunsArgs),
     /// Pull a workflow into the local repository
     Pull(PullArgs),
     /// Push a tracked workflow back to n8n
@@ -123,6 +125,45 @@ pub struct GetArgs {
     #[command(flatten)]
     pub remote: RemoteArgs,
     pub identifier: String,
+}
+
+#[derive(Debug, Args)]
+pub struct RunsArgs {
+    #[command(subcommand)]
+    pub command: RunsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RunsCommand {
+    /// List recent executions
+    #[command(alias = "list")]
+    Ls(RunsListArgs),
+    /// Get one execution by ID
+    Get(RunsGetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RunsListArgs {
+    #[command(flatten)]
+    pub remote: RemoteArgs,
+    /// Filter by workflow ID or exact workflow name
+    #[arg(long, value_name = "ID_OR_NAME")]
+    pub workflow: Option<String>,
+    /// Filter by execution status, for example `success`, `error`, or `waiting`
+    #[arg(long)]
+    pub status: Option<String>,
+    #[arg(long, default_value_t = 20)]
+    pub limit: u16,
+}
+
+#[derive(Debug, Args)]
+pub struct RunsGetArgs {
+    #[command(flatten)]
+    pub remote: RemoteArgs,
+    pub execution_id: String,
+    /// Include detailed execution data and workflow metadata
+    #[arg(long)]
+    pub details: bool,
 }
 
 #[derive(Debug, Args)]
