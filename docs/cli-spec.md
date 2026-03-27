@@ -159,6 +159,7 @@ Checks currently include:
 - per-instance `config`
 - per-instance `token`
 - per-instance `api`
+- per-instance `credential_inventory`
 
 Failure behavior:
 
@@ -167,6 +168,8 @@ Failure behavior:
 - in human mode, prints the report before returning the failure summary
 
 `repo.sensitive_data` scans tracked `.workflow.json` files and fails when it finds likely inline secrets. It is skipped when the workflow directory is missing.
+
+`instance.credential_inventory` reports whether full credential inventory is available through the public API, available only through the opt-in internal REST fallback, or limited to workflow-reference coverage.
 
 ## 5. API Assumptions
 
@@ -364,7 +367,7 @@ Current commands:
 - `node rename <file> <current_name> <new_name>`
 - `node rm <file> <node>`
 - `expr set <file> <node> <path> <expression>`
-- `credential ls [--instance <alias>] [--workflow <id-or-name>] [--type <credential_type>]`
+- `credential ls [--instance <alias>] [--workflow <id-or-name>] [--type <credential_type>] [--source auto|public|rest-session|workflow-refs]`
 - `credential schema [--instance <alias>] <credential_type>`
 - `credential set <file> <node> --type <credential_type> --id <credential_id> [--name <credential_name>]`
 - `conn add <file> --from <node> --to <node> [--kind <type>] [--target-kind <type>] [--output-index <n>] [--input-index <n>]`
@@ -380,7 +383,16 @@ Behavior:
 - `workflow create` requires a repo because it writes the new tracked file and sidecar into the configured workflow directory
 - `workflow create` refuses files that already have a sidecar and expects you to use `push` for tracked workflows
 - `workflow create` removes local `id` and `active` before the create request, ensures execution-saving `settings` defaults exist, normalizes webhook nodes for remote creation, and re-fetches the created workflow before storing the new tracked state
-- `credential ls` discovers credential IDs and names from workflow references on the remote instance; it cannot discover completely unused credentials because the public API does not expose a first-class credential inventory
+- `credential ls` defaults to `--source auto`
+- `credential ls --source auto` resolves inventory in this order:
+  - public API inventory via `GET /api/v1/credentials`
+  - internal REST inventory via `GET /rest/credentials` only if `N8NC_SESSION_COOKIE_<ALIAS>` is configured
+  - workflow-reference discovery from fetched workflows
+- `credential ls --source public` requires the public credential inventory endpoint to work and fails explicitly if it does not
+- `credential ls --source rest-session` requires `N8NC_SESSION_COOKIE_<ALIAS>` and uses the internal browser-session route intentionally as an opt-in fallback, not a default dependency
+- `credential ls --source workflow-refs` only reports credentials referenced by workflows
+- `credential ls --workflow <id-or-name>` is workflow-reference scoped and therefore only works with `--source auto` or `--source workflow-refs`
+- full-inventory sources still enrich results with workflow usage counts by scanning current workflow references; unused credentials show `usage_count = 0`
 - `credential schema` returns the official schema payload from `credentials/schema/{credentialTypeName}`
 - `credential set` requires an existing credential ID, which can come from `credential ls`, the n8n UI, or another trusted source
 - `workflow rm` accepts a workflow file path, workflow ID, or exact workflow name

@@ -206,10 +206,23 @@ Set a credential reference on a node:
 n8nc credential set workflows/order-alert--wf-draft.workflow.json "HTTP Request" --type httpBasicAuth --id cred-123 --name "Primary Basic Auth"
 ```
 
-Discover credential IDs already referenced by workflows on the remote instance:
+Discover credentials on the remote instance, letting `n8nc` choose the best available inventory source:
 
 ```bash
 n8nc credential ls --instance prod
+```
+
+Force the safest partial mode when you only care about workflow usage:
+
+```bash
+n8nc credential ls --instance prod --source workflow-refs
+```
+
+If your instance does not expose `GET /api/v1/credentials`, you can opt into the internal browser-session fallback:
+
+```bash
+export N8NC_SESSION_COOKIE_PROD='n8n-auth=...'
+n8nc credential ls --instance prod --source rest-session
 ```
 
 Inspect the official schema for a credential type:
@@ -220,10 +233,13 @@ n8nc credential schema --instance prod httpBasicAuth
 
 `credential set` still intentionally uses an existing credential ID, but the CLI now helps in two ways:
 
-- `credential ls` discovers IDs and names referenced by workflows
+- `credential ls` uses `auto` mode by default:
+  - public API inventory if available
+  - internal REST inventory only if you explicitly provide `N8NC_SESSION_COOKIE_<ALIAS>`
+  - workflow-reference fallback otherwise
 - `credential schema` shows the official schema for a credential type
 
-Unused credentials still can’t be discovered through the public API, so some IDs may still need to come from the n8n UI.
+`credential ls --workflow <id-or-name>` is intentionally workflow-reference scoped, so it only works with `--source auto` or `--source workflow-refs`.
 
 Connect two nodes:
 
@@ -357,7 +373,7 @@ When `runs ls --workflow ...` returns no rows for an active workflow whose setti
 - Agent-safe: every command supports `--json`.
 - Deterministic: workflows are canonicalized before storage and hashing.
 - Local authoring first: `workflow new`, `workflow show`, `workflow rm`, `node ls`, `node add`, `node set`, `node rename`, `node rm`, `expr set`, `credential set`, `conn add`, and `conn rm` edit local workflow files directly.
-- Better credential discovery: `credential ls` finds IDs already referenced by workflows, `credential schema` exposes the official credential schema endpoint, and `workflow show` / `node ls` surface credential references in local files.
+- Better credential discovery: `credential ls` now probes inventory capabilities at runtime, prefers the public API when available, supports an explicit internal REST fallback via `N8NC_SESSION_COOKIE_<ALIAS>`, and still falls back safely to workflow references when full inventory is unavailable. `credential schema`, `workflow show`, and `node ls` surface the rest of the credential context.
 - Draft-to-tracked flow: `workflow create` publishes a local draft through the official workflow-create API and converts it into a tracked file plus sidecar.
 - Server-truth tracking: `workflow create` and successful `push` both re-fetch the remote workflow before storing it locally, so lease hashes are based on the same shape that later reads use.
 - Full cleanup path: `workflow rm` removes the remote workflow and cleans tracked repo artifacts instead of forcing raw API calls.
@@ -366,7 +382,7 @@ When `runs ls --workflow ...` returns no rows for an active workflow whose setti
 - Better execution ergonomics: new drafts default to saved successful executions, and `runs ls` explains one common “why is history empty?” workflow-settings pitfall.
 - Explicit refresh: remote drift is only reported when you ask for it with `--refresh`.
 - Sensitive-data aware: `validate` emits warnings, not hard failures, for likely secret literals in tracked workflow files.
-- Fast setup check: `doctor` validates repo layout, token availability, live API reachability, and scans tracked workflow files for likely sensitive literals.
+- Fast setup check: `doctor` validates repo layout, token availability, live API reachability, credential-inventory coverage, and scans tracked workflow files for likely sensitive literals.
 - Dev-loop friendly: `runs ls`, `runs get --details`, and `runs watch` cover recent execution inspection without leaving the terminal.
 - Time-window aware: `runs ls` and `runs watch` support `--since <RFC3339>` and `--last <window>` with `s`, `m`, `h`, and `d` units.
 - Honest triggering: `trigger` is an HTTP call helper for webhook URLs, not a guessed “execute workflow” API wrapper.
