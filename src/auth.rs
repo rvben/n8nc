@@ -29,6 +29,12 @@ pub fn session_cookie_env_var_name(alias: &str) -> String {
     out
 }
 
+pub fn browser_id_env_var_name(alias: &str) -> String {
+    let mut out = String::from("N8NC_BROWSER_ID_");
+    normalize_alias_suffix(alias, &mut out);
+    out
+}
+
 fn normalize_alias_suffix(alias: &str, out: &mut String) {
     for ch in alias.chars() {
         if ch.is_ascii_alphanumeric() {
@@ -100,6 +106,13 @@ pub fn resolve_session_cookie(alias: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+pub fn resolve_browser_id(alias: &str) -> Option<String> {
+    env::var(browser_id_env_var_name(alias))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 pub fn read_token_from_stdin() -> Result<String, AppError> {
     let mut buffer = String::new();
     std::io::stdin()
@@ -157,7 +170,7 @@ pub fn ensure_alias_exists(
 
 #[cfg(test)]
 mod tests {
-    use super::{env_var_name, session_cookie_env_var_name};
+    use super::{browser_id_env_var_name, env_var_name, session_cookie_env_var_name};
 
     #[test]
     fn env_var_names_are_normalized() {
@@ -170,6 +183,11 @@ mod tests {
         assert_eq!(
             session_cookie_env_var_name("eu-west-1"),
             "N8NC_SESSION_COOKIE_EU_WEST_1"
+        );
+        assert_eq!(browser_id_env_var_name("prod"), "N8NC_BROWSER_ID_PROD");
+        assert_eq!(
+            browser_id_env_var_name("eu-west-1"),
+            "N8NC_BROWSER_ID_EU_WEST_1"
         );
     }
 }

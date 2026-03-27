@@ -14,8 +14,9 @@ use serde_json::{Value, json};
 use crate::{
     api::{ApiClient, ExecutionListOptions, ListOptions},
     auth::{
-        ensure_alias_exists, list_auth_statuses, read_token_from_stdin, remove_token,
-        resolve_session_cookie, resolve_token, session_cookie_env_var_name, store_token,
+        browser_id_env_var_name, ensure_alias_exists, list_auth_statuses, read_token_from_stdin,
+        remove_token, resolve_browser_id, resolve_session_cookie, resolve_token,
+        session_cookie_env_var_name, store_token,
     },
     canonical::{canonicalize_workflow, hash_value, pretty_json},
     cli::{
@@ -1933,6 +1934,7 @@ async fn build_credential_list_result(
     }
 
     let session_cookie = resolve_session_cookie(alias);
+    let browser_id = resolve_browser_id(alias);
 
     match args.source {
         CredentialSource::Auto => match client.list_credentials_public().await {
@@ -1948,7 +1950,11 @@ async fn build_credential_list_result(
             }
             Err(public_err) if credential_inventory_fallback_allowed(&public_err) => {
                 if let Some(cookie) = session_cookie.as_deref() {
-                    match client.list_credentials_rest_session(cookie).await {
+                    if let Some(browser_id) = browser_id.as_deref() {
+                        match client
+                            .list_credentials_rest_session(cookie, Some(browser_id))
+                            .await
+                        {
                             Ok(inventory) => {
                                 build_full_inventory_credential_list(
                                     args,
@@ -1976,17 +1982,30 @@ async fn build_credential_list_result(
                             }
                             Err(rest_err) => Err(rest_err),
                         }
-                } else {
-                    build_workflow_reference_credential_list(
+                    } else {
+                        build_workflow_reference_credential_list(
                             args,
                             Some(format!(
-                                "Public credential inventory was unavailable: {}. No {} environment variable is configured for the internal REST fallback.",
+                                "Public credential inventory was unavailable: {}. {} is configured, but {} is missing so the internal REST fallback cannot authenticate.",
                                 public_err.message,
-                                session_cookie_env_var_name(alias)
+                                session_cookie_env_var_name(alias),
+                                browser_id_env_var_name(alias)
                             )),
                             client,
                         )
                         .await
+                    }
+                } else {
+                    build_workflow_reference_credential_list(
+                        args,
+                        Some(format!(
+                            "Public credential inventory was unavailable: {}. No {} environment variable is configured for the internal REST fallback.",
+                            public_err.message,
+                            session_cookie_env_var_name(alias)
+                        )),
+                        client,
+                    )
+                    .await
                 }
             }
             Err(public_err) => Err(public_err),
@@ -2014,12 +2033,24 @@ async fn build_credential_list_result(
                     ),
                 )
                 .with_suggestion(format!(
-                    "Set {} to a valid n8n browser session cookie, or use `--source auto` / `--source workflow-refs`.",
+                    "Set {} to a valid n8n browser session cookie and {} to the matching browser-id value, or use `--source auto` / `--source workflow-refs`.",
+                    session_cookie_env_var_name(alias),
+                    browser_id_env_var_name(alias)
+                ))
+            })?;
+            let browser_id = browser_id.ok_or_else(|| {
+                AppError::auth(
+                    "credential",
+                    format!("No browser ID is configured for `{alias}`."),
+                )
+                .with_suggestion(format!(
+                    "Set {} to the browser-id value that belongs to {}. n8n validates both for internal REST session requests.",
+                    browser_id_env_var_name(alias),
                     session_cookie_env_var_name(alias)
                 ))
             })?;
             let inventory = client
-                .list_credentials_rest_session(&cookie)
+                .list_credentials_rest_session(&cookie, Some(&browser_id))
                 .await
                 .map_err(|err| forced_credential_source_error(alias, args.source, err))?;
             build_full_inventory_credential_list(
@@ -2206,7 +2237,7 @@ fn workflow_reference_inventory_note() -> &'static str {
 fn full_inventory_note(source: CredentialInventorySource) -> String {
     match source {
         CredentialInventorySource::PublicApi => "Results include the full credential inventory from the public API. Workflow usage is derived from current workflow references; unused credentials show zero uses.".to_string(),
-        CredentialInventorySource::RestSession => "Results include the full credential inventory from n8n's internal REST API using a browser session cookie. This internal fallback is opt-in and may change across n8n upgrades.".to_string(),
+        CredentialInventorySource::RestSession => "Results include the full credential inventory from n8n's internal REST API using a browser session cookie plus the matching browser-id. This internal fallback is opt-in and may change across n8n upgrades.".to_string(),
         CredentialInventorySource::WorkflowReferences => workflow_reference_inventory_note().to_string(),
     }
 }
@@ -2233,8 +2264,9 @@ fn forced_credential_source_error(
             "Use `n8nc credential ls --source auto` to allow fallback, or `--source workflow-refs` for partial discovery.".to_string()
         }
         CredentialSource::RestSession => format!(
-            "Set {} to a valid n8n browser session cookie, or use `--source auto` / `--source workflow-refs`.",
-            session_cookie_env_var_name(alias)
+            "Set {} to a valid n8n browser session cookie and {} to the matching browser-id value, or use `--source auto` / `--source workflow-refs`.",
+            session_cookie_env_var_name(alias),
+            browser_id_env_var_name(alias)
         ),
         CredentialSource::Auto | CredentialSource::WorkflowRefs => {
             "Use `n8nc credential ls --source auto`.".to_string()
@@ -2260,25 +2292,39 @@ async fn probe_credential_inventory_capability(
         Ok(()) => Ok("Full credential inventory is available via the public API.".to_string()),
         Err(public_err) if credential_inventory_fallback_allowed(&public_err) => {
             if let Some(cookie) = resolve_session_cookie(alias) {
-                match client.probe_credentials_rest_session(&cookie).await {
-                    Ok(()) => Ok(format!(
-                        "Public credential inventory is unavailable ({}). Full inventory is available via the internal REST fallback because {} is configured.",
-                        public_err.message,
-                        session_cookie_env_var_name(alias)
-                    )),
-                    Err(rest_err) if credential_inventory_fallback_allowed(&rest_err) => {
-                        Ok(format!(
-                            "Credential discovery falls back to workflow references only. Public inventory is unavailable ({}). Internal REST inventory is also unavailable ({}).",
-                            public_err.message, rest_err.message
-                        ))
+                if let Some(browser_id) = resolve_browser_id(alias) {
+                    match client
+                        .probe_credentials_rest_session(&cookie, Some(&browser_id))
+                        .await
+                    {
+                        Ok(()) => Ok(format!(
+                            "Public credential inventory is unavailable ({}). Full inventory is available via the internal REST fallback because {} and {} are configured.",
+                            public_err.message,
+                            session_cookie_env_var_name(alias),
+                            browser_id_env_var_name(alias)
+                        )),
+                        Err(rest_err) if credential_inventory_fallback_allowed(&rest_err) => {
+                            Ok(format!(
+                                "Credential discovery falls back to workflow references only. Public inventory is unavailable ({}). Internal REST inventory is also unavailable ({}).",
+                                public_err.message, rest_err.message
+                            ))
+                        }
+                        Err(rest_err) => Err(rest_err),
                     }
-                    Err(rest_err) => Err(rest_err),
+                } else {
+                    Ok(format!(
+                        "Credential discovery falls back to workflow references only. Public inventory is unavailable ({}). {} is configured, but {} is missing.",
+                        public_err.message,
+                        session_cookie_env_var_name(alias),
+                        browser_id_env_var_name(alias)
+                    ))
                 }
             } else {
                 Ok(format!(
-                    "Credential discovery falls back to workflow references only. Public inventory is unavailable ({}). Set {} to enable the internal REST fallback.",
+                    "Credential discovery falls back to workflow references only. Public inventory is unavailable ({}). Set {} and {} to enable the internal REST fallback.",
                     public_err.message,
-                    session_cookie_env_var_name(alias)
+                    session_cookie_env_var_name(alias),
+                    browser_id_env_var_name(alias)
                 ))
             }
         }

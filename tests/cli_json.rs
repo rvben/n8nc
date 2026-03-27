@@ -9,6 +9,7 @@ use std::{
 };
 
 use assert_cmd::Command;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
 use tempfile::tempdir;
 use wiremock::{
@@ -2103,6 +2104,7 @@ async fn credential_ls_json_auto_falls_back_to_rest_session_when_configured() {
     let server = MockServer::start().await;
     let repo = tempdir().expect("tempdir");
     write_repo(repo.path(), &server.uri());
+    let session_cookie = rest_session_cookie("browser-123");
 
     Mock::given(method("GET"))
         .and(path("/api/v1/credentials"))
@@ -2116,7 +2118,8 @@ async fn credential_ls_json_auto_falls_back_to_rest_session_when_configured() {
 
     Mock::given(method("GET"))
         .and(path("/rest/credentials"))
-        .and(header("cookie", "n8n-auth=abc123"))
+        .and(header("cookie", &session_cookie))
+        .and(header("browser-id", "browser-123"))
         .and(query_param("includeData", "false"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [
@@ -2163,7 +2166,8 @@ async fn credential_ls_json_auto_falls_back_to_rest_session_when_configured() {
         .await;
 
     let output = base_command(repo.path())
-        .env("N8NC_SESSION_COOKIE_MOCK", "n8n-auth=abc123")
+        .env("N8NC_SESSION_COOKIE_MOCK", &session_cookie)
+        .env("N8NC_BROWSER_ID_MOCK", "browser-123")
         .arg("credential")
         .arg("ls")
         .arg("--instance")
@@ -2740,6 +2744,14 @@ fn base_command(repo_root: &Path) -> Command {
 
 fn write_repo(root: &Path, base_url: &str) {
     write_repo_with_alias(root, base_url, "mock");
+}
+
+fn rest_session_cookie(browser_id: &str) -> String {
+    let payload = json!({ "browserId": browser_id }).to_string();
+    format!(
+        "n8n-auth=header.{}.sig",
+        URL_SAFE_NO_PAD.encode(payload.as_bytes())
+    )
 }
 
 fn write_repo_with_alias(root: &Path, base_url: &str, alias: &str) {
