@@ -13,6 +13,7 @@ It is intentionally narrower than the original brainstorm. The tool is now speci
 - fetching one workflow into a canonical local artifact
 - creating local workflow drafts and editing local workflow JSON structurally
 - creating a remote workflow from a local file and converting it into a tracked artifact
+- executing non-webhook workflows through a configured external backend
 - validating and formatting local workflow files
 - pushing a tracked workflow back safely
 - activating and deactivating workflows
@@ -22,7 +23,7 @@ It is intentionally narrower than the original brainstorm. The tool is now speci
 
 - promoting a workflow across multiple environments
 - remapping credential IDs or project bindings between instances
-- generic execution control through undocumented or unverified endpoints
+- built-in non-webhook execution through a stable public n8n API
 
 ## 2. Command Surface
 
@@ -48,6 +49,7 @@ n8nc
 ├── push
 ├── workflow new
 ├── workflow create
+├── workflow execute
 ├── workflow show
 ├── workflow rm
 ├── node ls
@@ -88,6 +90,7 @@ n8nc
 - `default_instance`
 - `workflow_dir`
 - instance aliases and base URLs
+- optional per-instance workflow execute backend config
 
 Example:
 
@@ -99,6 +102,13 @@ workflow_dir = "workflows"
 [instances.prod]
 base_url = "https://your-instance.app.n8n.cloud"
 api_version = "v1"
+
+[instances.prod.execute]
+backend = "command"
+program = "uvx"
+args = ["your-mcp-runner", "execute_workflow", "{workflow_id}", "{instance_alias}"]
+stdin_json = true
+cwd = "."
 ```
 
 Tracked files:
@@ -172,6 +182,7 @@ Checks currently include:
 - per-instance `token`
 - per-instance `api`
 - per-instance `credential_inventory`
+- per-instance `workflow_execute`
 
 Failure behavior:
 
@@ -182,6 +193,8 @@ Failure behavior:
 `repo.sensitive_data` scans tracked `.workflow.json` files and fails when it finds likely inline secrets. It is skipped when the workflow directory is missing.
 
 `instance.credential_inventory` reports whether full credential inventory is available through the public API, available only through the opt-in internal REST fallback, or limited to workflow-reference coverage.
+
+`instance.workflow_execute` reports whether a configured non-webhook execute backend is runnable. It is skipped when no backend is configured for that instance.
 
 ## 5. API Assumptions
 
@@ -206,6 +219,8 @@ The execution commands currently assume these endpoints exist and are reachable 
 `runs get --details` uses `includeData=true` when fetching a single execution.
 
 `trigger` does not use the public API. It makes a direct HTTP request to a full URL or a path resolved against the configured instance base URL.
+
+`workflow execute` also does not use the public API. It resolves the workflow through the public API, then hands execution off to a configured local backend such as an MCP runner or other adapter command.
 
 ## 6. Canonical Workflow Artifact
 
@@ -371,6 +386,7 @@ Current commands:
 
 - `workflow new <name> [--path <path>] [--id <id>] [--active]`
 - `workflow create <file> --instance <alias> [--activate]`
+- `workflow execute <id-or-name> --instance <alias> [--input <value>|--input-file <path>|--stdin]`
 - `workflow show <file> [--instance <alias>]`
 - `workflow rm <target> [--instance <alias>] [--local-only|--keep-local]`
 - `node ls <file>`
@@ -395,6 +411,10 @@ Behavior:
 - `workflow create` requires a repo because it writes the new tracked file and sidecar into the configured workflow directory
 - `workflow create` refuses files that already have a sidecar and expects you to use `push` for tracked workflows
 - `workflow create` removes local `id` and `active` before the create request, ensures execution-saving `settings` defaults exist, normalizes webhook nodes for remote creation, and re-fetches the created workflow before storing the new tracked state
+- `workflow execute` requires `[instances.<alias>.execute]` config for a local backend and intentionally fails with a config error when none is present
+- `workflow execute` supports inline input, file input, or stdin; input that parses as JSON is preserved structurally, otherwise it is passed through as a plain string
+- `workflow execute` resolves the workflow first, then expands `{workflow_id}`, `{workflow_name}`, `{instance_alias}`, and `{base_url}` placeholders in the configured backend arguments
+- `workflow execute` exports workflow context through environment variables and, when `stdin_json = true`, writes a JSON request envelope to stdin for adapter-style runners
 - `auth list` reports token source plus browser-session readiness for each configured instance
 - `auth session test` verifies that the internal REST credential-inventory path is reachable with the configured session cookie and browser ID
 - `credential ls` defaults to `--source auto`
@@ -561,7 +581,7 @@ The current diagnostics model is intentionally simple:
 - optional JSON path
 - optional suggestion
 
-## 14. Triggering
+## 14. Triggering And Execution
 
 The user concern that started this implementation was valid: developers need more than `pull` and `push`.
 
@@ -570,6 +590,7 @@ The current answer is:
 - use `ls` and `get` for fast inspection
 - use `activate` and `deactivate` for workflow state changes; they wait for the remote state to converge and refresh tracked local artifacts when available
 - use `trigger` for webhook-based development flows
+- use `workflow execute` for non-webhook workflows when you have a configured local backend
 
 `trigger` supports:
 
@@ -589,6 +610,48 @@ Webhook-specific error handling:
 - `404` responses for `/webhook/...` explain that the path may be wrong, the workflow may be inactive, or n8n may not have registered the webhook yet
 
 This avoids pretending there is a stable public “run workflow by ID” endpoint when that has not been verified in the implementation.
+
+`workflow execute` supports:
+
+- workflow ID or exact workflow name resolution through the public API
+- optional input from `--input`, `--input-file`, or `--stdin`
+- adapter commands configured per instance in `n8n.toml`
+- placeholder expansion in configured args:
+  - `{workflow_id}`
+  - `{workflow_name}`
+  - `{instance_alias}`
+  - `{base_url}`
+- execution context in environment variables:
+  - `N8NC_EXECUTE_INSTANCE_ALIAS`
+  - `N8NC_EXECUTE_BASE_URL`
+  - `N8NC_EXECUTE_WORKFLOW_ID`
+  - `N8NC_EXECUTE_WORKFLOW_NAME`
+  - `N8NC_EXECUTE_WORKFLOW_ACTIVE`
+  - `N8NC_EXECUTE_INPUT_JSON`
+- optional stdin JSON request envelopes when `stdin_json = true`
+
+Example adapter request body:
+
+```json
+{
+  "tool": "execute_workflow",
+  "instance_alias": "prod",
+  "base_url": "https://example.n8n.cloud",
+  "workflow": {
+    "id": "abc123",
+    "name": "Nightly Digest",
+    "active": true
+  },
+  "input": {
+    "dryRun": true
+  }
+}
+```
+
+This keeps the semantics honest:
+
+- `trigger` means “call a webhook URL”
+- `workflow execute` means “ask a configured local adapter to run this workflow”
 
 ## 15. JSON Contract
 
@@ -651,6 +714,20 @@ Local edit command success payloads include:
 - `local_removed`
 - `removed_paths`
 
+`workflow execute` success payloads include:
+
+- `action = "execute"`
+- `instance`
+- `workflow_id`
+- `workflow_name`
+- optional `active`
+- `execution.backend`
+- `execution.program`
+- optional `execution.args`
+- optional `execution.cwd`
+- optional `execution.output`
+- optional `execution.stderr`
+
 ## 16. Exit Codes
 
 - `0`: success
@@ -674,6 +751,7 @@ Local edit command success payloads include:
 - `doctor` uses a cheap workflow-list probe and does not verify every endpoint.
 - `diff` is best after a fresh `pull`, because older repos may not have cached base snapshots yet.
 - sensitive-data scanning is heuristic. It is tuned to catch likely mistakes, not to prove a workflow is secret-free.
+- non-webhook execution currently depends on a local adapter command you configure yourself; `n8nc` does not ship an MCP runner or other backend implementation.
 - archive support is still outside the CLI until a stable public endpoint is verified.
 
 ## 18. Next Likely Steps
