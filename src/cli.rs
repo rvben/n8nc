@@ -457,8 +457,31 @@ pub struct CredentialArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum CredentialCommand {
+    /// List credential references discovered from workflow usage
+    Ls(CredentialListArgs),
+    /// Show the official credential schema for a credential type
+    Schema(CredentialSchemaArgs),
     /// Set a credential reference on a node using an existing n8n credential ID
     Set(CredentialSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CredentialListArgs {
+    #[command(flatten)]
+    pub remote: RemoteArgs,
+    /// Limit discovery to one workflow ID or exact workflow name
+    #[arg(long)]
+    pub workflow: Option<String>,
+    #[arg(long = "type")]
+    pub credential_type: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct CredentialSchemaArgs {
+    #[command(flatten)]
+    pub remote: RemoteArgs,
+    #[arg(value_name = "CREDENTIAL_TYPE")]
+    pub credential_type: String,
 }
 
 #[derive(Debug, Args)]
@@ -467,7 +490,7 @@ pub struct CredentialSetArgs {
     pub node: String,
     #[arg(long = "type")]
     pub credential_type: String,
-    /// Existing credential ID from n8n; this API does not expose credential listing
+    /// Existing credential ID from n8n; use `n8nc credential ls` to discover referenced IDs
     #[arg(long = "id")]
     pub credential_id: String,
     #[arg(long)]

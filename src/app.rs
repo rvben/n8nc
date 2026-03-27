@@ -20,13 +20,13 @@ use crate::{
     canonical::{canonicalize_workflow, hash_value, pretty_json},
     cli::{
         AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, Cli, Command, ConnAddArgs, ConnArgs,
-        ConnCommand, ConnRemoveArgs, CredentialArgs, CredentialCommand, CredentialSetArgs,
-        DiffArgs, DoctorArgs, ExprArgs, ExprCommand, ExprSetArgs, FmtArgs, GetArgs, IdArgs,
-        InitArgs, ListArgs, NodeAddArgs, NodeArgs, NodeCommand, NodeListArgs, NodeRemoveArgs,
-        NodeRenameArgs, NodeSetArgs, PullArgs, PushArgs, RunsArgs, RunsCommand, RunsGetArgs,
-        RunsListArgs, RunsTimeArgs, RunsWatchArgs, StatusArgs, TriggerArgs, ValidateArgs,
-        ValueModeArgs, WorkflowArgs, WorkflowCommand, WorkflowCreateArgs, WorkflowNewArgs,
-        WorkflowRemoveArgs, WorkflowShowArgs,
+        ConnCommand, ConnRemoveArgs, CredentialArgs, CredentialCommand, CredentialListArgs,
+        CredentialSchemaArgs, CredentialSetArgs, DiffArgs, DoctorArgs, ExprArgs, ExprCommand,
+        ExprSetArgs, FmtArgs, GetArgs, IdArgs, InitArgs, ListArgs, NodeAddArgs, NodeArgs,
+        NodeCommand, NodeListArgs, NodeRemoveArgs, NodeRenameArgs, NodeSetArgs, PullArgs, PushArgs,
+        RunsArgs, RunsCommand, RunsGetArgs, RunsListArgs, RunsTimeArgs, RunsWatchArgs, StatusArgs,
+        TriggerArgs, ValidateArgs, ValueModeArgs, WorkflowArgs, WorkflowCommand,
+        WorkflowCreateArgs, WorkflowNewArgs, WorkflowRemoveArgs, WorkflowShowArgs,
     },
     config::{
         InstanceConfig, LoadedRepo, RepoConfig, ensure_gitignore, ensure_repo_layout, load_repo,
@@ -83,6 +83,8 @@ struct WorkflowNodeRow {
     position: Option<Vec<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     disabled: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    credentials: Vec<NodeCredentialRow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -109,6 +111,36 @@ struct WorkflowWebhookRow {
     production_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     test_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct NodeCredentialRow {
+    credential_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CredentialWorkflowUsageRow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_name: Option<String>,
+    nodes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CredentialReferenceRow {
+    credential_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_name: Option<String>,
+    usage_count: usize,
+    workflow_count: usize,
+    workflows: Vec<CredentialWorkflowUsageRow>,
 }
 
 const WORKFLOW_UPDATE_MUTABLE_FIELDS: &[&str] = &["name", "nodes", "connections", "settings"];
@@ -1429,6 +1461,7 @@ async fn cmd_workflow_show(context: &Context, args: WorkflowShowArgs) -> Result<
     let nodes = summarize_workflow_nodes(&workflow);
     let connections = summarize_workflow_connections(&workflow);
     let webhooks = summarize_workflow_webhooks(&workflow, base_url.as_deref());
+    let credentials = summarize_credential_references(&[workflow.clone()], None);
 
     if context.json {
         emit_json(
@@ -1441,8 +1474,10 @@ async fn cmd_workflow_show(context: &Context, args: WorkflowShowArgs) -> Result<
                 "instance": instance,
                 "node_count": nodes.len(),
                 "connection_count": connections.len(),
+                "credential_count": credentials.len(),
                 "nodes": nodes,
                 "connections": connections,
+                "credentials": credentials,
                 "webhooks": webhooks,
             }),
         )
@@ -1461,6 +1496,7 @@ async fn cmd_workflow_show(context: &Context, args: WorkflowShowArgs) -> Result<
         }
         print_workflow_nodes(&nodes);
         print_workflow_connections(&connections);
+        print_credential_references(&credentials);
         print_workflow_webhooks(&webhooks);
         Ok(())
     }
@@ -1742,7 +1778,123 @@ async fn cmd_expr_set(context: &Context, args: ExprSetArgs) -> Result<(), AppErr
 
 async fn cmd_credential(context: &Context, args: CredentialArgs) -> Result<(), AppError> {
     match args.command {
+        CredentialCommand::Ls(args) => cmd_credential_list(context, args).await,
+        CredentialCommand::Schema(args) => cmd_credential_schema(context, args).await,
         CredentialCommand::Set(args) => cmd_credential_set(context, args).await,
+    }
+}
+
+async fn cmd_credential_list(context: &Context, args: CredentialListArgs) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let alias = resolve_instance_alias(&repo, args.remote.instance.as_deref(), "credential")?;
+    let (client, _, _) = remote_client(&repo, Some(&alias), "credential")?;
+
+    let workflows = if let Some(identifier) = args.workflow.as_deref() {
+        vec![client.resolve_workflow(identifier).await?]
+    } else {
+        let listed = client
+            .list_workflows(&ListOptions {
+                limit: 250,
+                active: None,
+                name_filter: None,
+            })
+            .await?;
+        let mut workflows = Vec::new();
+        for item in listed {
+            let Some(workflow_id) = item.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(workflow) = client.get_workflow_by_id(workflow_id).await? {
+                workflows.push(workflow.get("data").cloned().unwrap_or(workflow));
+            }
+        }
+        workflows
+    };
+
+    let credentials = summarize_credential_references(&workflows, args.credential_type.as_deref());
+
+    if context.json {
+        emit_json(
+            "credential",
+            &json!({
+                "instance": alias,
+                "workflow_filter": args.workflow,
+                "credential_type_filter": args.credential_type,
+                "count": credentials.len(),
+                "coverage": "workflow_references_only",
+                "note": "Results come from credential references found in workflows. Unused credentials cannot be discovered through the public API.",
+                "credentials": credentials,
+            }),
+        )
+    } else {
+        println!("Credential references ({alias}):");
+        if credentials.is_empty() {
+            println!("  none found");
+            println!(
+                "  Results only include credentials referenced by workflows; unused credentials are not discoverable through the public API."
+            );
+            return Ok(());
+        }
+        println!(
+            "{:<24} {:<18} {:<28} {:<8} {}",
+            "TYPE", "ID", "NAME", "USES", "WORKFLOWS"
+        );
+        for row in &credentials {
+            let workflows = row
+                .workflows
+                .iter()
+                .map(|usage| {
+                    let name = usage
+                        .workflow_name
+                        .as_deref()
+                        .or(usage.workflow_id.as_deref())
+                        .unwrap_or("<unknown>");
+                    if usage.nodes.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{name} [{}]", usage.nodes.join(", "))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            println!(
+                "{:<24} {:<18} {:<28} {:<8} {}",
+                truncate(&row.credential_type, 24),
+                truncate(row.credential_id.as_deref().unwrap_or("-"), 18),
+                truncate(row.credential_name.as_deref().unwrap_or("-"), 28),
+                row.usage_count,
+                workflows
+            );
+        }
+        println!(
+            "Results only include credentials referenced by workflows; unused credentials are not discoverable through the public API."
+        );
+        Ok(())
+    }
+}
+
+async fn cmd_credential_schema(
+    context: &Context,
+    args: CredentialSchemaArgs,
+) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let alias = resolve_instance_alias(&repo, args.remote.instance.as_deref(), "credential")?;
+    let (client, _, _) = remote_client(&repo, Some(&alias), "credential")?;
+    let schema = client.get_credential_schema(&args.credential_type).await?;
+
+    if context.json {
+        emit_json(
+            "credential",
+            &json!({
+                "instance": alias,
+                "credential_type": args.credential_type,
+                "schema": schema,
+            }),
+        )
+    } else {
+        println!("Credential schema: {}", args.credential_type);
+        println!("{}", pretty_json(&schema)?);
+        Ok(())
     }
 }
 
@@ -1774,7 +1926,7 @@ async fn cmd_credential_set(context: &Context, args: CredentialSetArgs) -> Resul
             (
                 "credential_discovery".to_string(),
                 json!(
-                    "This n8n API does not expose credential listing, so `credential set` requires an existing credential ID from the n8n UI or another trusted source."
+                    "The public API does not expose a first-class credential inventory. Use `n8nc credential ls` to discover IDs referenced by workflows, `n8nc credential schema <type>` for the official schema, or source the ID from the n8n UI."
                 ),
             ),
         ],
@@ -3279,9 +3431,143 @@ fn summarize_workflow_nodes(workflow: &Value) -> Vec<WorkflowNodeRow> {
             type_version: node.get("typeVersion").and_then(Value::as_f64),
             position: node.get("position").and_then(parse_position),
             disabled: node.get("disabled").and_then(Value::as_bool),
+            credentials: summarize_node_credentials(node),
         })
         .collect::<Vec<_>>();
     rows.sort_by(|left, right| left.name.cmp(&right.name));
+    rows
+}
+
+fn summarize_node_credentials(node: &Value) -> Vec<NodeCredentialRow> {
+    let mut rows = node
+        .get("credentials")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(credential_type, credential)| {
+            let credential = credential.as_object()?;
+            Some(NodeCredentialRow {
+                credential_type: credential_type.clone(),
+                credential_id: credential
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                credential_name: credential
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        (
+            left.credential_type.as_str(),
+            left.credential_id.as_deref().unwrap_or(""),
+            left.credential_name.as_deref().unwrap_or(""),
+        )
+            .cmp(&(
+                right.credential_type.as_str(),
+                right.credential_id.as_deref().unwrap_or(""),
+                right.credential_name.as_deref().unwrap_or(""),
+            ))
+    });
+    rows
+}
+
+fn summarize_credential_references(
+    workflows: &[Value],
+    credential_type_filter: Option<&str>,
+) -> Vec<CredentialReferenceRow> {
+    let mut entries = BTreeMap::<
+        (String, Option<String>, Option<String>),
+        BTreeMap<(Option<String>, Option<String>), BTreeSet<String>>,
+    >::new();
+
+    for workflow in workflows {
+        let workflow_id = workflow_id(workflow);
+        let workflow_name = workflow_name(workflow);
+        for node in workflow
+            .get("nodes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let node_name = node
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("<unnamed>")
+                .to_string();
+            for credential in summarize_node_credentials(node) {
+                if credential_type_filter.is_some_and(|filter| credential.credential_type != filter)
+                {
+                    continue;
+                }
+                entries
+                    .entry((
+                        credential.credential_type.clone(),
+                        credential.credential_id.clone(),
+                        credential.credential_name.clone(),
+                    ))
+                    .or_default()
+                    .entry((workflow_id.clone(), workflow_name.clone()))
+                    .or_default()
+                    .insert(node_name.clone());
+            }
+        }
+    }
+
+    let mut rows = entries
+        .into_iter()
+        .map(
+            |((credential_type, credential_id, credential_name), workflow_map)| {
+                let mut usage_count = 0usize;
+                let mut workflows = workflow_map
+                    .into_iter()
+                    .map(|((workflow_id, workflow_name), nodes)| {
+                        let mut nodes = nodes.into_iter().collect::<Vec<_>>();
+                        nodes.sort();
+                        usage_count += nodes.len();
+                        CredentialWorkflowUsageRow {
+                            workflow_id,
+                            workflow_name,
+                            nodes,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                workflows.sort_by(|left, right| {
+                    (
+                        left.workflow_name.as_deref().unwrap_or(""),
+                        left.workflow_id.as_deref().unwrap_or(""),
+                    )
+                        .cmp(&(
+                            right.workflow_name.as_deref().unwrap_or(""),
+                            right.workflow_id.as_deref().unwrap_or(""),
+                        ))
+                });
+
+                CredentialReferenceRow {
+                    credential_type,
+                    credential_id,
+                    credential_name,
+                    usage_count,
+                    workflow_count: workflows.len(),
+                    workflows,
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        (
+            left.credential_type.as_str(),
+            left.credential_name.as_deref().unwrap_or(""),
+            left.credential_id.as_deref().unwrap_or(""),
+        )
+            .cmp(&(
+                right.credential_type.as_str(),
+                right.credential_name.as_deref().unwrap_or(""),
+                right.credential_id.as_deref().unwrap_or(""),
+            ))
+    });
     rows
 }
 
@@ -3426,8 +3712,8 @@ fn print_workflow_nodes(rows: &[WorkflowNodeRow]) {
 
     println!("Nodes:");
     println!(
-        "{:<24} {:<28} {:<10} {:<14} {}",
-        "NAME", "TYPE", "VERSION", "POSITION", "DISABLED"
+        "{:<24} {:<28} {:<10} {:<14} {:<8} {}",
+        "NAME", "TYPE", "VERSION", "POSITION", "DISABLED", "CREDS"
     );
     for row in rows {
         let position = row
@@ -3445,13 +3731,71 @@ fn print_workflow_nodes(rows: &[WorkflowNodeRow]) {
             .type_version
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_string());
+        let credentials = if row.credentials.is_empty() {
+            "-".to_string()
+        } else {
+            row.credentials
+                .iter()
+                .map(format_node_credential)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         println!(
-            "{:<24} {:<28} {:<10} {:<14} {}",
+            "{:<24} {:<28} {:<10} {:<14} {:<8} {}",
             truncate(&row.name, 24),
             truncate(row.node_type.as_deref().unwrap_or("-"), 28),
             truncate(&version, 10),
             truncate(&position, 14),
-            row.disabled.unwrap_or(false)
+            row.disabled.unwrap_or(false),
+            credentials
+        );
+    }
+}
+
+fn format_node_credential(row: &NodeCredentialRow) -> String {
+    match (row.credential_id.as_deref(), row.credential_name.as_deref()) {
+        (Some(id), Some(name)) => format!("{}:{id} ({name})", row.credential_type),
+        (Some(id), None) => format!("{}:{id}", row.credential_type),
+        (None, Some(name)) => format!("{} ({name})", row.credential_type),
+        (None, None) => row.credential_type.clone(),
+    }
+}
+
+fn print_credential_references(rows: &[CredentialReferenceRow]) {
+    if rows.is_empty() {
+        return;
+    }
+
+    println!("Credentials:");
+    println!(
+        "{:<24} {:<18} {:<28} {:<8} {}",
+        "TYPE", "ID", "NAME", "USES", "WORKFLOWS"
+    );
+    for row in rows {
+        let workflows = row
+            .workflows
+            .iter()
+            .map(|usage| {
+                let name = usage
+                    .workflow_name
+                    .as_deref()
+                    .or(usage.workflow_id.as_deref())
+                    .unwrap_or("<unknown>");
+                if usage.nodes.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{name} [{}]", usage.nodes.join(", "))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        println!(
+            "{:<24} {:<18} {:<28} {:<8} {}",
+            truncate(&row.credential_type, 24),
+            truncate(row.credential_id.as_deref().unwrap_or("-"), 18),
+            truncate(row.credential_name.as_deref().unwrap_or("-"), 28),
+            row.usage_count,
+            workflows
         );
     }
 }

@@ -322,6 +322,16 @@ impl ApiClient {
         .map(|_| ())
     }
 
+    pub async fn get_credential_schema(&self, credential_type: &str) -> Result<Value, AppError> {
+        self.request_json(
+            Method::GET,
+            &format!("credentials/schema/{credential_type}"),
+            &[],
+            None,
+        )
+        .await
+    }
+
     pub async fn trigger(
         &self,
         target: &str,
@@ -1019,6 +1029,33 @@ mod tests {
             .expect("get execution");
 
         assert!(execution.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_credential_schema_fetches_schema_payload() {
+        let server = MockServer::start().await;
+        let client = test_client(&server);
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/credentials/schema/httpBasicAuth"))
+            .and(header("x-n8n-api-key", "test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "object",
+                "properties": {
+                    "user": {"type": "string"},
+                    "password": {"type": "string"}
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let schema = client
+            .get_credential_schema("httpBasicAuth")
+            .await
+            .expect("credential schema");
+
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["user"]["type"], "string");
     }
 
     fn test_client(server: &MockServer) -> ApiClient {
