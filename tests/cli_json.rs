@@ -627,9 +627,80 @@ async fn runs_get_json_details_returns_execution_payload() {
         envelope["data"]["execution"]["workflowData"]["name"],
         "Alpha Workflow"
     );
+    assert_eq!(envelope["data"]["run_data"]["Node A"], json!([]));
+    assert_eq!(envelope["data"]["node_executions"], json!([]));
     assert!(
         envelope["data"]["execution"]["data"]["resultData"]["runData"].is_object(),
         "expected detailed execution payload"
+    );
+}
+
+#[tokio::test]
+async fn runs_get_json_details_exposes_node_execution_summary() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions/43"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("includeData", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "43",
+            "workflowId": "wf-1",
+            "status": "success",
+            "data": {
+                "resultData": {
+                    "runData": {
+                        "Node A": [{
+                            "executionStatus": "success",
+                            "executionTime": 42,
+                            "data": {
+                                "main": [[{"json": {"ok": true}}, {"json": {"ok": true}}]]
+                            }
+                        }],
+                        "Node B": [{
+                            "status": "error",
+                            "executionTime": 7,
+                            "data": {
+                                "main": [[{"json": {"ok": false}}]]
+                            }
+                        }]
+                    }
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("runs")
+        .arg("get")
+        .arg("--instance")
+        .arg("mock")
+        .arg("43")
+        .arg("--details")
+        .output()
+        .expect("run runs get");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(
+        envelope["data"]["node_executions"],
+        json!([
+            {
+                "name": "Node A",
+                "status": "success",
+                "execution_time_ms": 42,
+                "output_items": 2
+            },
+            {
+                "name": "Node B",
+                "status": "error",
+                "execution_time_ms": 7,
+                "output_items": 1
+            }
+        ])
     );
 }
 

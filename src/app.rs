@@ -1354,9 +1354,19 @@ async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppErr
                 format!("Execution `{}` was not found.", args.execution_id),
             )
         })?;
+    let node_executions = args.details.then(|| execution_node_rows(&execution));
+    let run_data = args.details.then(|| execution_run_data_value(&execution));
 
     if context.json {
-        emit_json("runs", &json!({ "execution": execution }))
+        let mut data = serde_json::Map::new();
+        data.insert("execution".to_string(), execution);
+        if let Some(run_data) = run_data {
+            data.insert("run_data".to_string(), run_data);
+        }
+        if let Some(node_executions) = node_executions {
+            data.insert("node_executions".to_string(), json!(node_executions));
+        }
+        emit_json("runs", &Value::Object(data))
     } else {
         let workflow_id = value_string(&execution, "workflowId");
         let workflow_name = workflow_name_for_execution(&client, &execution).await?;
@@ -1390,7 +1400,7 @@ async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppErr
         }
 
         if args.details {
-            let nodes = execution_node_rows(&execution);
+            let nodes = node_executions.unwrap_or_default();
             if !nodes.is_empty() {
                 println!();
                 println!(
@@ -3245,12 +3255,7 @@ async fn workflow_name_for_execution(
 }
 
 fn execution_node_rows(execution: &Value) -> Vec<ExecutionNodeRow> {
-    let Some(run_data) = execution
-        .get("data")
-        .and_then(|data| data.get("resultData"))
-        .and_then(|result| result.get("runData"))
-        .and_then(Value::as_object)
-    else {
+    let Some(run_data) = execution_run_data_object(execution) else {
         return Vec::new();
     };
 
@@ -3273,6 +3278,23 @@ fn execution_node_rows(execution: &Value) -> Vec<ExecutionNodeRow> {
         });
     }
     rows
+}
+
+fn execution_run_data_object(execution: &Value) -> Option<&serde_json::Map<String, Value>> {
+    execution
+        .get("data")
+        .and_then(|data| data.get("resultData"))
+        .and_then(|result| result.get("runData"))
+        .and_then(Value::as_object)
+}
+
+fn execution_run_data_value(execution: &Value) -> Value {
+    execution
+        .get("data")
+        .and_then(|data| data.get("resultData"))
+        .and_then(|result| result.get("runData"))
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 fn count_output_items(main: &Value) -> usize {
