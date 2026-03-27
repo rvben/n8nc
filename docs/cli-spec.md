@@ -55,6 +55,8 @@ n8nc
 ├── conn add
 ├── conn rm
 ├── expr set
+├── credential ls
+├── credential schema
 ├── credential set
 ├── status
 ├── diff
@@ -362,6 +364,8 @@ Current commands:
 - `node rename <file> <current_name> <new_name>`
 - `node rm <file> <node>`
 - `expr set <file> <node> <path> <expression>`
+- `credential ls [--instance <alias>] [--workflow <id-or-name>] [--type <credential_type>]`
+- `credential schema [--instance <alias>] <credential_type>`
 - `credential set <file> <node> --type <credential_type> --id <credential_id> [--name <credential_name>]`
 - `conn add <file> --from <node> --to <node> [--kind <type>] [--target-kind <type>] [--output-index <n>] [--input-index <n>]`
 - `conn rm <file> --from <node> --to <node> [--kind <type>] [--target-kind <type>] [--output-index <n>] [--input-index <n>]`
@@ -372,11 +376,13 @@ Behavior:
 - edit commands rewrite the file in canonical JSON form after each successful mutation
 - tracked sidecars are left untouched, so tracked files become locally `modified` until they are pushed
 - edit commands also run the sensitive-data scanner after write and include `warning_count` in JSON output
-- `workflow show` summarizes local nodes, edges, and webhook URLs, using the explicit `--instance`, the tracked sidecar instance, or the repo default instance for local drafts
+- `workflow show` summarizes local nodes, edges, credential references, and webhook URLs, using the explicit `--instance`, the tracked sidecar instance, or the repo default instance for local drafts
 - `workflow create` requires a repo because it writes the new tracked file and sidecar into the configured workflow directory
 - `workflow create` refuses files that already have a sidecar and expects you to use `push` for tracked workflows
 - `workflow create` removes local `id` and `active` before the create request, ensures execution-saving `settings` defaults exist, normalizes webhook nodes for remote creation, and re-fetches the created workflow before storing the new tracked state
-- `credential set` requires an existing credential ID; the public API available to this CLI does not expose credential listing
+- `credential ls` discovers credential IDs and names from workflow references on the remote instance; it cannot discover completely unused credentials because the public API does not expose a first-class credential inventory
+- `credential schema` returns the official schema payload from `credentials/schema/{credentialTypeName}`
+- `credential set` requires an existing credential ID, which can come from `credential ls`, the n8n UI, or another trusted source
 - `workflow rm` accepts a workflow file path, workflow ID, or exact workflow name
 - `workflow rm <file>` removes a local draft directly; for tracked files it also deletes the remote workflow unless `--local-only` is set
 - `workflow rm <id-or-name>` deletes the remote workflow and removes matching tracked local artifacts unless `--keep-local` is set

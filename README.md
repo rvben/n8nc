@@ -43,6 +43,8 @@ Implemented commands:
 - `conn add`
 - `conn rm`
 - `expr set`
+- `credential ls`
+- `credential schema`
 - `credential set`
 - `status`
 - `diff`
@@ -204,7 +206,24 @@ Set a credential reference on a node:
 n8nc credential set workflows/order-alert--wf-draft.workflow.json "HTTP Request" --type httpBasicAuth --id cred-123 --name "Primary Basic Auth"
 ```
 
-`credential set` intentionally uses an existing credential ID. The public n8n API on this instance does not expose credential listing, so you still source credential IDs from the n8n UI or another trusted system.
+Discover credential IDs already referenced by workflows on the remote instance:
+
+```bash
+n8nc credential ls --instance prod
+```
+
+Inspect the official schema for a credential type:
+
+```bash
+n8nc credential schema --instance prod httpBasicAuth
+```
+
+`credential set` still intentionally uses an existing credential ID, but the CLI now helps in two ways:
+
+- `credential ls` discovers IDs and names referenced by workflows
+- `credential schema` shows the official schema for a credential type
+
+Unused credentials still can’t be discovered through the public API, so some IDs may still need to come from the n8n UI.
 
 Connect two nodes:
 
@@ -338,6 +357,7 @@ When `runs ls --workflow ...` returns no rows for an active workflow whose setti
 - Agent-safe: every command supports `--json`.
 - Deterministic: workflows are canonicalized before storage and hashing.
 - Local authoring first: `workflow new`, `workflow show`, `workflow rm`, `node ls`, `node add`, `node set`, `node rename`, `node rm`, `expr set`, `credential set`, `conn add`, and `conn rm` edit local workflow files directly.
+- Better credential discovery: `credential ls` finds IDs already referenced by workflows, `credential schema` exposes the official credential schema endpoint, and `workflow show` / `node ls` surface credential references in local files.
 - Draft-to-tracked flow: `workflow create` publishes a local draft through the official workflow-create API and converts it into a tracked file plus sidecar.
 - Server-truth tracking: `workflow create` and successful `push` both re-fetch the remote workflow before storing it locally, so lease hashes are based on the same shape that later reads use.
 - Full cleanup path: `workflow rm` removes the remote workflow and cleans tracked repo artifacts instead of forcing raw API calls.
