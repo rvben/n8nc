@@ -222,6 +222,7 @@ If your instance does not expose `GET /api/v1/credentials`, you can opt into the
 
 ```bash
 export N8NC_SESSION_COOKIE_PROD='n8n-auth=...'
+export N8NC_BROWSER_ID_PROD='...'
 n8nc credential ls --instance prod --source rest-session
 ```
 
@@ -235,7 +236,7 @@ n8nc credential schema --instance prod httpBasicAuth
 
 - `credential ls` uses `auto` mode by default:
   - public API inventory if available
-  - internal REST inventory only if you explicitly provide `N8NC_SESSION_COOKIE_<ALIAS>`
+  - internal REST inventory only if you explicitly provide both `N8NC_SESSION_COOKIE_<ALIAS>` and `N8NC_BROWSER_ID_<ALIAS>`
   - workflow-reference fallback otherwise
 - `credential schema` shows the official schema for a credential type
 

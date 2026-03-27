@@ -386,10 +386,10 @@ Behavior:
 - `credential ls` defaults to `--source auto`
 - `credential ls --source auto` resolves inventory in this order:
   - public API inventory via `GET /api/v1/credentials`
-  - internal REST inventory via `GET /rest/credentials` only if `N8NC_SESSION_COOKIE_<ALIAS>` is configured
+  - internal REST inventory via `GET /rest/credentials` only if both `N8NC_SESSION_COOKIE_<ALIAS>` and `N8NC_BROWSER_ID_<ALIAS>` are configured
   - workflow-reference discovery from fetched workflows
 - `credential ls --source public` requires the public credential inventory endpoint to work and fails explicitly if it does not
-- `credential ls --source rest-session` requires `N8NC_SESSION_COOKIE_<ALIAS>` and uses the internal browser-session route intentionally as an opt-in fallback, not a default dependency
+- `credential ls --source rest-session` requires both `N8NC_SESSION_COOKIE_<ALIAS>` and `N8NC_BROWSER_ID_<ALIAS>` and uses the internal browser-session route intentionally as an opt-in fallback, not a default dependency
 - `credential ls --source workflow-refs` only reports credentials referenced by workflows
 - `credential ls --workflow <id-or-name>` is workflow-reference scoped and therefore only works with `--source auto` or `--source workflow-refs`
 - full-inventory sources still enrich results with workflow usage counts by scanning current workflow references; unused credentials show `usage_count = 0`
