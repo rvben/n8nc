@@ -34,6 +34,9 @@ n8nc
 ├── doctor
 ├── auth add
 ├── auth test
+├── auth session add
+├── auth session test
+├── auth session remove
 ├── auth list
 ├── auth remove
 ├── ls
@@ -132,12 +135,21 @@ Credentials are resolved in this order:
 1. `N8NC_TOKEN_<ALIAS>`
 2. OS keychain entry stored by `auth add`
 
+Browser-session auth for the internal REST fallback is resolved in this order:
+
+1. `N8NC_SESSION_COOKIE_<ALIAS>` plus `N8NC_BROWSER_ID_<ALIAS>`
+2. OS keychain entries stored by `auth session add`
+
 Example:
 
 - `N8NC_TOKEN_PROD`
 - `N8NC_TOKEN_STAGING`
+- `N8NC_SESSION_COOKIE_PROD`
+- `N8NC_BROWSER_ID_PROD`
 
 `auth add` is non-interactive in v0.1. You must provide `--token` or `--stdin`.
+
+`auth session add` stores both the session cookie and browser ID for one alias. It accepts `--cookie` or `--cookie-stdin`, plus `--browser-id`.
 
 ### Doctor
 
@@ -383,13 +395,15 @@ Behavior:
 - `workflow create` requires a repo because it writes the new tracked file and sidecar into the configured workflow directory
 - `workflow create` refuses files that already have a sidecar and expects you to use `push` for tracked workflows
 - `workflow create` removes local `id` and `active` before the create request, ensures execution-saving `settings` defaults exist, normalizes webhook nodes for remote creation, and re-fetches the created workflow before storing the new tracked state
+- `auth list` reports token source plus browser-session readiness for each configured instance
+- `auth session test` verifies that the internal REST credential-inventory path is reachable with the configured session cookie and browser ID
 - `credential ls` defaults to `--source auto`
 - `credential ls --source auto` resolves inventory in this order:
   - public API inventory via `GET /api/v1/credentials`
-  - internal REST inventory via `GET /rest/credentials` only if both `N8NC_SESSION_COOKIE_<ALIAS>` and `N8NC_BROWSER_ID_<ALIAS>` are configured
+  - internal REST inventory via `GET /rest/credentials` only if browser-session auth is configured through `auth session add` or both `N8NC_SESSION_COOKIE_<ALIAS>` and `N8NC_BROWSER_ID_<ALIAS>`
   - workflow-reference discovery from fetched workflows
 - `credential ls --source public` requires the public credential inventory endpoint to work and fails explicitly if it does not
-- `credential ls --source rest-session` requires both `N8NC_SESSION_COOKIE_<ALIAS>` and `N8NC_BROWSER_ID_<ALIAS>` and uses the internal browser-session route intentionally as an opt-in fallback, not a default dependency
+- `credential ls --source rest-session` requires browser-session auth and uses the internal browser-session route intentionally as an opt-in fallback, not a default dependency
 - `credential ls --source workflow-refs` only reports credentials referenced by workflows
 - `credential ls --workflow <id-or-name>` is workflow-reference scoped and therefore only works with `--source auto` or `--source workflow-refs`
 - full-inventory sources still enrich results with workflow usage counts by scanning current workflow references; unused credentials show `usage_count = 0`

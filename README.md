@@ -22,6 +22,9 @@ Implemented commands:
 - `doctor`
 - `auth add`
 - `auth test`
+- `auth session add`
+- `auth session test`
+- `auth session remove`
 - `auth list`
 - `auth remove`
 - `ls`
@@ -73,6 +76,13 @@ Store an API token:
 
 ```bash
 n8nc auth add prod --token <api_key>
+```
+
+Optional: store browser-session auth for the internal REST credential fallback:
+
+```bash
+n8nc auth session add prod --cookie 'n8n-auth=...' --browser-id '<browser-id>'
+n8nc auth session test prod
 ```
 
 Check repo, auth, and API health:
@@ -221,9 +231,15 @@ n8nc credential ls --instance prod --source workflow-refs
 If your instance does not expose `GET /api/v1/credentials`, you can opt into the internal browser-session fallback:
 
 ```bash
+n8nc auth session add prod --cookie 'n8n-auth=...' --browser-id '<browser-id>'
+n8nc credential ls --instance prod --source rest-session
+```
+
+You can still use environment variables instead. They override keychain-stored session auth:
+
+```bash
 export N8NC_SESSION_COOKIE_PROD='n8n-auth=...'
 export N8NC_BROWSER_ID_PROD='...'
-n8nc credential ls --instance prod --source rest-session
 ```
 
 Inspect the official schema for a credential type:
@@ -236,7 +252,7 @@ n8nc credential schema --instance prod httpBasicAuth
 
 - `credential ls` uses `auto` mode by default:
   - public API inventory if available
-  - internal REST inventory only if you explicitly provide both `N8NC_SESSION_COOKIE_<ALIAS>` and `N8NC_BROWSER_ID_<ALIAS>`
+  - internal REST inventory only if browser-session auth is configured, either through `auth session add` or both `N8NC_SESSION_COOKIE_<ALIAS>` and `N8NC_BROWSER_ID_<ALIAS>`
   - workflow-reference fallback otherwise
 - `credential schema` shows the official schema for a credential type
 
@@ -374,7 +390,8 @@ When `runs ls --workflow ...` returns no rows for an active workflow whose setti
 - Agent-safe: every command supports `--json`.
 - Deterministic: workflows are canonicalized before storage and hashing.
 - Local authoring first: `workflow new`, `workflow show`, `workflow rm`, `node ls`, `node add`, `node set`, `node rename`, `node rm`, `expr set`, `credential set`, `conn add`, and `conn rm` edit local workflow files directly.
-- Better credential discovery: `credential ls` now probes inventory capabilities at runtime, prefers the public API when available, supports an explicit internal REST fallback via `N8NC_SESSION_COOKIE_<ALIAS>`, and still falls back safely to workflow references when full inventory is unavailable. `credential schema`, `workflow show`, and `node ls` surface the rest of the credential context.
+- Better credential discovery: `credential ls` now probes inventory capabilities at runtime, prefers the public API when available, supports an explicit internal REST fallback via `auth session add` or the matching `N8NC_SESSION_COOKIE_<ALIAS>` / `N8NC_BROWSER_ID_<ALIAS>` env vars, and still falls back safely to workflow references when full inventory is unavailable. `credential schema`, `workflow show`, and `node ls` surface the rest of the credential context.
+- Better session auth UX: `auth session add/test/remove` stores the browser session cookie and browser ID alongside token auth, and `auth list` now reports both token and session readiness.
 - Draft-to-tracked flow: `workflow create` publishes a local draft through the official workflow-create API and converts it into a tracked file plus sidecar.
 - Server-truth tracking: `workflow create` and successful `push` both re-fetch the remote workflow before storing it locally, so lease hashes are based on the same shape that later reads use.
 - Full cleanup path: `workflow rm` removes the remote workflow and cleans tracked repo artifacts instead of forcing raw API calls.
