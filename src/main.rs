@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod edit;
 mod error;
+mod execute;
 mod repo;
 mod validate;
 

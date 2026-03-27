@@ -22,6 +22,28 @@ pub struct InstanceConfig {
     pub base_url: String,
     #[serde(default = "default_api_version")]
     pub api_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execute: Option<ExecuteConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecuteConfig {
+    #[serde(default)]
+    pub backend: ExecuteBackend,
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub stdin_json: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecuteBackend {
+    #[default]
+    Command,
 }
 
 #[derive(Debug, Clone)]

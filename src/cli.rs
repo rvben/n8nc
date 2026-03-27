@@ -62,7 +62,7 @@ pub enum Command {
     Activate(IdArgs),
     /// Deactivate a workflow
     Deactivate(IdArgs),
-    /// Call a webhook or trigger URL
+    /// Call a webhook URL directly
     Trigger(TriggerArgs),
     /// Format workflow and sidecar files
     Fmt(FmtArgs),
@@ -280,6 +280,9 @@ pub enum WorkflowCommand {
     New(WorkflowNewArgs),
     /// Create a remote workflow from a local file and start tracking it
     Create(WorkflowCreateArgs),
+    /// Execute a workflow through a configured external backend
+    #[command(alias = "run")]
+    Execute(WorkflowExecuteArgs),
     /// Show a local workflow summary, graph, and webhook URLs
     Show(WorkflowShowArgs),
     /// Remove a workflow remotely and clean up local artifacts
@@ -309,6 +312,23 @@ pub struct WorkflowCreateArgs {
     /// Activate the workflow immediately after creation
     #[arg(long)]
     pub activate: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowExecuteArgs {
+    #[command(flatten)]
+    pub remote: RemoteArgs,
+    /// Workflow ID or exact workflow name
+    pub identifier: String,
+    /// Inline JSON or plain-text input passed through to the execution backend
+    #[arg(long, conflicts_with_all = ["input_file", "stdin"])]
+    pub input: Option<String>,
+    /// Read JSON or plain-text input from a file
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["input", "stdin"])]
+    pub input_file: Option<PathBuf>,
+    /// Read JSON or plain-text input from stdin
+    #[arg(long, conflicts_with_all = ["input", "input_file"])]
+    pub stdin: bool,
 }
 
 #[derive(Debug, Args)]

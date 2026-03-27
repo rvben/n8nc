@@ -1266,6 +1266,7 @@ mod tests {
         InstanceConfig {
             base_url: server.uri(),
             api_version: "v1".to_string(),
+            execute: None,
         }
     }
 }

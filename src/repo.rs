@@ -1209,6 +1209,7 @@ mod tests {
             InstanceConfig {
                 base_url: "https://example.n8n.cloud".to_string(),
                 api_version: "v1".to_string(),
+                execute: None,
             },
         );
 

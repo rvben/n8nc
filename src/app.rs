@@ -30,7 +30,8 @@ use crate::{
         NodeCommand, NodeListArgs, NodeRemoveArgs, NodeRenameArgs, NodeSetArgs, PullArgs, PushArgs,
         RunsArgs, RunsCommand, RunsGetArgs, RunsListArgs, RunsTimeArgs, RunsWatchArgs, StatusArgs,
         TriggerArgs, ValidateArgs, ValueModeArgs, WorkflowArgs, WorkflowCommand,
-        WorkflowCreateArgs, WorkflowNewArgs, WorkflowRemoveArgs, WorkflowShowArgs,
+        WorkflowCreateArgs, WorkflowExecuteArgs, WorkflowNewArgs, WorkflowRemoveArgs,
+        WorkflowShowArgs,
     },
     config::{
         InstanceConfig, LoadedRepo, RepoConfig, ensure_gitignore, ensure_repo_layout, load_repo,
@@ -42,6 +43,10 @@ use crate::{
         set_credential_reference, set_node_expression, set_node_value, workflow_id_string,
     },
     error::AppError,
+    execute::{
+        WorkflowExecuteInvocation, execute_backend_setup_hint, execute_workflow,
+        probe_execute_backend,
+    },
     repo::{
         LocalWorkflowState, RemoteSyncState, build_local_diff, build_refreshed_diff,
         cache_snapshot_path, collect_json_targets, find_existing_workflow_path, format_json_file,
@@ -344,6 +349,7 @@ async fn cmd_init(context: &Context, args: InitArgs) -> Result<(), AppError> {
         InstanceConfig {
             base_url: args.url.trim_end_matches('/').to_string(),
             api_version: "v1".to_string(),
+            execute: None,
         },
     );
     let config = RepoConfig {
@@ -865,6 +871,40 @@ async fn build_doctor_report(
                 None
             }
         };
+
+        match instance.execute.as_ref() {
+            Some(execute_config) => {
+                match probe_execute_backend(&repo.root, execute_config, "doctor") {
+                    Ok(detail) => add_doctor_check(
+                        &mut checks,
+                        DoctorCheckStatus::Ok,
+                        "instance",
+                        Some(alias.clone()),
+                        "workflow_execute",
+                        detail,
+                        None,
+                    ),
+                    Err(err) => add_doctor_check(
+                        &mut checks,
+                        DoctorCheckStatus::Fail,
+                        "instance",
+                        Some(alias.clone()),
+                        "workflow_execute",
+                        err.message,
+                        Some(format!("{}", execute_backend_setup_hint(&alias))),
+                    ),
+                }
+            }
+            None => add_doctor_check(
+                &mut checks,
+                DoctorCheckStatus::Skip,
+                "instance",
+                Some(alias.clone()),
+                "workflow_execute",
+                "No workflow execute backend configured. Non-webhook execution is unavailable, but `trigger` still works for webhook URLs.",
+                None,
+            ),
+        }
 
         if args.skip_network {
             add_doctor_check(
@@ -1539,6 +1579,7 @@ async fn cmd_workflow(context: &Context, args: WorkflowArgs) -> Result<(), AppEr
     match args.command {
         WorkflowCommand::New(args) => cmd_workflow_new(context, args).await,
         WorkflowCommand::Create(args) => cmd_workflow_create(context, args).await,
+        WorkflowCommand::Execute(args) => cmd_workflow_execute(context, args).await,
         WorkflowCommand::Show(args) => cmd_workflow_show(context, args).await,
         WorkflowCommand::Rm(args) => cmd_workflow_remove(context, args).await,
     }
@@ -1652,6 +1693,102 @@ async fn cmd_workflow_create(context: &Context, args: WorkflowCreateArgs) -> Res
         }
         print_workflow_webhooks(&webhooks);
         print_sensitive_warning_summary(&stored.workflow_path, warning_count);
+        Ok(())
+    }
+}
+
+async fn cmd_workflow_execute(
+    context: &Context,
+    args: WorkflowExecuteArgs,
+) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let alias = resolve_instance_alias(&repo, args.remote.instance.as_deref(), "workflow")?;
+    let execute_config = repo
+        .config
+        .instances
+        .get(&alias)
+        .and_then(|instance| instance.execute.as_ref())
+        .ok_or_else(|| {
+            AppError::config(
+                "workflow",
+                format!("No workflow execute backend is configured for `{alias}`."),
+            )
+            .with_suggestion(format!(
+                "{} Use `n8nc trigger <webhook-url>` for webhook-triggered workflows.",
+                execute_backend_setup_hint(&alias)
+            ))
+        })?;
+    probe_execute_backend(&repo.root, execute_config, "workflow").map_err(|err| {
+        AppError::config(
+            "workflow",
+            format!(
+                "Workflow execute backend for `{alias}` is not runnable: {}",
+                err.message
+            ),
+        )
+        .with_suggestion(format!(
+            "{} Use `n8nc doctor` to verify the local backend wiring.",
+            execute_backend_setup_hint(&alias)
+        ))
+    })?;
+
+    let (client, _, base_url) = remote_client(&repo, Some(&alias), "workflow")?;
+    let workflow = client.resolve_workflow(&args.identifier).await?;
+    let workflow_id = workflow_id(&workflow).ok_or_else(|| {
+        AppError::api(
+            "workflow",
+            "api.invalid_response",
+            "Resolved workflow response was missing `id`.",
+        )
+    })?;
+    let workflow_name = workflow_name(&workflow).ok_or_else(|| {
+        AppError::api(
+            "workflow",
+            "api.invalid_response",
+            "Resolved workflow response was missing `name`.",
+        )
+    })?;
+    let input = parse_workflow_execute_input(read_request_body(
+        "workflow",
+        args.input,
+        args.input_file,
+        args.stdin,
+    )?)?;
+    let result = execute_workflow(
+        &repo.root,
+        execute_config,
+        &WorkflowExecuteInvocation {
+            instance_alias: alias.clone(),
+            base_url: base_url.clone(),
+            workflow_id: workflow_id.clone(),
+            workflow_name: workflow_name.clone(),
+            workflow_active: workflow_active(&workflow),
+            input,
+        },
+        "workflow",
+    )?;
+
+    if context.json {
+        emit_json(
+            "workflow",
+            &json!({
+                "action": "execute",
+                "instance": alias,
+                "workflow_id": workflow_id,
+                "workflow_name": workflow_name,
+                "active": workflow_active(&workflow),
+                "execution": result,
+            }),
+        )
+    } else {
+        println!("Executed workflow {workflow_name} ({workflow_id})");
+        println!("Backend: {}", result.program);
+        if let Some(output) = &result.output {
+            print_response_body(output)?;
+        }
+        if let Some(stderr) = &result.stderr {
+            eprintln!("{stderr}");
+        }
         Ok(())
     }
 }
@@ -2831,7 +2968,7 @@ async fn cmd_trigger(context: &Context, args: TriggerArgs) -> Result<(), AppErro
     let (client, _, base_url) = remote_client(&repo, args.remote.instance.as_deref(), "trigger")?;
     let headers = parse_pairs("trigger", "header", &args.headers, ':')?;
     let query = parse_pairs("trigger", "query", &args.query, '=')?;
-    let body = read_request_body(args.data, args.data_file, args.stdin)?;
+    let body = read_request_body("trigger", args.data, args.data_file, args.stdin)?;
     let response = client
         .trigger(&args.target, &args.method, &headers, &query, body)
         .await
@@ -3657,6 +3794,7 @@ fn normalize_remote_create_node(node: &mut Value) -> Result<(), AppError> {
 }
 
 fn read_request_body(
+    command: &'static str,
     data: Option<String>,
     data_file: Option<PathBuf>,
     stdin: bool,
@@ -3666,20 +3804,36 @@ fn read_request_body(
     }
     if let Some(path) = data_file {
         return fs::read(&path).map(Some).map_err(|err| {
-            AppError::usage(
-                "trigger",
-                format!("Failed to read {}: {err}", path.display()),
-            )
+            AppError::usage(command, format!("Failed to read {}: {err}", path.display()))
         });
     }
     if stdin {
         let mut buffer = Vec::new();
         std::io::stdin()
             .read_to_end(&mut buffer)
-            .map_err(|err| AppError::usage("trigger", format!("Failed to read stdin: {err}")))?;
+            .map_err(|err| AppError::usage(command, format!("Failed to read stdin: {err}")))?;
         return Ok(Some(buffer));
     }
     Ok(None)
+}
+
+fn parse_workflow_execute_input(body: Option<Vec<u8>>) -> Result<Option<Value>, AppError> {
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let rendered = String::from_utf8(body).map_err(|err| {
+        AppError::usage(
+            "workflow",
+            format!("Workflow execute input must be valid UTF-8 text or JSON: {err}"),
+        )
+    })?;
+    let trimmed = rendered.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .or_else(|| Some(Value::String(trimmed.to_string()))))
 }
 
 fn emit_json<T: Serialize>(command: &'static str, data: &T) -> Result<(), AppError> {

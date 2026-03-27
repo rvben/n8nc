@@ -8,6 +8,9 @@ use std::{
     },
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use assert_cmd::Command;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::{Value, json};
@@ -447,6 +450,37 @@ async fn doctor_json_reports_success() {
         checks
             .iter()
             .any(|check| check["name"] == "api" && check["status"] == "ok")
+    );
+}
+
+#[tokio::test]
+async fn doctor_json_fails_for_missing_execute_backend_program() {
+    let repo = tempdir().expect("tempdir");
+    write_repo_with_execute_command(
+        repo.path(),
+        "https://example.test",
+        "mock",
+        Path::new("scripts/missing-execute-backend.sh"),
+        &[],
+        false,
+    );
+
+    let output = base_command(repo.path())
+        .arg("doctor")
+        .arg("--skip-network")
+        .output()
+        .expect("run doctor with missing execute backend");
+
+    assert_eq!(output.status.code(), Some(13));
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["command"], "doctor");
+    assert!(
+        envelope["data"]["checks"]
+            .as_array()
+            .expect("doctor checks")
+            .iter()
+            .any(|check| { check["name"] == "workflow_execute" && check["status"] == "fail" })
     );
 }
 
@@ -1012,7 +1046,7 @@ async fn doctor_json_reports_failure_with_attached_data() {
     assert_eq!(envelope["error"]["code"], "doctor.failed");
     assert_eq!(envelope["data"]["selected_instance"], alias);
     assert_eq!(envelope["data"]["summary"]["fail"], 1);
-    assert_eq!(envelope["data"]["summary"]["skip"], 1);
+    assert_eq!(envelope["data"]["summary"]["skip"], 2);
 
     let checks = envelope["data"]["checks"].as_array().expect("check list");
     let token_check = checks
@@ -1390,6 +1424,110 @@ async fn workflow_create_json_emits_webhook_urls_and_normalizes_payload() {
     assert_eq!(
         envelope["data"]["webhooks"][0]["test_url"],
         format!("{}/webhook-test/orders/new", server.uri())
+    );
+}
+
+#[tokio::test]
+async fn workflow_execute_json_runs_configured_command_backend() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    let capture_path = repo.path().join("execute-input.json");
+    let script_path = write_execute_backend_script(repo.path());
+    write_repo_with_execute_command(
+        repo.path(),
+        &server.uri(),
+        "mock",
+        &script_path,
+        &["execute_workflow", "{workflow_id}", "{instance_alias}"],
+        true,
+    );
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-1",
+                "name": "Nightly Import",
+                "active": false,
+                "nodes": [],
+                "connections": {},
+                "settings": {}
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .env("N8NC_TEST_CAPTURE", &capture_path)
+        .arg("workflow")
+        .arg("execute")
+        .arg("--instance")
+        .arg("mock")
+        .arg("--input")
+        .arg("{\"hello\":\"world\"}")
+        .arg("wf-1")
+        .output()
+        .expect("run workflow execute");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "workflow");
+    assert_eq!(envelope["data"]["action"], "execute");
+    assert_eq!(envelope["data"]["workflow_id"], "wf-1");
+    assert_eq!(envelope["data"]["workflow_name"], "Nightly Import");
+    assert_eq!(envelope["data"]["execution"]["backend"], "command");
+    assert_eq!(
+        envelope["data"]["execution"]["output"]["workflow_id"],
+        "wf-1"
+    );
+    assert_eq!(
+        envelope["data"]["execution"]["output"]["workflow_name"],
+        "Nightly Import"
+    );
+    assert_eq!(
+        envelope["data"]["execution"]["output"]["instance_alias"],
+        "mock"
+    );
+    assert_eq!(
+        envelope["data"]["execution"]["output"]["argv"],
+        json!(["execute_workflow", "wf-1", "mock"])
+    );
+
+    let captured = read_json_file(&capture_path);
+    assert_eq!(captured["tool"], "execute_workflow");
+    assert_eq!(captured["workflow"]["id"], "wf-1");
+    assert_eq!(captured["workflow"]["name"], "Nightly Import");
+    assert_eq!(captured["instance_alias"], "mock");
+    assert_eq!(captured["input"], json!({"hello":"world"}));
+}
+
+#[tokio::test]
+async fn workflow_execute_json_requires_configured_backend() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    let output = base_command(repo.path())
+        .arg("workflow")
+        .arg("execute")
+        .arg("--instance")
+        .arg("mock")
+        .arg("wf-1")
+        .output()
+        .expect("run workflow execute without backend");
+
+    assert_eq!(output.status.code(), Some(3));
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["command"], "workflow");
+    assert_eq!(envelope["error"]["code"], "config.invalid");
+    assert!(
+        envelope["error"]["suggestion"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[instances.mock.execute]")
     );
 }
 
@@ -2814,6 +2952,41 @@ fn write_repo(root: &Path, base_url: &str) {
     write_repo_with_alias(root, base_url, "mock");
 }
 
+fn write_repo_with_execute_command(
+    root: &Path,
+    base_url: &str,
+    alias: &str,
+    program: &Path,
+    args: &[&str],
+    stdin_json: bool,
+) {
+    fs::create_dir_all(root.join("workflows")).expect("workflow dir");
+    fs::create_dir_all(root.join(".n8n").join("cache")).expect("cache dir");
+    let args = args
+        .iter()
+        .map(|value| format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let config = format!(
+        r#"schema_version = 1
+default_instance = "{alias}"
+workflow_dir = "workflows"
+
+[instances.{alias}]
+base_url = "{base_url}"
+api_version = "v1"
+
+[instances.{alias}.execute]
+backend = "command"
+program = "{program}"
+stdin_json = {stdin_json}
+args = [{args}]
+"#,
+        program = program.display(),
+    );
+    fs::write(root.join("n8n.toml"), config).expect("write n8n.toml");
+}
+
 fn rest_session_cookie(browser_id: &str) -> String {
     let payload = json!({ "browserId": browser_id }).to_string();
     format!(
@@ -2836,6 +3009,35 @@ api_version = "v1"
 "#
     );
     fs::write(root.join("n8n.toml"), config).expect("write n8n.toml");
+}
+
+fn write_execute_backend_script(root: &Path) -> PathBuf {
+    let script_path = root.join("mock-execute-backend.sh");
+    let script = r#"#!/bin/sh
+set -eu
+if [ -n "${N8NC_TEST_CAPTURE:-}" ]; then
+  cat > "$N8NC_TEST_CAPTURE"
+else
+  cat > /dev/null
+fi
+printf '{"workflow_id":"%s","workflow_name":"%s","instance_alias":"%s","argv":["%s","%s","%s"]}\n' \
+  "${N8NC_EXECUTE_WORKFLOW_ID:-}" \
+  "${N8NC_EXECUTE_WORKFLOW_NAME:-}" \
+  "${N8NC_EXECUTE_INSTANCE_ALIAS:-}" \
+  "${1:-}" \
+  "${2:-}" \
+  "${3:-}"
+"#;
+    fs::write(&script_path, script).expect("write execute backend script");
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&script_path)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).expect("chmod execute backend script");
+    }
+    script_path
 }
 
 fn workflow_fixture(id: &str, name: &str, active: bool) -> Value {
