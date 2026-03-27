@@ -537,6 +537,12 @@ If `runs ls --workflow ...` returns zero rows for an active workflow whose setti
 - node execution time
 - output item counts per node based on `data.resultData.runData`
 
+In JSON output, `runs get --details` returns:
+
+- `execution`: the raw detailed execution payload from n8n
+- `run_data`: the extracted `data.resultData.runData` object when present
+- `node_executions`: a stable per-node summary array with status, execution time, and output item counts
+
 `runs watch` polls the execution list repeatedly and is intended for active debugging sessions.
 
 Current supported options:

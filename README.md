@@ -122,6 +122,8 @@ Inspect one execution with node-level details:
 n8nc runs get <execution-id> --instance prod --details
 ```
 
+In `--json` mode, `runs get --details` now returns the raw execution payload plus stable `run_data` and `node_executions` fields so agents do not need to parse `data.resultData.runData` manually.
+
 Watch recent executions as they appear:
 
 ```bash
