@@ -15,17 +15,17 @@ use crate::{
     api::{ApiClient, ExecutionListOptions, ListOptions},
     auth::{
         ensure_alias_exists, list_auth_statuses, read_token_from_stdin, remove_token,
-        resolve_token, store_token,
+        resolve_session_cookie, resolve_token, session_cookie_env_var_name, store_token,
     },
     canonical::{canonicalize_workflow, hash_value, pretty_json},
     cli::{
         AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, Cli, Command, ConnAddArgs, ConnArgs,
         ConnCommand, ConnRemoveArgs, CredentialArgs, CredentialCommand, CredentialListArgs,
-        CredentialSchemaArgs, CredentialSetArgs, DiffArgs, DoctorArgs, ExprArgs, ExprCommand,
-        ExprSetArgs, FmtArgs, GetArgs, IdArgs, InitArgs, ListArgs, NodeAddArgs, NodeArgs,
-        NodeCommand, NodeListArgs, NodeRemoveArgs, NodeRenameArgs, NodeSetArgs, PullArgs, PushArgs,
-        RunsArgs, RunsCommand, RunsGetArgs, RunsListArgs, RunsTimeArgs, RunsWatchArgs, StatusArgs,
-        TriggerArgs, ValidateArgs, ValueModeArgs, WorkflowArgs, WorkflowCommand,
+        CredentialSchemaArgs, CredentialSetArgs, CredentialSource, DiffArgs, DoctorArgs, ExprArgs,
+        ExprCommand, ExprSetArgs, FmtArgs, GetArgs, IdArgs, InitArgs, ListArgs, NodeAddArgs,
+        NodeArgs, NodeCommand, NodeListArgs, NodeRemoveArgs, NodeRenameArgs, NodeSetArgs, PullArgs,
+        PushArgs, RunsArgs, RunsCommand, RunsGetArgs, RunsListArgs, RunsTimeArgs, RunsWatchArgs,
+        StatusArgs, TriggerArgs, ValidateArgs, ValueModeArgs, WorkflowArgs, WorkflowCommand,
         WorkflowCreateArgs, WorkflowNewArgs, WorkflowRemoveArgs, WorkflowShowArgs,
     },
     config::{
@@ -141,6 +141,25 @@ struct CredentialReferenceRow {
     usage_count: usize,
     workflow_count: usize,
     workflows: Vec<CredentialWorkflowUsageRow>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CredentialInventorySource {
+    PublicApi,
+    RestSession,
+    WorkflowReferences,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CredentialListResult {
+    requested_source: &'static str,
+    resolved_source: CredentialInventorySource,
+    coverage: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback_reason: Option<String>,
+    note: String,
+    credentials: Vec<CredentialReferenceRow>,
 }
 
 const WORKFLOW_UPDATE_MUTABLE_FIELDS: &[&str] = &["name", "nodes", "connections", "settings"];
@@ -749,7 +768,7 @@ async fn build_doctor_report(
             }
         };
 
-        match client
+        let api_reachable = match client
             .list_workflows(&ListOptions {
                 limit: 1,
                 active: None,
@@ -757,13 +776,44 @@ async fn build_doctor_report(
             })
             .await
         {
-            Ok(workflows) => add_doctor_check(
+            Ok(workflows) => {
+                add_doctor_check(
+                    &mut checks,
+                    DoctorCheckStatus::Ok,
+                    "instance",
+                    Some(alias.clone()),
+                    "api",
+                    format!("API reachable (sample_count={}).", workflows.len()),
+                    None,
+                );
+                true
+            }
+            Err(err) => {
+                add_doctor_check(
+                    &mut checks,
+                    DoctorCheckStatus::Fail,
+                    "instance",
+                    Some(alias.clone()),
+                    "api",
+                    err.message,
+                    err.suggestion,
+                );
+                false
+            }
+        };
+
+        if !api_reachable {
+            continue;
+        }
+
+        match probe_credential_inventory_capability(&alias, &client).await {
+            Ok(detail) => add_doctor_check(
                 &mut checks,
                 DoctorCheckStatus::Ok,
                 "instance",
                 Some(alias.clone()),
-                "api",
-                format!("API reachable (sample_count={}).", workflows.len()),
+                "credential_inventory",
+                detail,
                 None,
             ),
             Err(err) => add_doctor_check(
@@ -771,7 +821,7 @@ async fn build_doctor_report(
                 DoctorCheckStatus::Fail,
                 "instance",
                 Some(alias.clone()),
-                "api",
+                "credential_inventory",
                 err.message,
                 err.suggestion,
             ),
@@ -1788,30 +1838,7 @@ async fn cmd_credential_list(context: &Context, args: CredentialListArgs) -> Res
     let repo = load_loaded_repo(context)?;
     let alias = resolve_instance_alias(&repo, args.remote.instance.as_deref(), "credential")?;
     let (client, _, _) = remote_client(&repo, Some(&alias), "credential")?;
-
-    let workflows = if let Some(identifier) = args.workflow.as_deref() {
-        vec![client.resolve_workflow(identifier).await?]
-    } else {
-        let listed = client
-            .list_workflows(&ListOptions {
-                limit: 250,
-                active: None,
-                name_filter: None,
-            })
-            .await?;
-        let mut workflows = Vec::new();
-        for item in listed {
-            let Some(workflow_id) = item.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            if let Some(workflow) = client.get_workflow_by_id(workflow_id).await? {
-                workflows.push(workflow.get("data").cloned().unwrap_or(workflow));
-            }
-        }
-        workflows
-    };
-
-    let credentials = summarize_credential_references(&workflows, args.credential_type.as_deref());
+    let result = build_credential_list_result(&alias, &client, &args).await?;
 
     if context.json {
         emit_json(
@@ -1820,26 +1847,36 @@ async fn cmd_credential_list(context: &Context, args: CredentialListArgs) -> Res
                 "instance": alias,
                 "workflow_filter": args.workflow,
                 "credential_type_filter": args.credential_type,
-                "count": credentials.len(),
-                "coverage": "workflow_references_only",
-                "note": "Results come from credential references found in workflows. Unused credentials cannot be discovered through the public API.",
-                "credentials": credentials,
+                "requested_source": result.requested_source,
+                "resolved_source": result.resolved_source,
+                "count": result.credentials.len(),
+                "coverage": result.coverage,
+                "fallback_reason": result.fallback_reason,
+                "note": result.note,
+                "credentials": result.credentials,
             }),
         )
     } else {
-        println!("Credential references ({alias}):");
-        if credentials.is_empty() {
+        println!("Credentials ({alias}):");
+        println!("  requested source: {}", result.requested_source);
+        println!(
+            "  resolved source: {}",
+            credential_inventory_source_label(result.resolved_source)
+        );
+        println!("  coverage: {}", result.coverage);
+        if let Some(reason) = &result.fallback_reason {
+            println!("  fallback: {reason}");
+        }
+        if result.credentials.is_empty() {
             println!("  none found");
-            println!(
-                "  Results only include credentials referenced by workflows; unused credentials are not discoverable through the public API."
-            );
+            println!("  {}", result.note);
             return Ok(());
         }
         println!(
             "{:<24} {:<18} {:<28} {:<8} {}",
             "TYPE", "ID", "NAME", "USES", "WORKFLOWS"
         );
-        for row in &credentials {
+        for row in &result.credentials {
             let workflows = row
                 .workflows
                 .iter()
@@ -1866,10 +1903,386 @@ async fn cmd_credential_list(context: &Context, args: CredentialListArgs) -> Res
                 workflows
             );
         }
-        println!(
-            "Results only include credentials referenced by workflows; unused credentials are not discoverable through the public API."
-        );
+        println!("{}", result.note);
         Ok(())
+    }
+}
+
+async fn build_credential_list_result(
+    alias: &str,
+    client: &ApiClient,
+    args: &CredentialListArgs,
+) -> Result<CredentialListResult, AppError> {
+    if args.workflow.is_some()
+        && matches!(
+            args.source,
+            CredentialSource::Public | CredentialSource::RestSession
+        )
+    {
+        return Err(AppError::usage(
+            "credential",
+            "The `--workflow` filter only works with `--source workflow-refs` or `--source auto`.",
+        )
+        .with_suggestion(
+            "Use `n8nc credential ls --workflow <id-or-name> --source workflow-refs` for workflow-scoped usage, or remove `--workflow` to inspect instance-wide inventory.".to_string(),
+        ));
+    }
+
+    if args.workflow.is_some() || args.source == CredentialSource::WorkflowRefs {
+        return build_workflow_reference_credential_list(args, None, client).await;
+    }
+
+    let session_cookie = resolve_session_cookie(alias);
+
+    match args.source {
+        CredentialSource::Auto => match client.list_credentials_public().await {
+            Ok(inventory) => {
+                build_full_inventory_credential_list(
+                    args,
+                    client,
+                    CredentialInventorySource::PublicApi,
+                    inventory,
+                    None,
+                )
+                .await
+            }
+            Err(public_err) if credential_inventory_fallback_allowed(&public_err) => {
+                if let Some(cookie) = session_cookie.as_deref() {
+                    match client.list_credentials_rest_session(cookie).await {
+                            Ok(inventory) => {
+                                build_full_inventory_credential_list(
+                                    args,
+                                    client,
+                                    CredentialInventorySource::RestSession,
+                                    inventory,
+                                    Some(format!(
+                                        "Public credential inventory was unavailable: {}",
+                                        public_err.message
+                                    )),
+                                )
+                                .await
+                            }
+                            Err(rest_err) if credential_inventory_fallback_allowed(&rest_err) => {
+                                build_workflow_reference_credential_list(
+                                    args,
+                                    Some(format!(
+                                        "Public credential inventory was unavailable ({public_message}). Internal REST fallback was also unavailable ({rest_message}).",
+                                        public_message = public_err.message,
+                                        rest_message = rest_err.message,
+                                    )),
+                                    client,
+                                )
+                                .await
+                            }
+                            Err(rest_err) => Err(rest_err),
+                        }
+                } else {
+                    build_workflow_reference_credential_list(
+                            args,
+                            Some(format!(
+                                "Public credential inventory was unavailable: {}. No {} environment variable is configured for the internal REST fallback.",
+                                public_err.message,
+                                session_cookie_env_var_name(alias)
+                            )),
+                            client,
+                        )
+                        .await
+                }
+            }
+            Err(public_err) => Err(public_err),
+        },
+        CredentialSource::Public => {
+            let inventory = client
+                .list_credentials_public()
+                .await
+                .map_err(|err| forced_credential_source_error(alias, args.source, err))?;
+            build_full_inventory_credential_list(
+                args,
+                client,
+                CredentialInventorySource::PublicApi,
+                inventory,
+                None,
+            )
+            .await
+        }
+        CredentialSource::RestSession => {
+            let cookie = session_cookie.ok_or_else(|| {
+                AppError::auth(
+                    "credential",
+                    format!(
+                        "No session cookie is configured for `{alias}`.",
+                    ),
+                )
+                .with_suggestion(format!(
+                    "Set {} to a valid n8n browser session cookie, or use `--source auto` / `--source workflow-refs`.",
+                    session_cookie_env_var_name(alias)
+                ))
+            })?;
+            let inventory = client
+                .list_credentials_rest_session(&cookie)
+                .await
+                .map_err(|err| forced_credential_source_error(alias, args.source, err))?;
+            build_full_inventory_credential_list(
+                args,
+                client,
+                CredentialInventorySource::RestSession,
+                inventory,
+                None,
+            )
+            .await
+        }
+        CredentialSource::WorkflowRefs => unreachable!(),
+    }
+}
+
+async fn build_full_inventory_credential_list(
+    args: &CredentialListArgs,
+    client: &ApiClient,
+    source: CredentialInventorySource,
+    inventory: Vec<Value>,
+    fallback_reason: Option<String>,
+) -> Result<CredentialListResult, AppError> {
+    let workflows = load_workflows_for_credential_usage(client, None).await?;
+    let usage = summarize_credential_references(&workflows, args.credential_type.as_deref());
+    let credentials = merge_credential_inventory(inventory, usage, args.credential_type.as_deref());
+
+    Ok(CredentialListResult {
+        requested_source: credential_source_request_label(args.source),
+        resolved_source: source,
+        coverage: "full_instance",
+        fallback_reason,
+        note: full_inventory_note(source),
+        credentials,
+    })
+}
+
+async fn build_workflow_reference_credential_list(
+    args: &CredentialListArgs,
+    fallback_reason: Option<String>,
+    client: &ApiClient,
+) -> Result<CredentialListResult, AppError> {
+    let workflows = load_workflows_for_credential_usage(client, args.workflow.as_deref()).await?;
+    let credentials = summarize_credential_references(&workflows, args.credential_type.as_deref());
+
+    Ok(CredentialListResult {
+        requested_source: credential_source_request_label(args.source),
+        resolved_source: CredentialInventorySource::WorkflowReferences,
+        coverage: "workflow_references_only",
+        fallback_reason,
+        note: workflow_reference_inventory_note().to_string(),
+        credentials,
+    })
+}
+
+async fn load_workflows_for_credential_usage(
+    client: &ApiClient,
+    workflow_filter: Option<&str>,
+) -> Result<Vec<Value>, AppError> {
+    if let Some(identifier) = workflow_filter {
+        return Ok(vec![client.resolve_workflow(identifier).await?]);
+    }
+
+    let listed = client
+        .list_workflows(&ListOptions {
+            limit: 250,
+            active: None,
+            name_filter: None,
+        })
+        .await?;
+    let mut workflows = Vec::new();
+    for item in listed {
+        let Some(workflow_id) = item.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(workflow) = client.get_workflow_by_id(workflow_id).await? {
+            workflows.push(workflow.get("data").cloned().unwrap_or(workflow));
+        }
+    }
+    Ok(workflows)
+}
+
+fn merge_credential_inventory(
+    inventory: Vec<Value>,
+    usage: Vec<CredentialReferenceRow>,
+    credential_type_filter: Option<&str>,
+) -> Vec<CredentialReferenceRow> {
+    let mut usage_by_id = BTreeMap::new();
+    let mut orphaned_usage = Vec::new();
+    for row in usage {
+        if let Some(credential_id) = row.credential_id.clone() {
+            usage_by_id.insert((row.credential_type.clone(), credential_id), row);
+        } else {
+            orphaned_usage.push(row);
+        }
+    }
+
+    let mut rows = Vec::new();
+    for item in inventory {
+        let Some(credential_type) = item
+            .get("type")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+        else {
+            continue;
+        };
+        if let Some(filter) = credential_type_filter {
+            if credential_type != filter {
+                continue;
+            }
+        }
+
+        let credential_id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let credential_name = item
+            .get("name")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+
+        let mut row = credential_id
+            .as_ref()
+            .and_then(|id| usage_by_id.remove(&(credential_type.clone(), id.clone())))
+            .unwrap_or(CredentialReferenceRow {
+                credential_type: credential_type.clone(),
+                credential_id: credential_id.clone(),
+                credential_name: credential_name.clone(),
+                usage_count: 0,
+                workflow_count: 0,
+                workflows: Vec::new(),
+            });
+
+        if row.credential_id.is_none() {
+            row.credential_id = credential_id;
+        }
+        if row.credential_name.is_none() {
+            row.credential_name = credential_name;
+        }
+        rows.push(row);
+    }
+
+    rows.extend(usage_by_id.into_values());
+    rows.extend(orphaned_usage);
+    sort_credential_rows(&mut rows);
+    rows
+}
+
+fn sort_credential_rows(rows: &mut [CredentialReferenceRow]) {
+    rows.sort_by(|left, right| {
+        (
+            left.credential_type.as_str(),
+            left.credential_id.as_deref().unwrap_or(""),
+            left.credential_name.as_deref().unwrap_or(""),
+        )
+            .cmp(&(
+                right.credential_type.as_str(),
+                right.credential_id.as_deref().unwrap_or(""),
+                right.credential_name.as_deref().unwrap_or(""),
+            ))
+    });
+}
+
+fn credential_source_request_label(source: CredentialSource) -> &'static str {
+    match source {
+        CredentialSource::Auto => "auto",
+        CredentialSource::Public => "public",
+        CredentialSource::RestSession => "rest_session",
+        CredentialSource::WorkflowRefs => "workflow_refs",
+    }
+}
+
+fn credential_inventory_source_label(source: CredentialInventorySource) -> &'static str {
+    match source {
+        CredentialInventorySource::PublicApi => "public_api",
+        CredentialInventorySource::RestSession => "rest_session",
+        CredentialInventorySource::WorkflowReferences => "workflow_references",
+    }
+}
+
+fn workflow_reference_inventory_note() -> &'static str {
+    "Results come from credential references found in workflows. Unused credentials cannot be discovered in this mode."
+}
+
+fn full_inventory_note(source: CredentialInventorySource) -> String {
+    match source {
+        CredentialInventorySource::PublicApi => "Results include the full credential inventory from the public API. Workflow usage is derived from current workflow references; unused credentials show zero uses.".to_string(),
+        CredentialInventorySource::RestSession => "Results include the full credential inventory from n8n's internal REST API using a browser session cookie. This internal fallback is opt-in and may change across n8n upgrades.".to_string(),
+        CredentialInventorySource::WorkflowReferences => workflow_reference_inventory_note().to_string(),
+    }
+}
+
+fn credential_inventory_fallback_allowed(err: &AppError) -> bool {
+    matches!(
+        err.code.as_str(),
+        "api.http_401" | "api.http_403" | "api.http_404" | "api.http_405"
+    )
+}
+
+fn forced_credential_source_error(
+    alias: &str,
+    source: CredentialSource,
+    err: AppError,
+) -> AppError {
+    let source_label = match source {
+        CredentialSource::Public => "public credential inventory",
+        CredentialSource::RestSession => "internal REST credential inventory",
+        CredentialSource::Auto | CredentialSource::WorkflowRefs => "credential inventory",
+    };
+    let suggestion = match source {
+        CredentialSource::Public => {
+            "Use `n8nc credential ls --source auto` to allow fallback, or `--source workflow-refs` for partial discovery.".to_string()
+        }
+        CredentialSource::RestSession => format!(
+            "Set {} to a valid n8n browser session cookie, or use `--source auto` / `--source workflow-refs`.",
+            session_cookie_env_var_name(alias)
+        ),
+        CredentialSource::Auto | CredentialSource::WorkflowRefs => {
+            "Use `n8nc credential ls --source auto`.".to_string()
+        }
+    };
+
+    AppError::api(
+        "credential",
+        "credential.inventory_unavailable",
+        format!(
+            "The {source_label} path is not available for `{alias}`: {}",
+            err.message
+        ),
+    )
+    .with_suggestion(suggestion)
+}
+
+async fn probe_credential_inventory_capability(
+    alias: &str,
+    client: &ApiClient,
+) -> Result<String, AppError> {
+    match client.probe_credentials_public().await {
+        Ok(()) => Ok("Full credential inventory is available via the public API.".to_string()),
+        Err(public_err) if credential_inventory_fallback_allowed(&public_err) => {
+            if let Some(cookie) = resolve_session_cookie(alias) {
+                match client.probe_credentials_rest_session(&cookie).await {
+                    Ok(()) => Ok(format!(
+                        "Public credential inventory is unavailable ({}). Full inventory is available via the internal REST fallback because {} is configured.",
+                        public_err.message,
+                        session_cookie_env_var_name(alias)
+                    )),
+                    Err(rest_err) if credential_inventory_fallback_allowed(&rest_err) => {
+                        Ok(format!(
+                            "Credential discovery falls back to workflow references only. Public inventory is unavailable ({}). Internal REST inventory is also unavailable ({}).",
+                            public_err.message, rest_err.message
+                        ))
+                    }
+                    Err(rest_err) => Err(rest_err),
+                }
+            } else {
+                Ok(format!(
+                    "Credential discovery falls back to workflow references only. Public inventory is unavailable ({}). Set {} to enable the internal REST fallback.",
+                    public_err.message,
+                    session_cookie_env_var_name(alias)
+                ))
+            }
+        }
+        Err(public_err) => Err(public_err),
     }
 }
 
@@ -1926,7 +2339,7 @@ async fn cmd_credential_set(context: &Context, args: CredentialSetArgs) -> Resul
             (
                 "credential_discovery".to_string(),
                 json!(
-                    "The public API does not expose a first-class credential inventory. Use `n8nc credential ls` to discover IDs referenced by workflows, `n8nc credential schema <type>` for the official schema, or source the ID from the n8n UI."
+                    "Use `n8nc credential ls` to discover credential IDs with the best available source (`auto`, `public`, `rest-session`, or `workflow-refs`), `n8nc credential schema <type>` for the official schema, or source the ID from the n8n UI."
                 ),
             ),
         ],

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -457,12 +457,20 @@ pub struct CredentialArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum CredentialCommand {
-    /// List credential references discovered from workflow usage
+    /// List credentials from the best available remote inventory source
     Ls(CredentialListArgs),
     /// Show the official credential schema for a credential type
     Schema(CredentialSchemaArgs),
     /// Set a credential reference on a node using an existing n8n credential ID
     Set(CredentialSetArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CredentialSource {
+    Auto,
+    Public,
+    RestSession,
+    WorkflowRefs,
 }
 
 #[derive(Debug, Args)]
@@ -474,6 +482,9 @@ pub struct CredentialListArgs {
     pub workflow: Option<String>,
     #[arg(long = "type")]
     pub credential_type: Option<String>,
+    /// Select how credential inventory is discovered
+    #[arg(long, value_enum, default_value_t = CredentialSource::Auto)]
+    pub source: CredentialSource,
 }
 
 #[derive(Debug, Args)]

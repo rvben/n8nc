@@ -2017,6 +2017,216 @@ async fn credential_ls_json_discovers_referenced_credentials() {
 }
 
 #[tokio::test]
+async fn credential_ls_json_uses_public_inventory_when_available() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/credentials"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "250"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "cred-123", "name": "Primary Basic Auth", "type": "httpBasicAuth"},
+                {"id": "cred-999", "name": "Unused Slack", "type": "slackApi"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "250"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "wf-1", "name": "Orders"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-1",
+                "name": "Orders",
+                "nodes": [
+                    {
+                        "name": "Fetch Orders",
+                        "credentials": {
+                            "httpBasicAuth": {
+                                "id": "cred-123",
+                                "name": "Primary Basic Auth"
+                            }
+                        }
+                    }
+                ],
+                "connections": {}
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("credential")
+        .arg("ls")
+        .arg("--instance")
+        .arg("mock")
+        .output()
+        .expect("run credential ls");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["requested_source"], "auto");
+    assert_eq!(envelope["data"]["resolved_source"], "public_api");
+    assert_eq!(envelope["data"]["coverage"], "full_instance");
+    assert_eq!(envelope["data"]["count"], 2);
+    assert_eq!(
+        envelope["data"]["credentials"][0]["credential_type"],
+        "httpBasicAuth"
+    );
+    assert_eq!(envelope["data"]["credentials"][0]["usage_count"], 1);
+    assert_eq!(
+        envelope["data"]["credentials"][1]["credential_type"],
+        "slackApi"
+    );
+    assert_eq!(envelope["data"]["credentials"][1]["usage_count"], 0);
+}
+
+#[tokio::test]
+async fn credential_ls_json_auto_falls_back_to_rest_session_when_configured() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/credentials"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "250"))
+        .respond_with(ResponseTemplate::new(405).set_body_json(json!({
+            "message": "GET method not allowed"
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/credentials"))
+        .and(header("cookie", "n8n-auth=abc123"))
+        .and(query_param("includeData", "false"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "cred-123", "name": "Primary Basic Auth", "type": "httpBasicAuth"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "250"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "wf-1", "name": "Orders"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-1",
+                "name": "Orders",
+                "nodes": [
+                    {
+                        "name": "Fetch Orders",
+                        "credentials": {
+                            "httpBasicAuth": {
+                                "id": "cred-123",
+                                "name": "Primary Basic Auth"
+                            }
+                        }
+                    }
+                ],
+                "connections": {}
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .env("N8NC_SESSION_COOKIE_MOCK", "n8n-auth=abc123")
+        .arg("credential")
+        .arg("ls")
+        .arg("--instance")
+        .arg("mock")
+        .output()
+        .expect("run credential ls");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["requested_source"], "auto");
+    assert_eq!(envelope["data"]["resolved_source"], "rest_session");
+    assert_eq!(envelope["data"]["coverage"], "full_instance");
+    assert!(
+        envelope["data"]["fallback_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("GET method not allowed")
+    );
+}
+
+#[tokio::test]
+async fn credential_ls_json_forced_public_reports_inventory_unavailable() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/credentials"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "250"))
+        .respond_with(ResponseTemplate::new(405).set_body_json(json!({
+            "message": "GET method not allowed"
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("credential")
+        .arg("ls")
+        .arg("--instance")
+        .arg("mock")
+        .arg("--source")
+        .arg("public")
+        .output()
+        .expect("run credential ls");
+
+    assert!(!output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(
+        envelope["error"]["code"],
+        "credential.inventory_unavailable"
+    );
+    assert!(
+        envelope["error"]["suggestion"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--source auto")
+    );
+}
+
+#[tokio::test]
 async fn credential_schema_json_returns_schema_payload() {
     let server = MockServer::start().await;
     let repo = tempdir().expect("tempdir");

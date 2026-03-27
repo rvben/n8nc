@@ -332,6 +332,127 @@ impl ApiClient {
         .await
     }
 
+    pub async fn list_credentials_public(&self) -> Result<Vec<Value>, AppError> {
+        let mut next_cursor: Option<String> = None;
+        let mut results = Vec::new();
+
+        loop {
+            let mut query = vec![("limit".to_string(), "250".to_string())];
+            if let Some(cursor) = &next_cursor {
+                query.push(("cursor".to_string(), cursor.clone()));
+            }
+
+            let page = self
+                .request_json_optional(Method::GET, "credentials", &query, None)
+                .await?
+                .ok_or_else(|| {
+                    AppError::api(
+                        self.command,
+                        "api.http_404",
+                        "The public credential inventory endpoint is not available.",
+                    )
+                })?;
+            let page_data = page
+                .get("data")
+                .and_then(Value::as_array)
+                .cloned()
+                .or_else(|| page.as_array().cloned())
+                .ok_or_else(|| {
+                    AppError::api(
+                        self.command,
+                        "api.invalid_response",
+                        "Expected a paginated credential list response.",
+                    )
+                })?;
+
+            results.extend(page_data);
+            next_cursor = page
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            if next_cursor.is_none() {
+                break;
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub async fn probe_credentials_public(&self) -> Result<(), AppError> {
+        self.request_json_optional(
+            Method::GET,
+            "credentials",
+            &[("limit".to_string(), "1".to_string())],
+            None,
+        )
+        .await?
+        .ok_or_else(|| {
+            AppError::api(
+                self.command,
+                "api.http_404",
+                "The public credential inventory endpoint is not available.",
+            )
+        })
+        .map(|_| ())
+    }
+
+    pub async fn list_credentials_rest_session(
+        &self,
+        session_cookie: &str,
+    ) -> Result<Vec<Value>, AppError> {
+        let response = self
+            .request_rest_json_optional(
+                Method::GET,
+                "credentials",
+                &[("includeData".to_string(), "false".to_string())],
+                None,
+                session_cookie,
+            )
+            .await?
+            .ok_or_else(|| {
+                AppError::api(
+                    self.command,
+                    "api.http_404",
+                    "The internal REST credential inventory endpoint is not available.",
+                )
+            })?;
+
+        response
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .or_else(|| response.as_array().cloned())
+            .ok_or_else(|| {
+                AppError::api(
+                    self.command,
+                    "api.invalid_response",
+                    "Expected an internal REST credential list response.",
+                )
+            })
+    }
+
+    pub async fn probe_credentials_rest_session(
+        &self,
+        session_cookie: &str,
+    ) -> Result<(), AppError> {
+        self.request_rest_json_optional(
+            Method::GET,
+            "credentials",
+            &[("includeData".to_string(), "false".to_string())],
+            None,
+            session_cookie,
+        )
+        .await?
+        .ok_or_else(|| {
+            AppError::api(
+                self.command,
+                "api.http_404",
+                "The internal REST credential inventory endpoint is not available.",
+            )
+        })
+        .map(|_| ())
+    }
+
     pub async fn trigger(
         &self,
         target: &str,
@@ -511,6 +632,78 @@ impl ApiClient {
                 self.command,
                 "api.invalid_json",
                 format!("n8n returned invalid JSON: {err}"),
+            )
+        })?;
+        Ok(Some(parsed))
+    }
+
+    async fn request_rest_json_optional(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<&Value>,
+        session_cookie: &str,
+    ) -> Result<Option<Value>, AppError> {
+        let mut url = self.base_url.clone();
+        url.path_segments_mut()
+            .map_err(|_| {
+                AppError::config(
+                    self.command,
+                    "The configured base URL cannot be used as an internal REST root.",
+                )
+            })?
+            .extend(["rest"])
+            .extend(path.trim_start_matches('/').split('/'));
+
+        let mut request = self
+            .client
+            .request(method, url)
+            .header("Accept", "application/json")
+            .header("Cookie", session_cookie)
+            .query(query);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+
+        let response = request.send().await.map_err(|err| {
+            AppError::network(
+                self.command,
+                format!("Request to n8n internal REST API failed: {err}"),
+            )
+        })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|err| {
+            AppError::network(
+                self.command,
+                format!("Failed to read n8n internal REST response: {err}"),
+            )
+        })?;
+
+        if status == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        if !status.is_success() {
+            let message = parse_error_message(&body).unwrap_or_else(|| {
+                format!("n8n internal REST API returned HTTP {}.", status.as_u16())
+            });
+            return Err(AppError::api(
+                self.command,
+                format!("api.http_{}", status.as_u16()),
+                message,
+            ));
+        }
+
+        if body.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let parsed: Value = serde_json::from_str(&body).map_err(|err| {
+            AppError::api(
+                self.command,
+                "api.invalid_json",
+                format!("n8n internal REST API returned invalid JSON: {err}"),
             )
         })?;
         Ok(Some(parsed))

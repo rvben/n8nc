@@ -19,6 +19,17 @@ pub struct AuthStatus {
 
 pub fn env_var_name(alias: &str) -> String {
     let mut out = String::from("N8NC_TOKEN_");
+    normalize_alias_suffix(alias, &mut out);
+    out
+}
+
+pub fn session_cookie_env_var_name(alias: &str) -> String {
+    let mut out = String::from("N8NC_SESSION_COOKIE_");
+    normalize_alias_suffix(alias, &mut out);
+    out
+}
+
+fn normalize_alias_suffix(alias: &str, out: &mut String) {
     for ch in alias.chars() {
         if ch.is_ascii_alphanumeric() {
             out.push(ch.to_ascii_uppercase());
@@ -26,7 +37,6 @@ pub fn env_var_name(alias: &str) -> String {
             out.push('_');
         }
     }
-    out
 }
 
 fn entry(alias: &str) -> Result<Entry, AppError> {
@@ -81,6 +91,13 @@ pub fn resolve_token(alias: &str, command: &'static str) -> Result<(String, Stri
             format!("Failed to read token for `{alias}`: {err}"),
         )),
     }
+}
+
+pub fn resolve_session_cookie(alias: &str) -> Option<String> {
+    env::var(session_cookie_env_var_name(alias))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub fn read_token_from_stdin() -> Result<String, AppError> {
@@ -140,11 +157,19 @@ pub fn ensure_alias_exists(
 
 #[cfg(test)]
 mod tests {
-    use super::env_var_name;
+    use super::{env_var_name, session_cookie_env_var_name};
 
     #[test]
     fn env_var_names_are_normalized() {
         assert_eq!(env_var_name("prod"), "N8NC_TOKEN_PROD");
         assert_eq!(env_var_name("eu-west-1"), "N8NC_TOKEN_EU_WEST_1");
+        assert_eq!(
+            session_cookie_env_var_name("prod"),
+            "N8NC_SESSION_COOKIE_PROD"
+        );
+        assert_eq!(
+            session_cookie_env_var_name("eu-west-1"),
+            "N8NC_SESSION_COOKIE_EU_WEST_1"
+        );
     }
 }
