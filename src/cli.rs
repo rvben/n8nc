@@ -103,9 +103,27 @@ pub enum AuthCommand {
     Add(AuthAddArgs),
     /// Verify that an alias is configured and reachable
     Test(AuthAliasArgs),
+    /// Store, verify, or remove browser-session auth for internal REST fallbacks
+    Session(AuthSessionArgs),
     /// Show configured aliases and token availability
     List,
     /// Remove a stored token
+    Remove(AuthAliasArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AuthSessionArgs {
+    #[command(subcommand)]
+    pub command: AuthSessionCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuthSessionCommand {
+    /// Store a browser session cookie and browser ID for an alias
+    Add(AuthSessionAddArgs),
+    /// Verify that the internal REST session fallback is configured and reachable
+    Test(AuthAliasArgs),
+    /// Remove stored browser-session auth
     Remove(AuthAliasArgs),
 }
 
@@ -121,6 +139,17 @@ pub struct AuthAddArgs {
     pub token: Option<String>,
     #[arg(long, conflicts_with = "token")]
     pub stdin: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AuthSessionAddArgs {
+    pub alias: String,
+    #[arg(long, value_name = "COOKIE", conflicts_with = "cookie_stdin")]
+    pub cookie: Option<String>,
+    #[arg(long, conflicts_with = "cookie")]
+    pub cookie_stdin: bool,
+    #[arg(long = "browser-id", value_name = "BROWSER_ID")]
+    pub browser_id: String,
 }
 
 #[derive(Debug, Args, Clone)]

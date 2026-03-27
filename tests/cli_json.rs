@@ -451,6 +451,74 @@ async fn doctor_json_reports_success() {
 }
 
 #[tokio::test]
+async fn auth_list_json_reports_session_sources_from_env() {
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), "https://example.test");
+
+    let output = base_command(repo.path())
+        .env("N8NC_SESSION_COOKIE_MOCK", "n8n-auth=session-cookie")
+        .env("N8NC_BROWSER_ID_MOCK", "browser-123")
+        .arg("auth")
+        .arg("list")
+        .output()
+        .expect("run auth list");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "auth");
+    assert_eq!(envelope["data"]["instances"][0]["alias"], "mock");
+    assert_eq!(envelope["data"]["instances"][0]["token_source"], "env");
+    assert_eq!(
+        envelope["data"]["instances"][0]["session_cookie_source"],
+        "env"
+    );
+    assert_eq!(envelope["data"]["instances"][0]["browser_id_source"], "env");
+    assert_eq!(envelope["data"]["instances"][0]["session_ready"], true);
+}
+
+#[tokio::test]
+async fn auth_session_test_json_checks_internal_rest_inventory() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    let session_cookie = "n8n-auth=session-cookie";
+
+    Mock::given(method("GET"))
+        .and(path("/rest/credentials"))
+        .and(header("cookie", session_cookie))
+        .and(header("browser-id", "browser-123"))
+        .and(query_param("includeData", "false"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "cred-1", "name": "Primary Basic Auth", "type": "httpBasicAuth"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .env("N8NC_SESSION_COOKIE_MOCK", session_cookie)
+        .env("N8NC_BROWSER_ID_MOCK", "browser-123")
+        .arg("auth")
+        .arg("session")
+        .arg("test")
+        .arg("mock")
+        .output()
+        .expect("run auth session test");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "auth");
+    assert_eq!(envelope["data"]["alias"], "mock");
+    assert_eq!(envelope["data"]["session_cookie_source"], "env");
+    assert_eq!(envelope["data"]["browser_id_source"], "env");
+    assert_eq!(envelope["data"]["reachable"], true);
+    assert_eq!(envelope["data"]["sample_count"], 1);
+}
+
+#[tokio::test]
 async fn validate_json_reports_sensitive_warnings_without_failing() {
     let server = MockServer::start().await;
     let repo = tempdir().expect("tempdir");

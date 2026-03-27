@@ -1,6 +1,5 @@
 use std::{collections::BTreeMap, time::Duration};
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode, Url};
 use serde::Serialize;
@@ -400,7 +399,7 @@ impl ApiClient {
     pub async fn list_credentials_rest_session(
         &self,
         session_cookie: &str,
-        browser_id: Option<&str>,
+        browser_id: &str,
     ) -> Result<Vec<Value>, AppError> {
         let response = self
             .request_rest_json_optional(
@@ -437,7 +436,7 @@ impl ApiClient {
     pub async fn probe_credentials_rest_session(
         &self,
         session_cookie: &str,
-        browser_id: Option<&str>,
+        browser_id: &str,
     ) -> Result<(), AppError> {
         self.request_rest_json_optional(
             Method::GET,
@@ -649,7 +648,7 @@ impl ApiClient {
         query: &[(String, String)],
         body: Option<&Value>,
         session_cookie: &str,
-        browser_id: Option<&str>,
+        browser_id: &str,
     ) -> Result<Option<Value>, AppError> {
         let mut url = self.base_url.clone();
         url.path_segments_mut()
@@ -667,13 +666,8 @@ impl ApiClient {
             .request(method, url)
             .header("Accept", "application/json")
             .header("Cookie", session_cookie)
+            .header("browser-id", browser_id)
             .query(query);
-        if let Some(browser_id) = browser_id
-            .map(ToOwned::to_owned)
-            .or_else(|| browser_id_from_session_cookie(session_cookie))
-        {
-            request = request.header("browser-id", browser_id);
-        }
         if let Some(body) = body {
             request = request.json(body);
         }
@@ -741,19 +735,6 @@ fn parse_error_message(body: &str) -> Option<String> {
 fn parse_body(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(bytes).to_string()))
-}
-
-fn browser_id_from_session_cookie(cookie_header: &str) -> Option<String> {
-    let token = cookie_header
-        .split(';')
-        .map(str::trim)
-        .find_map(|part| part.strip_prefix("n8n-auth="))?;
-    let payload = token.split('.').nth(1)?;
-    let decoded = URL_SAFE_NO_PAD.decode(payload.as_bytes()).ok()?;
-    let json: Value = serde_json::from_slice(&decoded).ok()?;
-    json.get("browserId")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
 }
 
 fn body_looks_like_json(bytes: &[u8]) -> bool {
@@ -899,8 +880,8 @@ mod tests {
 
     use super::{
         ApiClient, ExecutionListOptions, ListOptions, append_capped_values,
-        append_matching_executions, append_matching_workflows, browser_id_from_session_cookie,
-        execution_filter_timestamp, page_crosses_since_cutoff,
+        append_matching_executions, append_matching_workflows, execution_filter_timestamp,
+        page_crosses_since_cutoff,
     };
 
     #[derive(Debug)]
@@ -952,16 +933,6 @@ mod tests {
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0]["id"], "a");
         assert_eq!(filtered[1]["id"], "c");
-    }
-
-    #[test]
-    fn extracts_browser_id_from_n8n_auth_cookie() {
-        let cookie =
-            "foo=bar; n8n-auth=eyJhbGciOiJIUzI1NiJ9.eyJicm93c2VySWQiOiJicm93c2VyLTEyMyJ9.sig";
-        assert_eq!(
-            browser_id_from_session_cookie(cookie).as_deref(),
-            Some("browser-123")
-        );
     }
 
     #[test]

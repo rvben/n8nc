@@ -14,19 +14,22 @@ use serde_json::{Value, json};
 use crate::{
     api::{ApiClient, ExecutionListOptions, ListOptions},
     auth::{
-        browser_id_env_var_name, ensure_alias_exists, list_auth_statuses, read_token_from_stdin,
-        remove_token, resolve_browser_id, resolve_session_cookie, resolve_token,
-        session_cookie_env_var_name, store_token,
+        browser_id_env_var_name, ensure_alias_exists, list_auth_statuses,
+        read_session_cookie_from_stdin, read_token_from_stdin, remove_browser_id,
+        remove_session_cookie, remove_token, resolve_browser_id, resolve_session_cookie,
+        resolve_token, session_cookie_env_var_name, store_browser_id, store_session_cookie,
+        store_token,
     },
     canonical::{canonicalize_workflow, hash_value, pretty_json},
     cli::{
-        AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, Cli, Command, ConnAddArgs, ConnArgs,
-        ConnCommand, ConnRemoveArgs, CredentialArgs, CredentialCommand, CredentialListArgs,
-        CredentialSchemaArgs, CredentialSetArgs, CredentialSource, DiffArgs, DoctorArgs, ExprArgs,
-        ExprCommand, ExprSetArgs, FmtArgs, GetArgs, IdArgs, InitArgs, ListArgs, NodeAddArgs,
-        NodeArgs, NodeCommand, NodeListArgs, NodeRemoveArgs, NodeRenameArgs, NodeSetArgs, PullArgs,
-        PushArgs, RunsArgs, RunsCommand, RunsGetArgs, RunsListArgs, RunsTimeArgs, RunsWatchArgs,
-        StatusArgs, TriggerArgs, ValidateArgs, ValueModeArgs, WorkflowArgs, WorkflowCommand,
+        AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, AuthSessionAddArgs, AuthSessionArgs,
+        AuthSessionCommand, Cli, Command, ConnAddArgs, ConnArgs, ConnCommand, ConnRemoveArgs,
+        CredentialArgs, CredentialCommand, CredentialListArgs, CredentialSchemaArgs,
+        CredentialSetArgs, CredentialSource, DiffArgs, DoctorArgs, ExprArgs, ExprCommand,
+        ExprSetArgs, FmtArgs, GetArgs, IdArgs, InitArgs, ListArgs, NodeAddArgs, NodeArgs,
+        NodeCommand, NodeListArgs, NodeRemoveArgs, NodeRenameArgs, NodeSetArgs, PullArgs, PushArgs,
+        RunsArgs, RunsCommand, RunsGetArgs, RunsListArgs, RunsTimeArgs, RunsWatchArgs, StatusArgs,
+        TriggerArgs, ValidateArgs, ValueModeArgs, WorkflowArgs, WorkflowCommand,
         WorkflowCreateArgs, WorkflowNewArgs, WorkflowRemoveArgs, WorkflowShowArgs,
     },
     config::{
@@ -210,6 +213,9 @@ struct AuthListRow {
     alias: String,
     base_url: String,
     token_source: String,
+    session_cookie_source: String,
+    browser_id_source: String,
+    session_ready: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -389,8 +395,17 @@ async fn cmd_auth(context: &Context, args: AuthArgs) -> Result<(), AppError> {
     match args.command {
         AuthCommand::Add(args) => cmd_auth_add(context, args).await,
         AuthCommand::Test(args) => cmd_auth_test(context, args).await,
+        AuthCommand::Session(args) => cmd_auth_session(context, args).await,
         AuthCommand::List => cmd_auth_list(context).await,
         AuthCommand::Remove(args) => cmd_auth_remove(context, args).await,
+    }
+}
+
+async fn cmd_auth_session(context: &Context, args: AuthSessionArgs) -> Result<(), AppError> {
+    match args.command {
+        AuthSessionCommand::Add(args) => cmd_auth_session_add(context, args).await,
+        AuthSessionCommand::Test(args) => cmd_auth_session_test(context, args).await,
+        AuthSessionCommand::Remove(args) => cmd_auth_session_remove(context, args).await,
     }
 }
 
@@ -454,25 +469,121 @@ async fn cmd_auth_test(context: &Context, args: AuthAliasArgs) -> Result<(), App
     }
 }
 
+async fn cmd_auth_session_add(context: &Context, args: AuthSessionAddArgs) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let alias = ensure_alias_exists(&repo, &args.alias, "auth")?;
+    let session_cookie = match (args.cookie, args.cookie_stdin) {
+        (Some(cookie), false) => cookie,
+        (None, true) => read_session_cookie_from_stdin()?,
+        (None, false) => {
+            return Err(AppError::usage(
+                "auth",
+                "Provide a session cookie with `--cookie` or pipe it with `--cookie-stdin`.",
+            ));
+        }
+        (Some(_), true) => unreachable!(),
+    };
+
+    store_session_cookie(&alias, &session_cookie)?;
+    store_browser_id(&alias, &args.browser_id)?;
+
+    let data = json!({
+        "alias": alias,
+        "session_cookie_stored": true,
+        "browser_id_stored": true,
+        "session_ready": true,
+    });
+    if context.json {
+        emit_json("auth", &data)
+    } else {
+        println!(
+            "Stored browser-session auth for `{}`.",
+            data["alias"].as_str().unwrap_or_default()
+        );
+        Ok(())
+    }
+}
+
+async fn cmd_auth_session_test(context: &Context, args: AuthAliasArgs) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let alias = ensure_alias_exists(&repo, &args.alias, "auth")?;
+    let instance =
+        repo.config.instances.get(&alias).ok_or_else(|| {
+            AppError::config("auth", format!("Unknown instance alias `{alias}`."))
+        })?;
+    let session_cookie = resolve_session_cookie(&alias, "auth")?.ok_or_else(|| {
+        AppError::auth(
+            "auth",
+            format!("No session cookie configured for `{alias}`."),
+        )
+        .with_suggestion(session_auth_setup_hint(&alias))
+    })?;
+    let browser_id = resolve_browser_id(&alias, "auth")?.ok_or_else(|| {
+        AppError::auth("auth", format!("No browser ID configured for `{alias}`."))
+            .with_suggestion(session_auth_setup_hint(&alias))
+    })?;
+    let client = ApiClient::new("auth", instance, "session-probe".to_string())?;
+    let credentials = client
+        .list_credentials_rest_session(&session_cookie.value, &browser_id.value)
+        .await?;
+
+    let data = json!({
+        "alias": alias,
+        "base_url": instance.base_url,
+        "session_cookie_source": session_cookie.source,
+        "browser_id_source": browser_id.source,
+        "reachable": true,
+        "sample_count": credentials.len(),
+    });
+    if context.json {
+        emit_json("auth", &data)
+    } else {
+        println!("Alias: {}", data["alias"].as_str().unwrap_or_default());
+        println!(
+            "Base URL: {}",
+            data["base_url"].as_str().unwrap_or_default()
+        );
+        println!(
+            "Session cookie source: {}",
+            data["session_cookie_source"].as_str().unwrap_or_default()
+        );
+        println!(
+            "Browser ID source: {}",
+            data["browser_id_source"].as_str().unwrap_or_default()
+        );
+        println!("Internal REST reachable: yes");
+        Ok(())
+    }
+}
+
 async fn cmd_auth_list(context: &Context) -> Result<(), AppError> {
     let repo = load_loaded_repo(context)?;
-    let rows: Vec<AuthListRow> = list_auth_statuses(&repo)
+    let rows: Vec<AuthListRow> = list_auth_statuses(&repo)?
         .into_iter()
         .map(|status| AuthListRow {
             alias: status.alias,
             base_url: status.base_url,
             token_source: status.token_source,
+            session_cookie_source: status.session_cookie_source,
+            browser_id_source: status.browser_id_source,
+            session_ready: status.session_ready,
         })
         .collect();
 
     if context.json {
         emit_json("auth", &json!({ "instances": rows }))
     } else {
-        println!("{:<16} {:<10} {}", "ALIAS", "TOKEN", "BASE URL");
+        println!(
+            "{:<16} {:<10} {:<22} {}",
+            "ALIAS", "TOKEN", "SESSION", "BASE URL"
+        );
         for row in rows {
             println!(
-                "{:<16} {:<10} {}",
-                row.alias, row.token_source, row.base_url
+                "{:<16} {:<10} {:<22} {}",
+                row.alias,
+                row.token_source,
+                auth_session_status_label(&row),
+                row.base_url
             );
         }
         Ok(())
@@ -489,6 +600,47 @@ async fn cmd_auth_remove(context: &Context, args: AuthAliasArgs) -> Result<(), A
         println!("Removed token for `{alias}`.");
         Ok(())
     }
+}
+
+async fn cmd_auth_session_remove(context: &Context, args: AuthAliasArgs) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let alias = ensure_alias_exists(&repo, &args.alias, "auth")?;
+    remove_session_cookie(&alias)?;
+    remove_browser_id(&alias)?;
+    if context.json {
+        emit_json(
+            "auth",
+            &json!({
+                "alias": alias,
+                "session_cookie_removed": true,
+                "browser_id_removed": true,
+            }),
+        )
+    } else {
+        println!("Removed browser-session auth for `{alias}`.");
+        Ok(())
+    }
+}
+
+fn auth_session_status_label(row: &AuthListRow) -> String {
+    if row.session_ready {
+        format!("{}+{}", row.session_cookie_source, row.browser_id_source)
+    } else if row.session_cookie_source != "missing" || row.browser_id_source != "missing" {
+        format!(
+            "partial({}+{})",
+            row.session_cookie_source, row.browser_id_source
+        )
+    } else {
+        "missing".to_string()
+    }
+}
+
+fn session_auth_setup_hint(alias: &str) -> String {
+    format!(
+        "Run `n8nc auth session add {alias} --cookie <n8n-auth=...> --browser-id <browser-id>` or set {} and {}.",
+        session_cookie_env_var_name(alias),
+        browser_id_env_var_name(alias)
+    )
 }
 
 async fn build_doctor_report(
@@ -1933,8 +2085,8 @@ async fn build_credential_list_result(
         return build_workflow_reference_credential_list(args, None, client).await;
     }
 
-    let session_cookie = resolve_session_cookie(alias);
-    let browser_id = resolve_browser_id(alias);
+    let session_cookie = resolve_session_cookie(alias, "credential")?;
+    let browser_id = resolve_browser_id(alias, "credential")?;
 
     match args.source {
         CredentialSource::Auto => match client.list_credentials_public().await {
@@ -1949,10 +2101,12 @@ async fn build_credential_list_result(
                 .await
             }
             Err(public_err) if credential_inventory_fallback_allowed(&public_err) => {
-                if let Some(cookie) = session_cookie.as_deref() {
-                    if let Some(browser_id) = browser_id.as_deref() {
+                if let Some(cookie) = session_cookie.as_ref().map(|secret| secret.value.as_str()) {
+                    if let Some(browser_id) =
+                        browser_id.as_ref().map(|secret| secret.value.as_str())
+                    {
                         match client
-                            .list_credentials_rest_session(cookie, Some(browser_id))
+                            .list_credentials_rest_session(cookie, browser_id)
                             .await
                         {
                             Ok(inventory) => {
@@ -1986,10 +2140,9 @@ async fn build_credential_list_result(
                         build_workflow_reference_credential_list(
                             args,
                             Some(format!(
-                                "Public credential inventory was unavailable: {}. {} is configured, but {} is missing so the internal REST fallback cannot authenticate.",
+                                "Public credential inventory was unavailable: {}. A session cookie is configured, but the matching browser ID is missing so the internal REST fallback cannot authenticate. {}",
                                 public_err.message,
-                                session_cookie_env_var_name(alias),
-                                browser_id_env_var_name(alias)
+                                session_auth_setup_hint(alias)
                             )),
                             client,
                         )
@@ -1999,9 +2152,9 @@ async fn build_credential_list_result(
                     build_workflow_reference_credential_list(
                         args,
                         Some(format!(
-                            "Public credential inventory was unavailable: {}. No {} environment variable is configured for the internal REST fallback.",
+                            "Public credential inventory was unavailable: {}. No internal REST session auth is configured. {}",
                             public_err.message,
-                            session_cookie_env_var_name(alias)
+                            session_auth_setup_hint(alias)
                         )),
                         client,
                     )
@@ -2028,29 +2181,19 @@ async fn build_credential_list_result(
             let cookie = session_cookie.ok_or_else(|| {
                 AppError::auth(
                     "credential",
-                    format!(
-                        "No session cookie is configured for `{alias}`.",
-                    ),
+                    format!("No session cookie is configured for `{alias}`.",),
                 )
-                .with_suggestion(format!(
-                    "Set {} to a valid n8n browser session cookie and {} to the matching browser-id value, or use `--source auto` / `--source workflow-refs`.",
-                    session_cookie_env_var_name(alias),
-                    browser_id_env_var_name(alias)
-                ))
+                .with_suggestion(session_auth_setup_hint(alias))
             })?;
             let browser_id = browser_id.ok_or_else(|| {
                 AppError::auth(
                     "credential",
                     format!("No browser ID is configured for `{alias}`."),
                 )
-                .with_suggestion(format!(
-                    "Set {} to the browser-id value that belongs to {}. n8n validates both for internal REST session requests.",
-                    browser_id_env_var_name(alias),
-                    session_cookie_env_var_name(alias)
-                ))
+                .with_suggestion(session_auth_setup_hint(alias))
             })?;
             let inventory = client
-                .list_credentials_rest_session(&cookie, Some(&browser_id))
+                .list_credentials_rest_session(&cookie.value, &browser_id.value)
                 .await
                 .map_err(|err| forced_credential_source_error(alias, args.source, err))?;
             build_full_inventory_credential_list(
@@ -2263,11 +2406,7 @@ fn forced_credential_source_error(
         CredentialSource::Public => {
             "Use `n8nc credential ls --source auto` to allow fallback, or `--source workflow-refs` for partial discovery.".to_string()
         }
-        CredentialSource::RestSession => format!(
-            "Set {} to a valid n8n browser session cookie and {} to the matching browser-id value, or use `--source auto` / `--source workflow-refs`.",
-            session_cookie_env_var_name(alias),
-            browser_id_env_var_name(alias)
-        ),
+        CredentialSource::RestSession => session_auth_setup_hint(alias),
         CredentialSource::Auto | CredentialSource::WorkflowRefs => {
             "Use `n8nc credential ls --source auto`.".to_string()
         }
@@ -2291,17 +2430,15 @@ async fn probe_credential_inventory_capability(
     match client.probe_credentials_public().await {
         Ok(()) => Ok("Full credential inventory is available via the public API.".to_string()),
         Err(public_err) if credential_inventory_fallback_allowed(&public_err) => {
-            if let Some(cookie) = resolve_session_cookie(alias) {
-                if let Some(browser_id) = resolve_browser_id(alias) {
+            if let Some(cookie) = resolve_session_cookie(alias, "doctor")? {
+                if let Some(browser_id) = resolve_browser_id(alias, "doctor")? {
                     match client
-                        .probe_credentials_rest_session(&cookie, Some(&browser_id))
+                        .probe_credentials_rest_session(&cookie.value, &browser_id.value)
                         .await
                     {
                         Ok(()) => Ok(format!(
-                            "Public credential inventory is unavailable ({}). Full inventory is available via the internal REST fallback because {} and {} are configured.",
-                            public_err.message,
-                            session_cookie_env_var_name(alias),
-                            browser_id_env_var_name(alias)
+                            "Public credential inventory is unavailable ({}). Full inventory is available via the internal REST fallback because browser-session auth is configured.",
+                            public_err.message
                         )),
                         Err(rest_err) if credential_inventory_fallback_allowed(&rest_err) => {
                             Ok(format!(
@@ -2313,18 +2450,16 @@ async fn probe_credential_inventory_capability(
                     }
                 } else {
                     Ok(format!(
-                        "Credential discovery falls back to workflow references only. Public inventory is unavailable ({}). {} is configured, but {} is missing.",
+                        "Credential discovery falls back to workflow references only. Public inventory is unavailable ({}). A session cookie is configured, but the matching browser ID is missing. {}",
                         public_err.message,
-                        session_cookie_env_var_name(alias),
-                        browser_id_env_var_name(alias)
+                        session_auth_setup_hint(alias)
                     ))
                 }
             } else {
                 Ok(format!(
-                    "Credential discovery falls back to workflow references only. Public inventory is unavailable ({}). Set {} and {} to enable the internal REST fallback.",
+                    "Credential discovery falls back to workflow references only. Public inventory is unavailable ({}). {}",
                     public_err.message,
-                    session_cookie_env_var_name(alias),
-                    browser_id_env_var_name(alias)
+                    session_auth_setup_hint(alias)
                 ))
             }
         }
