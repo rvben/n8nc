@@ -1376,6 +1376,63 @@ async fn workflow_show_json_reports_webhook_urls() {
 }
 
 #[tokio::test]
+async fn workflow_show_json_reports_credentials() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    fs::write(
+        repo.path()
+            .join("workflows")
+            .join("credential.workflow.json"),
+        serde_json::to_string_pretty(&json!({
+            "id": "wf-1",
+            "name": "Credential Example",
+            "active": false,
+            "nodes": [
+                {
+                    "id": "node-1",
+                    "name": "HTTP Request",
+                    "type": "n8n-nodes-base.httpRequest",
+                    "typeVersion": 4.2,
+                    "position": [0, 0],
+                    "parameters": {},
+                    "credentials": {
+                        "httpBasicAuth": {
+                            "id": "cred-123",
+                            "name": "Primary Basic Auth"
+                        }
+                    }
+                }
+            ],
+            "connections": {},
+            "settings": {}
+        }))
+        .expect("serialize workflow"),
+    )
+    .expect("write workflow");
+
+    let output = base_command(repo.path())
+        .arg("workflow")
+        .arg("show")
+        .arg("workflows/credential.workflow.json")
+        .output()
+        .expect("run workflow show credentials");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["credential_count"], 1);
+    assert_eq!(
+        envelope["data"]["nodes"][0]["credentials"][0]["credential_type"],
+        "httpBasicAuth"
+    );
+    assert_eq!(
+        envelope["data"]["credentials"][0]["credential_id"],
+        "cred-123"
+    );
+}
+
+#[tokio::test]
 async fn workflow_show_uses_default_instance_for_local_draft_urls() {
     let server = MockServer::start().await;
     let repo = tempdir().expect("tempdir");
@@ -1840,7 +1897,7 @@ async fn expr_set_json_wraps_expression_and_credential_set_updates_reference() {
         credential_envelope["data"]["credential_discovery"]
             .as_str()
             .unwrap_or_default()
-            .contains("does not expose credential listing")
+            .contains("credential ls")
     );
 
     let workflow = read_json_file(&repo.path().join("workflows").join("example.workflow.json"));
@@ -1853,6 +1910,147 @@ async fn expr_set_json_wraps_expression_and_credential_set_updates_reference() {
     assert_eq!(
         node["credentials"]["httpBasicAuth"]["name"],
         "Primary Basic Auth"
+    );
+}
+
+#[tokio::test]
+async fn credential_ls_json_discovers_referenced_credentials() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "250"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "wf-1", "name": "Orders"},
+                {"id": "wf-2", "name": "Alerts"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-1",
+                "name": "Orders",
+                "nodes": [
+                    {
+                        "name": "Fetch Orders",
+                        "credentials": {
+                            "httpBasicAuth": {
+                                "id": "cred-123",
+                                "name": "Primary Basic Auth"
+                            }
+                        }
+                    },
+                    {
+                        "name": "Post Alert",
+                        "credentials": {
+                            "slackApi": {
+                                "id": "cred-999",
+                                "name": "Slack Primary"
+                            }
+                        }
+                    }
+                ],
+                "connections": {}
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-2"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-2",
+                "name": "Alerts",
+                "nodes": [
+                    {
+                        "name": "Send Alert",
+                        "credentials": {
+                            "httpBasicAuth": {
+                                "id": "cred-123",
+                                "name": "Primary Basic Auth"
+                            }
+                        }
+                    }
+                ],
+                "connections": {}
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("credential")
+        .arg("ls")
+        .arg("--instance")
+        .arg("mock")
+        .output()
+        .expect("run credential ls");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["count"], 2);
+    assert_eq!(envelope["data"]["coverage"], "workflow_references_only");
+    assert!(
+        envelope["data"]["note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Unused credentials")
+    );
+    assert_eq!(
+        envelope["data"]["credentials"][0]["credential_type"],
+        "httpBasicAuth"
+    );
+    assert_eq!(envelope["data"]["credentials"][0]["usage_count"], 2);
+    assert_eq!(envelope["data"]["credentials"][0]["workflow_count"], 2);
+}
+
+#[tokio::test]
+async fn credential_schema_json_returns_schema_payload() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/credentials/schema/httpBasicAuth"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "type": "object",
+            "properties": {
+                "user": {"type": "string"},
+                "password": {"type": "string"}
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("credential")
+        .arg("schema")
+        .arg("--instance")
+        .arg("mock")
+        .arg("httpBasicAuth")
+        .output()
+        .expect("run credential schema");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["credential_type"], "httpBasicAuth");
+    assert_eq!(
+        envelope["data"]["schema"]["properties"]["user"]["type"],
+        "string"
     );
 }
 
