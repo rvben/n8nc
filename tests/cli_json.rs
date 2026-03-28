@@ -3009,6 +3009,233 @@ async fn workflow_rm_local_draft_removes_file_without_remote_delete() {
     assert!(!draft_path.exists());
 }
 
+#[tokio::test]
+async fn pull_all_json_pulls_all_workflows() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "wf-1", "name": "Alpha"},
+                {"id": "wf-2", "name": "Beta"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": workflow_fixture("wf-1", "Alpha", false)
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-2"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": workflow_fixture("wf-2", "Beta", true)
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("pull")
+        .arg("--all")
+        .output()
+        .expect("pull --all");
+
+    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "pull");
+    assert_eq!(envelope["data"]["total"], 2);
+    assert_eq!(envelope["data"]["pulled"], 2);
+    assert_eq!(envelope["data"]["unchanged"], 0);
+    assert_eq!(envelope["data"]["failed"], 0);
+
+    let results = envelope["data"]["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["status"], "pulled");
+    assert_eq!(results[1]["status"], "pulled");
+}
+
+#[tokio::test]
+async fn pull_all_json_skips_unchanged_workflows() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "wf-1", "name": "Alpha"},
+                {"id": "wf-2", "name": "Beta"}
+            ]
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": workflow_fixture("wf-1", "Alpha", false)
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-2"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": workflow_fixture("wf-2", "Beta", true)
+        })))
+        .mount(&server)
+        .await;
+
+    // First pull: everything is new
+    let first = base_command(repo.path())
+        .arg("pull")
+        .arg("--all")
+        .output()
+        .expect("first pull --all");
+    assert!(first.status.success());
+    let first_envelope = parse_json(&first.stdout);
+    assert_eq!(first_envelope["data"]["pulled"], 2);
+
+    // Second pull: nothing changed, both should be unchanged
+    let second = base_command(repo.path())
+        .arg("pull")
+        .arg("--all")
+        .output()
+        .expect("second pull --all");
+    assert!(second.status.success());
+    let second_envelope = parse_json(&second.stdout);
+    assert_eq!(second_envelope["data"]["pulled"], 0);
+    assert_eq!(second_envelope["data"]["unchanged"], 2);
+}
+
+#[tokio::test]
+async fn pull_all_json_reports_partial_failure() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "wf-1", "name": "Alpha"},
+                {"id": "wf-2", "name": "Beta"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": workflow_fixture("wf-1", "Alpha", false)
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-2"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "message": "internal error"
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("pull")
+        .arg("--all")
+        .output()
+        .expect("pull --all partial failure");
+
+    assert_eq!(output.status.code(), Some(6));
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["data"]["pulled"], 1);
+    assert_eq!(envelope["data"]["failed"], 1);
+
+    let results = envelope["data"]["results"].as_array().expect("results");
+    let failed = results.iter().find(|r| r["status"] == "failed").expect("failed result");
+    assert_eq!(failed["workflow_id"], "wf-2");
+    assert!(failed["error"].as_str().unwrap_or_default().len() > 0);
+}
+
+#[tokio::test]
+async fn pull_all_json_respects_active_filter() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("active", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "wf-1", "name": "Alpha"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": workflow_fixture("wf-1", "Alpha", true)
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("pull")
+        .arg("--all")
+        .arg("--active")
+        .output()
+        .expect("pull --all --active");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["data"]["total"], 1);
+    assert_eq!(envelope["data"]["pulled"], 1);
+}
+
+#[tokio::test]
+async fn pull_without_identifier_or_all_returns_usage_error() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    let output = base_command(repo.path())
+        .arg("pull")
+        .output()
+        .expect("pull without args");
+
+    assert_eq!(output.status.code(), Some(2));
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "usage.invalid");
+}
+
 fn base_command(repo_root: &Path) -> Command {
     let mut command = Command::cargo_bin("n8nc").expect("n8nc binary");
     command

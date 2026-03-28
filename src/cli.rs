@@ -258,7 +258,17 @@ pub struct RunsWatchArgs {
 pub struct PullArgs {
     #[command(flatten)]
     pub remote: RemoteArgs,
-    pub identifier: String,
+    /// Workflow ID or exact name (required unless --all is set)
+    pub identifier: Option<String>,
+    /// Pull all workflows from the remote instance
+    #[arg(long)]
+    pub all: bool,
+    /// Only pull active workflows (requires --all)
+    #[arg(long, requires = "all")]
+    pub active: bool,
+    /// Only pull inactive workflows (requires --all)
+    #[arg(long, requires = "all", conflicts_with = "active")]
+    pub inactive: bool,
 }
 
 #[derive(Debug, Args)]

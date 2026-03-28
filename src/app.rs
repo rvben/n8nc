@@ -48,10 +48,11 @@ use crate::{
         probe_execute_backend,
     },
     repo::{
-        LocalWorkflowState, RemoteSyncState, build_local_diff, build_refreshed_diff,
-        cache_snapshot_path, collect_json_targets, find_existing_workflow_path, format_json_file,
-        load_meta, load_workflow_file, refresh_local_status, scan_local_status, sidecar_path_for,
-        store_workflow, workflow_active, workflow_id, workflow_name, workflow_updated_at,
+        LocalWorkflowState, RemoteSyncState, StoredWorkflow, build_local_diff,
+        build_refreshed_diff, cache_snapshot_path, collect_json_targets,
+        find_existing_workflow_path, format_json_file, load_meta, load_workflow_file,
+        refresh_local_status, scan_local_status, sidecar_path_for, store_workflow, workflow_active,
+        workflow_id, workflow_name, workflow_updated_at,
     },
     validate::{Severity, sensitive_data_diagnostics, validate_workflow_path},
 };
@@ -77,6 +78,27 @@ struct WorkflowListRow {
     name: String,
     active: Option<bool>,
     updated_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct BatchPullResult {
+    workflow_id: String,
+    name: String,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "is_zero")]
+    warning_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1437,10 +1459,18 @@ async fn cmd_get(context: &Context, args: GetArgs) -> Result<(), AppError> {
 }
 
 async fn cmd_pull(context: &Context, args: PullArgs) -> Result<(), AppError> {
+    if args.all {
+        return cmd_pull_all(context, args).await;
+    }
+
+    let identifier = args.identifier.ok_or_else(|| {
+        AppError::usage("pull", "Provide a workflow identifier or use --all.")
+    })?;
+
     let repo = load_loaded_repo(context)?;
     let alias = resolve_instance_alias(&repo, args.remote.instance.as_deref(), "pull")?;
     let (client, _, _) = remote_client(&repo, Some(&alias), "pull")?;
-    let workflow = client.resolve_workflow(&args.identifier).await?;
+    let workflow = client.resolve_workflow(&identifier).await?;
     let stored = store_workflow(&repo, &alias, &workflow)?;
     let warnings = sensitive_data_diagnostics(&stored.workflow_path)?;
     let warning_count = warnings.len();
@@ -1466,6 +1496,175 @@ async fn cmd_pull(context: &Context, args: PullArgs) -> Result<(), AppError> {
         print_sensitive_warning_summary(&stored.workflow_path, warning_count);
         Ok(())
     }
+}
+
+async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let alias = resolve_instance_alias(&repo, args.remote.instance.as_deref(), "pull")?;
+    let (client, _, _) = remote_client(&repo, Some(&alias), "pull")?;
+
+    let active_filter = if args.active {
+        Some(true)
+    } else if args.inactive {
+        Some(false)
+    } else {
+        None
+    };
+
+    let workflows = client
+        .list_workflows(&ListOptions {
+            limit: 250,
+            active: active_filter,
+            name_filter: None,
+        })
+        .await?;
+
+    let mut results: Vec<BatchPullResult> = Vec::new();
+    let mut pulled_count: usize = 0;
+    let mut unchanged_count: usize = 0;
+    let mut failed_count: usize = 0;
+    let mut total_warning_count: usize = 0;
+
+    for list_entry in &workflows {
+        let wf_id = workflow_id(list_entry).unwrap_or_default();
+        let wf_name = workflow_name(list_entry).unwrap_or_else(|| "<unnamed>".to_string());
+
+        match pull_one_workflow(&repo, &client, &alias, &wf_id).await {
+            Ok(PullOneResult::Pulled(stored)) => {
+                let warnings = sensitive_data_diagnostics(&stored.workflow_path)
+                    .unwrap_or_default();
+                let wc = warnings.len();
+                total_warning_count += wc;
+
+                if !context.json {
+                    println!(
+                        "Pulled {} -> {}",
+                        wf_id,
+                        stored.workflow_path.display()
+                    );
+                    print_sensitive_warning_summary(&stored.workflow_path, wc);
+                }
+
+                results.push(BatchPullResult {
+                    workflow_id: wf_id,
+                    name: wf_name,
+                    status: "pulled",
+                    workflow_path: Some(stored.workflow_path),
+                    meta_path: Some(stored.meta_path),
+                    warning_count: wc,
+                    diagnostics: if wc > 0 { Some(json!(warnings)) } else { None },
+                    error: None,
+                });
+                pulled_count += 1;
+            }
+            Ok(PullOneResult::Unchanged(path)) => {
+                if !context.json {
+                    println!("Unchanged {} ({})", wf_id, path.display());
+                }
+
+                results.push(BatchPullResult {
+                    workflow_id: wf_id,
+                    name: wf_name,
+                    status: "unchanged",
+                    workflow_path: Some(path),
+                    meta_path: None,
+                    warning_count: 0,
+                    diagnostics: None,
+                    error: None,
+                });
+                unchanged_count += 1;
+            }
+            Err(err) => {
+                if !context.json {
+                    println!("Failed {}: {}", wf_id, err.message);
+                }
+
+                results.push(BatchPullResult {
+                    workflow_id: wf_id,
+                    name: wf_name,
+                    status: "failed",
+                    workflow_path: None,
+                    meta_path: None,
+                    warning_count: 0,
+                    diagnostics: None,
+                    error: Some(err.message),
+                });
+                failed_count += 1;
+            }
+        }
+    }
+
+    if !context.json {
+        println!("---");
+        println!(
+            "Pulled: {}, Unchanged: {}, Failed: {}",
+            pulled_count, unchanged_count, failed_count
+        );
+    }
+
+    let data = json!({
+        "instance": alias,
+        "total": results.len(),
+        "pulled": pulled_count,
+        "unchanged": unchanged_count,
+        "failed": failed_count,
+        "warning_count": total_warning_count,
+        "results": results,
+    });
+
+    if failed_count > 0 {
+        return Err(AppError::api(
+            "pull",
+            "pull.partial_failure",
+            format!(
+                "{failed_count} of {} workflow(s) failed to pull.",
+                results.len()
+            ),
+        )
+        .with_json_data(data));
+    }
+
+    if context.json {
+        emit_json("pull", &data)
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+enum PullOneResult {
+    Pulled(StoredWorkflow),
+    Unchanged(PathBuf),
+}
+
+async fn pull_one_workflow(
+    repo: &LoadedRepo,
+    client: &ApiClient,
+    alias: &str,
+    wf_id: &str,
+) -> Result<PullOneResult, AppError> {
+    let response = client
+        .get_workflow_by_id(wf_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::not_found(
+                "pull",
+                format!("Workflow `{wf_id}` was not found."),
+            )
+        })?;
+    let workflow = response.get("data").cloned().unwrap_or(response);
+    let canonical = canonicalize_workflow(&workflow)?;
+    let remote_hash = hash_value(&canonical)?;
+
+    if let Some(existing_path) = find_existing_workflow_path(repo, wf_id) {
+        let meta_path = sidecar_path_for(&existing_path);
+        if let Ok(meta) = load_meta(&meta_path, "pull") && meta.remote_hash == remote_hash {
+            return Ok(PullOneResult::Unchanged(existing_path));
+        }
+    }
+
+    let stored = store_workflow(repo, alias, &workflow)?;
+    Ok(PullOneResult::Pulled(stored))
 }
 
 async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), AppError> {
