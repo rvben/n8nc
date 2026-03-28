@@ -10,7 +10,7 @@ It is intentionally narrower than the original brainstorm. The tool is now speci
 
 - listing workflows from a configured n8n instance
 - listing recent executions and fetching one execution by ID
-- fetching one workflow into a canonical local artifact
+- fetching one or all workflows into canonical local artifacts
 - creating local workflow drafts and editing local workflow JSON structurally
 - creating a remote workflow from a local file and converting it into a tracked artifact
 - executing non-webhook workflows through a configured external backend
@@ -45,7 +45,7 @@ n8nc
 ├── runs ls
 ├── runs get
 ├── runs watch
-├── pull
+├── pull [--all [--active|--inactive]]
 ├── push
 ├── workflow new
 ├── workflow create
@@ -137,6 +137,8 @@ The cache stores one canonical base snapshot per tracked workflow:
 ```
 
 That snapshot is refreshed on `pull` and successful `push`.
+
+`pull --all` batch-pulls every workflow from the remote instance. It fetches each workflow, canonicalizes and hashes the payload, and skips the disk write when the local sidecar already records a matching `remote_hash`. Optional `--active` and `--inactive` filters restrict which workflows are listed. Individual fetch failures are collected and reported without aborting the batch. When any workflow fails, `pull --all` returns exit code `6` with the full results in the JSON `data` field.
 
 ## 4. Credentials
 

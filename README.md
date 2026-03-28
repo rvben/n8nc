@@ -104,6 +104,18 @@ Pull one into `workflows/`:
 n8nc pull <workflow-id-or-exact-name> --instance prod
 ```
 
+Pull all workflows:
+
+```bash
+n8nc pull --all --instance prod
+```
+
+Pull only active workflows:
+
+```bash
+n8nc pull --all --instance prod --active
+```
+
 Inspect recent executions:
 
 ```bash
