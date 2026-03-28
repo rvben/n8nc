@@ -1818,7 +1818,10 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
 
     for entry in &statuses {
         let wf_id = entry.workflow_id.clone().unwrap_or_default();
-        let wf_name = entry.name.clone().unwrap_or_else(|| "<unnamed>".to_string());
+        let wf_name = entry
+            .name
+            .clone()
+            .unwrap_or_else(|| "<unnamed>".to_string());
 
         match entry.state {
             LocalWorkflowState::Modified => {}
@@ -1847,12 +1850,7 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
                     _ => "unknown",
                 };
                 if !context.json {
-                    println!(
-                        "Skipped {} ({}) — {}",
-                        wf_id,
-                        entry.file.display(),
-                        reason
-                    );
+                    println!("Skipped {} ({}) — {}", wf_id, entry.file.display(), reason);
                 }
                 results.push(BatchPushResult {
                     workflow_id: wf_id,
@@ -2021,11 +2019,7 @@ async fn push_one_workflow(
         ));
     }
 
-    let alias = resolve_instance_alias(
-        repo,
-        instance_override.or(Some(&meta.instance)),
-        "push",
-    )?;
+    let alias = resolve_instance_alias(repo, instance_override.or(Some(&meta.instance)), "push")?;
     if alias != meta.instance {
         return Err(AppError::config(
             "push",

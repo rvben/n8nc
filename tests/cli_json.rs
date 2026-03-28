@@ -2115,18 +2115,14 @@ async fn push_all_json_skips_clean_workflows() {
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows/wf-1"))
         .and(header("x-n8n-api-key", "test-token"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"data": wf1_fixture})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": wf1_fixture})))
         .mount(&server)
         .await;
 
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows/wf-2"))
         .and(header("x-n8n-api-key", "test-token"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"data": wf2_fixture})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": wf2_fixture})))
         .mount(&server)
         .await;
 
@@ -3776,10 +3772,7 @@ async fn fmt_json_formats_workflow_files_in_place() {
     write_repo(repo.path(), "https://example.test");
 
     // Write a workflow file with non-canonical key ordering and no trailing newline.
-    let workflow_path = repo
-        .path()
-        .join("workflows")
-        .join("example.workflow.json");
+    let workflow_path = repo.path().join("workflows").join("example.workflow.json");
     fs::write(
         &workflow_path,
         r#"{"connections":{},"active":false,"nodes":[],"name":"Example","id":"wf-1"}"#,
