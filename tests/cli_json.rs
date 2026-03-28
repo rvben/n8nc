@@ -1767,6 +1767,51 @@ async fn workflow_show_uses_default_instance_for_local_draft_urls() {
 }
 
 #[tokio::test]
+async fn workflow_show_tree_json() {
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), "http://localhost:9999");
+
+    let wf_path = dir.path().join("workflows").join("test--wf-1.workflow.json");
+    fs::write(
+        &wf_path,
+        serde_json::to_string_pretty(&json!({
+            "id": "wf-1",
+            "name": "Test",
+            "active": false,
+            "settings": {},
+            "nodes": [
+                {"name": "Webhook", "type": "n8n-nodes-base.webhook", "typeVersion": 2, "position": [0, 0], "parameters": {}},
+                {"name": "Set", "type": "n8n-nodes-base.set", "typeVersion": 1, "position": [200, 0], "parameters": {}}
+            ],
+            "connections": {
+                "Webhook": {
+                    "main": [[{"node": "Set", "type": "main", "index": 0}]]
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .expect("write workflow");
+
+    let output = base_command(dir.path())
+        .arg("workflow")
+        .arg("show")
+        .arg("--tree")
+        .arg(&wf_path)
+        .output()
+        .expect("run workflow show --tree");
+
+    assert!(output.status.success());
+    let json = parse_json(&output.stdout);
+    assert_eq!(json["ok"], true);
+    assert!(json["data"]["tree"].is_object());
+    assert_eq!(json["data"]["tree"]["roots"], json!(["Webhook"]));
+    assert!(json["data"]["tree"]["edges"].is_array());
+    assert_eq!(json["data"]["tree"]["edges"][0]["from"], "Webhook");
+    assert_eq!(json["data"]["tree"]["edges"][0]["to"], "Set");
+}
+
+#[tokio::test]
 async fn push_json_sanitizes_update_payload_and_refetches_remote() {
     let server = MockServer::start().await;
     let repo = tempdir().expect("tempdir");

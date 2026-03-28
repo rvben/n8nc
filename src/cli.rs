@@ -57,6 +57,10 @@ pub enum Command {
     Activate(IdArgs),
     /// Deactivate a workflow
     Deactivate(IdArgs),
+    /// Archive a workflow (requires session auth)
+    Archive(IdArgs),
+    /// Unarchive a workflow (requires session auth)
+    Unarchive(IdArgs),
     /// Call a webhook URL directly
     Trigger(TriggerArgs),
     /// Format workflow and sidecar files
@@ -353,6 +357,9 @@ pub struct WorkflowShowArgs {
     #[command(flatten)]
     pub remote: RemoteArgs,
     pub file: PathBuf,
+    /// Show execution flow as a tree
+    #[arg(long)]
+    pub tree: bool,
 }
 
 #[derive(Debug, Args)]

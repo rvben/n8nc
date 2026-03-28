@@ -13,6 +13,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
+    tree,
     api::{ApiClient, ExecutionListOptions, ListOptions},
     auth::{
         browser_id_env_var_name, ensure_alias_exists, list_auth_statuses,
@@ -358,6 +359,8 @@ pub async fn run(cli: Cli) -> Result<(), AppError> {
         Command::Diff(args) => cmd_diff(&context, args).await,
         Command::Activate(args) => cmd_activation(&context, args, true).await,
         Command::Deactivate(args) => cmd_activation(&context, args, false).await,
+        Command::Archive(args) => cmd_archive(&context, args, true).await,
+        Command::Unarchive(args) => cmd_archive(&context, args, false).await,
         Command::Trigger(args) => cmd_trigger(&context, args).await,
         Command::Fmt(args) => cmd_fmt(&context, args).await,
         Command::Validate(args) => cmd_validate(&context, args).await,
@@ -2315,24 +2318,56 @@ async fn cmd_workflow_show(context: &Context, args: WorkflowShowArgs) -> Result<
     let webhooks = summarize_workflow_webhooks(&workflow, base_url.as_deref());
     let credentials = summarize_credential_references(std::slice::from_ref(&workflow), None);
 
+    // Build tree data if --tree requested
+    let tree_data = if args.tree {
+        let tree_nodes: Vec<tree::TreeNode> = nodes
+            .iter()
+            .map(|n| tree::TreeNode {
+                name: n.name.clone(),
+                node_type: n.node_type.clone().unwrap_or_default(),
+                credentials: n
+                    .credentials
+                    .iter()
+                    .filter_map(|c| {
+                        c.credential_name
+                            .clone()
+                            .or_else(|| Some(c.credential_type.clone()))
+                    })
+                    .collect(),
+                disabled: n.disabled.unwrap_or(false),
+            })
+            .collect();
+        let tree_conns: Vec<(String, String, String, usize)> = connections
+            .iter()
+            .map(|c| (c.from.clone(), c.to.clone(), c.kind.clone(), c.output_index))
+            .collect();
+        Some((tree_nodes, tree_conns))
+    } else {
+        None
+    };
+
     if context.json {
-        emit_json(
-            "workflow",
-            &json!({
-                "workflow_path": file,
-                "workflow_id": workflow_id(&workflow),
-                "name": workflow_name(&workflow),
-                "active": workflow_active(&workflow),
-                "instance": instance,
-                "node_count": nodes.len(),
-                "connection_count": connections.len(),
-                "credential_count": credentials.len(),
-                "nodes": nodes,
-                "connections": connections,
-                "credentials": credentials,
-                "webhooks": webhooks,
-            }),
-        )
+        let mut data = json!({
+            "workflow_path": file,
+            "workflow_id": workflow_id(&workflow),
+            "name": workflow_name(&workflow),
+            "active": workflow_active(&workflow),
+            "instance": instance,
+            "node_count": nodes.len(),
+            "connection_count": connections.len(),
+            "credential_count": credentials.len(),
+            "nodes": nodes,
+            "connections": connections,
+            "credentials": credentials,
+            "webhooks": webhooks,
+        });
+        if let Some((tree_nodes, tree_conns)) = &tree_data {
+            data.as_object_mut().unwrap().insert(
+                "tree".to_string(),
+                serde_json::to_value(tree::build_tree_data(tree_nodes, tree_conns)).unwrap(),
+            );
+        }
+        emit_json("workflow", &data)
     } else {
         println!(
             "Workflow: {}",
@@ -2346,8 +2381,13 @@ async fn cmd_workflow_show(context: &Context, args: WorkflowShowArgs) -> Result<
         if let Some(instance) = &instance {
             println!("Instance: {instance}");
         }
-        print_workflow_nodes(&nodes);
-        print_workflow_connections(&connections);
+        if let Some((tree_nodes, tree_conns)) = &tree_data {
+            println!();
+            println!("{}", tree::render_tree(tree_nodes, tree_conns));
+        } else {
+            print_workflow_nodes(&nodes);
+            print_workflow_connections(&connections);
+        }
         print_credential_references(&credentials);
         print_workflow_webhooks(&webhooks);
         Ok(())
@@ -3470,6 +3510,165 @@ async fn cmd_activation(context: &Context, args: IdArgs, active: bool) -> Result
         );
         if active_state {
             print_workflow_webhooks(&webhooks);
+        }
+        Ok(())
+    }
+}
+
+fn require_session_auth(
+    alias: &str,
+    command: &'static str,
+) -> Result<(String, String), AppError> {
+    let cookie = resolve_session_cookie(alias, command)?
+        .ok_or_else(|| {
+            AppError::auth(
+                command,
+                format!("Session auth required for {command}. Run `n8nc auth session add {alias}` to configure."),
+            )
+            .with_suggestion(session_auth_setup_hint(alias))
+        })?;
+    let browser_id = resolve_browser_id(alias, command)?
+        .ok_or_else(|| {
+            AppError::auth(
+                command,
+                format!("Browser ID required for {command}. Run `n8nc auth session add {alias}` to configure."),
+            )
+            .with_suggestion(session_auth_setup_hint(alias))
+        })?;
+    Ok((cookie.value, browser_id.value))
+}
+
+async fn cmd_archive(context: &Context, args: IdArgs, archive: bool) -> Result<(), AppError> {
+    let command = if archive { "archive" } else { "unarchive" };
+    let repo = load_loaded_repo(context)?;
+    let alias = resolve_instance_alias(&repo, args.remote.instance.as_deref(), command)?;
+    let (client, _, _base_url) = remote_client(&repo, Some(&alias), command)?;
+
+    // Resolve the workflow via public API
+    let workflow = client.resolve_workflow(&args.identifier).await?;
+    let workflow_id = workflow_id(&workflow).ok_or_else(|| {
+        AppError::api(
+            command,
+            "api.invalid_response",
+            "Workflow payload was missing `id`.",
+        )
+    })?;
+    let active_before = workflow_active(&workflow).unwrap_or(false);
+    let workflow_name_str = workflow_name(&workflow).unwrap_or_else(|| "<unnamed>".to_string());
+
+    // Check if already in the desired state.
+    // Only skip if isArchived is explicitly present — if absent (older n8n), proceed optimistically.
+    let is_archived = workflow.get("isArchived").and_then(Value::as_bool);
+    if archive && is_archived == Some(true) {
+        if context.json {
+            return emit_json(
+                command,
+                &json!({
+                    "action": command,
+                    "instance": alias,
+                    "workflow_id": workflow_id,
+                    "workflow_name": workflow_name_str,
+                    "active_before": active_before,
+                    "active_after": active_before,
+                    "already_archived": true,
+                    "note": "Uses n8n internal API (session auth)"
+                }),
+            );
+        } else {
+            println!("Already archived: \"{workflow_name_str}\" ({workflow_id})");
+            return Ok(());
+        }
+    }
+    if !archive && is_archived == Some(false) {
+        if context.json {
+            return emit_json(
+                command,
+                &json!({
+                    "action": command,
+                    "instance": alias,
+                    "workflow_id": workflow_id,
+                    "workflow_name": workflow_name_str,
+                    "active_before": active_before,
+                    "active_after": active_before,
+                    "already_unarchived": true,
+                    "note": "Uses n8n internal API (session auth)"
+                }),
+            );
+        } else {
+            println!("Already unarchived: \"{workflow_name_str}\" ({workflow_id})");
+            return Ok(());
+        }
+    }
+
+    // Resolve session auth
+    let (session_cookie, browser_id) = require_session_auth(&alias, command)?;
+
+    // Perform the archive/unarchive
+    if archive {
+        client
+            .archive_workflow(&workflow_id, &session_cookie, &browser_id)
+            .await?;
+    } else {
+        client
+            .unarchive_workflow(&workflow_id, &session_cookie, &browser_id)
+            .await?;
+    }
+
+    // Re-fetch to confirm state change. The public API may 404 for archived workflows.
+    let (active_after, refetch_ok) = match client.get_workflow_by_id(&workflow_id).await {
+        Ok(Some(current)) => {
+            let active = workflow_active(&current).unwrap_or(false);
+            // Refresh local artifacts if tracked
+            if let Some(path) = find_existing_workflow_path(&repo, &workflow_id) {
+                let meta_path = sidecar_path_for(&path);
+                if meta_path.exists() {
+                    let meta = load_meta(&meta_path, command)?;
+                    if meta.instance == alias {
+                        let _ = store_workflow(&repo, &alias, &current)?;
+                    }
+                }
+            }
+            (active, true)
+        }
+        Ok(None) if archive => {
+            // Public API may filter out archived workflows — treat as success
+            (false, false)
+        }
+        Ok(None) => {
+            return Err(AppError::not_found(
+                command,
+                format!("Workflow {workflow_id} not found after {command}."),
+            ));
+        }
+        Err(_) if archive => {
+            // Public API may filter out archived workflows — treat as success
+            (false, false)
+        }
+        Err(err) => return Err(err),
+    };
+
+    if context.json {
+        emit_json(
+            command,
+            &json!({
+                "action": command,
+                "instance": alias,
+                "workflow_id": workflow_id,
+                "workflow_name": workflow_name_str,
+                "active_before": active_before,
+                "active_after": active_after,
+                "note": "Uses n8n internal API (session auth)"
+            }),
+        )
+    } else {
+        let action_word = if archive { "Archived" } else { "Unarchived" };
+        println!("{action_word} \"{workflow_name_str}\" ({workflow_id}) on {alias}");
+        if archive && active_before {
+            println!("  Workflow was deactivated automatically");
+        }
+        println!("  Note: uses n8n internal API (session auth required)");
+        if !refetch_ok {
+            println!("  Warning: could not re-fetch workflow after archive (public API may not expose archived workflows)");
         }
         Ok(())
     }

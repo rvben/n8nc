@@ -9,6 +9,7 @@ mod edit;
 mod error;
 mod execute;
 mod repo;
+mod tree;
 mod validate;
 
 use std::process::ExitCode;
