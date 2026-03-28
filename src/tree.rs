@@ -128,7 +128,11 @@ fn find_roots(nodes: &[TreeNode], connections: &[(String, String, String, usize)
 }
 
 fn format_node(node: &TreeNode, ansi: &Ansi) -> String {
-    let mut line = format!("{} {}", ansi.bold(&node.name), ansi.dim(&format!("({})", node.type_name())));
+    let mut line = format!(
+        "{} {}",
+        ansi.bold(&node.name),
+        ansi.dim(&format!("({})", node.type_name()))
+    );
     if let Some(detail) = &node.detail {
         line.push_str(&format!(" {}", ansi.dim(detail)));
     }
@@ -580,7 +584,11 @@ Trigger (n8n-nodes-base.manualTrigger)
     fn test_detail_display() {
         let nodes = vec![
             node_with_detail("Webhook", "n8n-nodes-base.webhook", "path=/api/hook"),
-            node_with_detail("HTTP", "n8n-nodes-base.httpRequest", "GET https://example.com"),
+            node_with_detail(
+                "HTTP",
+                "n8n-nodes-base.httpRequest",
+                "GET https://example.com",
+            ),
             node_with_detail("Set", "n8n-nodes-base.set", "3 fields"),
         ];
         let conns = vec![conn("Webhook", "HTTP"), conn("HTTP", "Set")];
@@ -624,10 +632,7 @@ Trigger (n8n-nodes-base.manualTrigger)
             node("Yes", "n8n-nodes-base.set"),
             node("No", "n8n-nodes-base.noOp"),
         ];
-        let conns = vec![
-            conn_indexed("IF", "Yes", 0),
-            conn_indexed("IF", "No", 1),
-        ];
+        let conns = vec![conn_indexed("IF", "Yes", 0), conn_indexed("IF", "No", 1)];
         let result = render_tree(&nodes, &conns, true);
         // Green branch labels
         assert!(result.contains("\x1b[32mtrue\x1b[0m"));
@@ -636,9 +641,7 @@ Trigger (n8n-nodes-base.manualTrigger)
 
     #[test]
     fn test_no_color_output() {
-        let nodes = vec![
-            node_with_cred("Email", "n8n-nodes-base.emailSend", "Gmail"),
-        ];
+        let nodes = vec![node_with_cred("Email", "n8n-nodes-base.emailSend", "Gmail")];
         let result = render_tree(&nodes, &[], false);
         // No ANSI escape codes
         assert!(!result.contains("\x1b["));

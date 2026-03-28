@@ -1054,8 +1054,7 @@ async fn snapshot_trigger_not_found() {
     Mock::given(method("POST"))
         .and(path("/webhook/missing"))
         .respond_with(
-            ResponseTemplate::new(404)
-                .set_body_json(json!({"message": "Webhook not registered"})),
+            ResponseTemplate::new(404).set_body_json(json!({"message": "Webhook not registered"})),
         )
         .mount(&server)
         .await;
@@ -1339,9 +1338,7 @@ async fn snapshot_workflow_show_success() {
     write_repo(dir.path(), &server.uri());
 
     std::fs::write(
-        dir.path()
-            .join("workflows")
-            .join("webhook.workflow.json"),
+        dir.path().join("workflows").join("webhook.workflow.json"),
         serde_json::to_string_pretty(&json!({
             "id": "wf-1",
             "name": "Incoming Webhook",
@@ -1417,9 +1414,7 @@ async fn snapshot_fmt_success() {
     write_repo(dir.path(), "https://example.test");
 
     std::fs::write(
-        dir.path()
-            .join("workflows")
-            .join("example.workflow.json"),
+        dir.path().join("workflows").join("example.workflow.json"),
         r#"{"connections":{},"active":false,"nodes":[],"name":"Example","id":"wf-1"}"#,
     )
     .expect("write workflow");
@@ -1477,9 +1472,7 @@ async fn snapshot_validate_success() {
     write_repo(dir.path(), "https://example.test");
 
     std::fs::write(
-        dir.path()
-            .join("workflows")
-            .join("clean.workflow.json"),
+        dir.path().join("workflows").join("clean.workflow.json"),
         serde_json::to_string_pretty(&json!({
             "id": "wf-1",
             "name": "Clean Workflow",
@@ -1512,9 +1505,7 @@ async fn snapshot_validate_warnings() {
     write_repo(dir.path(), "https://example.test");
 
     std::fs::write(
-        dir.path()
-            .join("workflows")
-            .join("sensitive.workflow.json"),
+        dir.path().join("workflows").join("sensitive.workflow.json"),
         serde_json::to_string_pretty(&json!({
             "id": "wf-sensitive",
             "name": "Sensitive Workflow",

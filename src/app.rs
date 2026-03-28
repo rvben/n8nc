@@ -1625,10 +1625,7 @@ async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError>
     // Prune local tracked workflows that no longer exist on the remote
     let mut pruned_results: Vec<BatchPruneResult> = Vec::new();
     if args.prune {
-        let remote_ids: BTreeSet<String> = workflows
-            .iter()
-            .filter_map(workflow_id)
-            .collect();
+        let remote_ids: BTreeSet<String> = workflows.iter().filter_map(workflow_id).collect();
 
         let local_statuses = scan_local_status(&repo, &[])?;
         for entry in &local_statuses {
@@ -2403,15 +2400,9 @@ async fn cmd_workflow_show(context: &Context, args: WorkflowShowArgs) -> Result<
         let tree_nodes: Vec<tree::TreeNode> = nodes
             .iter()
             .map(|n| {
-                let detail =
-                    raw_nodes_by_name
-                        .get(&n.name)
-                        .and_then(|raw| {
-                            extract_node_detail(
-                                n.node_type.as_deref().unwrap_or(""),
-                                raw,
-                            )
-                        });
+                let detail = raw_nodes_by_name
+                    .get(&n.name)
+                    .and_then(|raw| extract_node_detail(n.node_type.as_deref().unwrap_or(""), raw));
                 tree::TreeNode {
                     name: n.name.clone(),
                     node_type: n.node_type.clone().unwrap_or_default(),
@@ -5074,11 +5065,8 @@ fn extract_node_detail(node_type: &str, raw_node: &Value) -> Option<String> {
                     // Older set node format with values.boolean/number/string arrays
                     params.get("values").and_then(|v| {
                         let obj = v.as_object()?;
-                        let total: usize = obj
-                            .values()
-                            .filter_map(Value::as_array)
-                            .map(Vec::len)
-                            .sum();
+                        let total: usize =
+                            obj.values().filter_map(Value::as_array).map(Vec::len).sum();
                         Some(total)
                     })
                 });

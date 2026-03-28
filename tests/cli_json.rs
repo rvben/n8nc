@@ -3544,10 +3544,7 @@ async fn pull_all_prune_removes_locally_tracked_workflows_deleted_remotely() {
 
     // wf-2 files should be removed
     assert!(!wf2_path.exists());
-    let wf2_meta = repo
-        .path()
-        .join("workflows")
-        .join("beta--wf-2.meta.json");
+    let wf2_meta = repo.path().join("workflows").join("beta--wf-2.meta.json");
     assert!(!wf2_meta.exists());
     let wf2_cache = repo
         .path()
@@ -3617,10 +3614,7 @@ async fn pull_all_without_prune_keeps_locally_tracked_workflows_deleted_remotely
 
     // wf-2 files should still exist
     assert!(wf2_path.exists());
-    let wf2_meta = repo
-        .path()
-        .join("workflows")
-        .join("beta--wf-2.meta.json");
+    let wf2_meta = repo.path().join("workflows").join("beta--wf-2.meta.json");
     assert!(wf2_meta.exists());
 }
 
