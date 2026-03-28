@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -62,6 +63,14 @@ pub enum Command {
     Fmt(FmtArgs),
     /// Validate local workflow files
     Validate(ValidateArgs),
+    /// Generate shell completions
+    Completions(CompletionsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CompletionsArgs {
+    /// Shell to generate completions for
+    pub shell: Shell,
 }
 
 #[derive(Debug, Args)]

@@ -8,6 +8,7 @@ use std::{
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use clap::CommandFactory;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -343,6 +344,15 @@ pub async fn run(cli: Cli) -> Result<(), AppError> {
         Command::Trigger(args) => cmd_trigger(&context, args).await,
         Command::Fmt(args) => cmd_fmt(&context, args).await,
         Command::Validate(args) => cmd_validate(&context, args).await,
+        Command::Completions(args) => {
+            clap_complete::generate(
+                args.shell,
+                &mut Cli::command(),
+                "n8nc",
+                &mut std::io::stdout(),
+            );
+            Ok(())
+        }
     }
 }
 
