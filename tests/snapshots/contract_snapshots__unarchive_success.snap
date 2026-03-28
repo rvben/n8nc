@@ -1,0 +1,19 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "unarchive",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "action": "unarchive",
+    "instance": "mock",
+    "workflow_id": "wf-1",
+    "workflow_name": "Unarchive Target",
+    "active_before": false,
+    "active_after": false,
+    "note": "Uses n8n internal API (session auth)"
+  }
+}

@@ -1,0 +1,16 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "validate",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "files_checked": 1,
+    "error_count": 0,
+    "warning_count": 0,
+    "diagnostics": []
+  }
+}

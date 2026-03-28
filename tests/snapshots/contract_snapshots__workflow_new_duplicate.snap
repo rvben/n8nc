@@ -1,0 +1,15 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": false,
+  "command": "workflow",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "error": {
+    "code": "validation.failed",
+    "message": "[ERROR_MSG]",
+    "suggestion": "Choose a different path or remove the existing file first."
+  }
+}

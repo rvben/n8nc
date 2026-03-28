@@ -1,0 +1,16 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "workflow",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "workflow_path": "[PATH]",
+    "changed": true,
+    "warning_count": 0,
+    "workflow_id": "wf-draft"
+  }
+}

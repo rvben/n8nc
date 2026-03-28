@@ -276,6 +276,9 @@ pub struct PullArgs {
     /// Only pull inactive workflows (requires --all)
     #[arg(long, requires = "all", conflicts_with = "active")]
     pub inactive: bool,
+    /// Remove local tracked workflows that no longer exist on the remote (requires --all)
+    #[arg(long, requires = "all")]
+    pub prune: bool,
 }
 
 #[derive(Debug, Args)]
@@ -360,6 +363,9 @@ pub struct WorkflowShowArgs {
     /// Show execution flow as a tree
     #[arg(long)]
     pub tree: bool,
+    /// Disable colored output (also respects NO_COLOR env var)
+    #[arg(long)]
+    pub no_color: bool,
 }
 
 #[derive(Debug, Args)]

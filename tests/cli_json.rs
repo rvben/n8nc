@@ -3488,6 +3488,143 @@ async fn pull_without_identifier_or_all_returns_usage_error() {
 }
 
 #[tokio::test]
+async fn pull_all_prune_removes_locally_tracked_workflows_deleted_remotely() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    // Pre-populate two tracked workflows locally
+    let wf1_path = write_tracked_workflow(repo.path(), "mock", "wf-1", "Alpha");
+    let wf2_path = write_tracked_workflow(repo.path(), "mock", "wf-2", "Beta");
+    assert!(wf1_path.exists());
+    assert!(wf2_path.exists());
+
+    // Remote only has wf-1; wf-2 has been deleted remotely
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "wf-1", "name": "Alpha"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": workflow_fixture("wf-1", "Alpha", false)
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("pull")
+        .arg("--all")
+        .arg("--prune")
+        .output()
+        .expect("pull --all --prune");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["pruned"], 1);
+
+    let pruned = envelope["data"]["pruned_results"]
+        .as_array()
+        .expect("pruned_results array");
+    assert_eq!(pruned.len(), 1);
+    assert_eq!(pruned[0]["workflow_id"], "wf-2");
+
+    // wf-2 files should be removed
+    assert!(!wf2_path.exists());
+    let wf2_meta = repo
+        .path()
+        .join("workflows")
+        .join("beta--wf-2.meta.json");
+    assert!(!wf2_meta.exists());
+    let wf2_cache = repo
+        .path()
+        .join(".n8n")
+        .join("cache")
+        .join("mock--wf-2.workflow.json");
+    assert!(!wf2_cache.exists());
+
+    // wf-1 should still exist
+    assert!(wf1_path.exists());
+}
+
+#[tokio::test]
+async fn pull_all_without_prune_keeps_locally_tracked_workflows_deleted_remotely() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    // Pre-populate two tracked workflows locally
+    let wf1_path = write_tracked_workflow(repo.path(), "mock", "wf-1", "Alpha");
+    let wf2_path = write_tracked_workflow(repo.path(), "mock", "wf-2", "Beta");
+    assert!(wf1_path.exists());
+    assert!(wf2_path.exists());
+
+    // Remote only has wf-1; wf-2 has been deleted remotely
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "wf-1", "name": "Alpha"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": workflow_fixture("wf-1", "Alpha", false)
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("pull")
+        .arg("--all")
+        .output()
+        .expect("pull --all without prune");
+
+    assert!(
+        output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["pruned"], 0);
+    assert_eq!(
+        envelope["data"]["pruned_results"]
+            .as_array()
+            .expect("pruned_results array")
+            .len(),
+        0
+    );
+
+    // wf-2 files should still exist
+    assert!(wf2_path.exists());
+    let wf2_meta = repo
+        .path()
+        .join("workflows")
+        .join("beta--wf-2.meta.json");
+    assert!(wf2_meta.exists());
+}
+
+#[tokio::test]
 async fn auth_test_json_verifies_token_against_api() {
     let server = MockServer::start().await;
     let repo = tempdir().expect("tempdir");

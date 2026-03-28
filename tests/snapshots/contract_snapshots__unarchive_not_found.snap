@@ -4,11 +4,11 @@ expression: json
 ---
 {
   "ok": false,
-  "command": "diff",
+  "command": "unarchive",
   "version": "[VERSION]",
   "contract_version": 1,
   "error": {
     "code": "resource.not_found",
-    "message": "[MESSAGE]"
+    "message": "[ERROR_MSG]"
   }
 }

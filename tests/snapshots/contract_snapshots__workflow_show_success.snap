@@ -1,0 +1,46 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "workflow",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "workflow_path": "[PATH]",
+    "workflow_id": "wf-1",
+    "name": "Incoming Webhook",
+    "active": true,
+    "instance": "mock",
+    "node_count": 1,
+    "connection_count": 0,
+    "credential_count": 0,
+    "nodes": [
+      {
+        "name": "Webhook",
+        "node_id": "node-1",
+        "node_type": "n8n-nodes-base.webhook",
+        "type_version": 2.0,
+        "position": [
+          0,
+          0
+        ]
+      }
+    ],
+    "connections": [],
+    "credentials": [],
+    "webhooks": [
+      {
+        "node": "Webhook",
+        "methods": [
+          "POST"
+        ],
+        "path": "orders/new",
+        "webhook_id": "orders/new",
+        "production_url": "[WEBHOOK_URL]",
+        "test_url": "[WEBHOOK_URL]"
+      }
+    ]
+  }
+}

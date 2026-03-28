@@ -3,12 +3,13 @@ source: tests/contract_snapshots.rs
 expression: json
 ---
 {
-  "ok": false,
-  "command": "diff",
+  "ok": true,
+  "command": "fmt",
   "version": "[VERSION]",
   "contract_version": 1,
-  "error": {
-    "code": "resource.not_found",
-    "message": "[MESSAGE]"
+  "data": {
+    "changed": [
+      "[PATH]"
+    ]
   }
 }

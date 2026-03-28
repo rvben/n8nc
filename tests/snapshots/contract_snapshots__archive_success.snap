@@ -1,0 +1,19 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "archive",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "action": "archive",
+    "instance": "mock",
+    "workflow_id": "wf-1",
+    "workflow_name": "Archive Target",
+    "active_before": true,
+    "active_after": true,
+    "note": "Uses n8n internal API (session auth)"
+  }
+}

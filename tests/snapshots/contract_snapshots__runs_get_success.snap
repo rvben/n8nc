@@ -1,0 +1,71 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "runs",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "execution": {
+      "id": "42",
+      "workflowId": "wf-1",
+      "status": "success",
+      "data": {
+        "resultData": {
+          "runData": {
+            "Node A": [
+              {
+                "executionStatus": "success",
+                "executionTime": 42,
+                "data": {
+                  "main": [
+                    [
+                      {
+                        "json": {
+                          "ok": true
+                        }
+                      }
+                    ]
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "workflowData": {
+        "id": "wf-1",
+        "name": "Alpha Workflow"
+      }
+    },
+    "run_data": {
+      "Node A": [
+        {
+          "executionStatus": "success",
+          "executionTime": 42,
+          "data": {
+            "main": [
+              [
+                {
+                  "json": {
+                    "ok": true
+                  }
+                }
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    "node_executions": [
+      {
+        "name": "Node A",
+        "status": "success",
+        "execution_time_ms": 42,
+        "output_items": 1
+      }
+    ]
+  }
+}

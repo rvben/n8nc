@@ -8,6 +8,62 @@ pub struct TreeNode {
     pub node_type: String,
     pub credentials: Vec<String>,
     pub disabled: bool,
+    /// Key parameter summary (e.g. webhook path, HTTP method+URL, set field count)
+    pub detail: Option<String>,
+}
+
+/// ANSI escape helpers for colored tree output.
+struct Ansi {
+    colorize: bool,
+}
+
+impl Ansi {
+    const BOLD: &str = "\x1b[1m";
+    const DIM: &str = "\x1b[2m";
+    const CYAN: &str = "\x1b[36m";
+    const YELLOW: &str = "\x1b[33m";
+    const GREEN: &str = "\x1b[32m";
+    const RESET: &str = "\x1b[0m";
+
+    fn bold(&self, s: &str) -> String {
+        if self.colorize {
+            format!("{}{s}{}", Self::BOLD, Self::RESET)
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn dim(&self, s: &str) -> String {
+        if self.colorize {
+            format!("{}{s}{}", Self::DIM, Self::RESET)
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn cyan(&self, s: &str) -> String {
+        if self.colorize {
+            format!("{}{s}{}", Self::CYAN, Self::RESET)
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn yellow(&self, s: &str) -> String {
+        if self.colorize {
+            format!("{}{s}{}", Self::YELLOW, Self::RESET)
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn green(&self, s: &str) -> String {
+        if self.colorize {
+            format!("{}{s}{}", Self::GREEN, Self::RESET)
+        } else {
+            s.to_string()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,13 +127,16 @@ fn find_roots(nodes: &[TreeNode], connections: &[(String, String, String, usize)
     roots
 }
 
-fn format_node(node: &TreeNode) -> String {
-    let mut line = format!("{} ({})", node.name, node.type_name());
+fn format_node(node: &TreeNode, ansi: &Ansi) -> String {
+    let mut line = format!("{} {}", ansi.bold(&node.name), ansi.dim(&format!("({})", node.type_name())));
+    if let Some(detail) = &node.detail {
+        line.push_str(&format!(" {}", ansi.dim(detail)));
+    }
     for cred in &node.credentials {
-        line.push_str(&format!(" [cred: {cred}]"));
+        line.push_str(&format!(" {}", ansi.cyan(&format!("[cred: {cred}]"))));
     }
     if node.disabled {
-        line.push_str(" [disabled]");
+        line.push_str(&format!(" {}", ansi.yellow("[disabled]")));
     }
     line
 }
@@ -103,7 +162,14 @@ fn derive_label(node_type: &str, output_index: usize, max_outputs: usize) -> Opt
 }
 
 /// Render the execution-flow tree as a string with box-drawing characters.
-pub fn render_tree(nodes: &[TreeNode], connections: &[(String, String, String, usize)]) -> String {
+/// When `colorize` is true, ANSI escape codes are used for styling.
+pub fn render_tree(
+    nodes: &[TreeNode],
+    connections: &[(String, String, String, usize)],
+    colorize: bool,
+) -> String {
+    let ansi = Ansi { colorize };
+
     if nodes.is_empty() {
         return "No nodes in workflow".to_string();
     }
@@ -135,6 +201,7 @@ pub fn render_tree(nodes: &[TreeNode], connections: &[(String, String, String, u
             &mut lines,
             "",
             "",
+            &ansi,
         );
     }
 
@@ -148,7 +215,7 @@ pub fn render_tree(nodes: &[TreeNode], connections: &[(String, String, String, u
         lines.push(String::new());
         lines.push("Unconnected:".to_string());
         for node in &unconnected {
-            lines.push(format!("  {}", format_node(node)));
+            lines.push(format!("  {}", format_node(node, &ansi)));
         }
     }
 
@@ -165,6 +232,7 @@ fn render_subtree(
     lines: &mut Vec<String>,
     prefix: &str,
     connector: &str,
+    ansi: &Ansi,
 ) {
     if visited.contains(name) {
         lines.push(format!("{prefix}{connector}{name} (see above)"));
@@ -173,7 +241,7 @@ fn render_subtree(
     visited.insert(name.to_string());
 
     let node_line = if let Some(node) = node_map.get(name) {
-        format_node(node)
+        format_node(node, ansi)
     } else {
         name.to_string()
     };
@@ -213,8 +281,8 @@ fn render_subtree(
             "\u{251C}\u{2500}\u{2500} "
         };
         let label = derive_label(node_type, *output_index, max_out);
-        let labeled_conn = if let Some(label) = label {
-            format!("{conn}{label} \u{2192} ")
+        let labeled_conn = if let Some(ref label) = label {
+            format!("{conn}{} \u{2192} ", ansi.green(label))
         } else {
             conn.to_string()
         };
@@ -227,6 +295,7 @@ fn render_subtree(
             lines,
             &child_prefix,
             &labeled_conn,
+            ansi,
         );
     }
 
@@ -247,6 +316,7 @@ fn render_subtree(
             lines,
             &child_prefix,
             &labeled_conn,
+            ansi,
         );
     }
 }
@@ -318,6 +388,17 @@ mod tests {
             node_type: node_type.to_string(),
             credentials: vec![],
             disabled: false,
+            detail: None,
+        }
+    }
+
+    fn node_with_detail(name: &str, node_type: &str, detail: &str) -> TreeNode {
+        TreeNode {
+            name: name.to_string(),
+            node_type: node_type.to_string(),
+            credentials: vec![],
+            disabled: false,
+            detail: Some(detail.to_string()),
         }
     }
 
@@ -327,6 +408,7 @@ mod tests {
             node_type: node_type.to_string(),
             credentials: vec![cred.to_string()],
             disabled: false,
+            detail: None,
         }
     }
 
@@ -356,7 +438,7 @@ mod tests {
             conn_indexed("IF", "Yes", 0),
             conn_indexed("IF", "No", 1),
         ];
-        let result = render_tree(&nodes, &conns);
+        let result = render_tree(&nodes, &conns, false);
         assert_eq!(
             result,
             "\
@@ -374,7 +456,7 @@ Webhook (n8n-nodes-base.webhook)
             node("B", "n8n-nodes-base.set"),
         ];
         let conns = vec![conn("A", "B"), conn("B", "A")];
-        let result = render_tree(&nodes, &conns);
+        let result = render_tree(&nodes, &conns, false);
         assert_eq!(
             result,
             "\
@@ -392,7 +474,7 @@ A (n8n-nodes-base.set)
             node("Orphan", "n8n-nodes-base.noOp"),
         ];
         let conns = vec![conn("A", "B")];
-        let result = render_tree(&nodes, &conns);
+        let result = render_tree(&nodes, &conns, false);
         assert_eq!(
             result,
             "\
@@ -406,7 +488,7 @@ Unconnected:
 
     #[test]
     fn test_empty_workflow() {
-        let result = render_tree(&[], &[]);
+        let result = render_tree(&[], &[], false);
         assert_eq!(result, "No nodes in workflow");
     }
 
@@ -420,10 +502,11 @@ Unconnected:
                 node_type: "n8n-nodes-base.noOp".to_string(),
                 credentials: vec![],
                 disabled: true,
+                detail: None,
             },
         ];
         let conns = vec![conn("Trigger", "Email"), conn("Trigger", "Skip")];
-        let result = render_tree(&nodes, &conns);
+        let result = render_tree(&nodes, &conns, false);
         assert!(result.contains("[cred: Gmail]"));
         assert!(result.contains("[disabled]"));
     }
@@ -436,7 +519,7 @@ Unconnected:
             node("End", "n8n-nodes-base.noOp"),
         ];
         let conns = vec![conn("Trigger1", "End")];
-        let result = render_tree(&nodes, &conns);
+        let result = render_tree(&nodes, &conns, false);
         assert!(result.contains("Trigger1"));
         assert!(result.contains("Trigger2"));
     }
@@ -454,7 +537,7 @@ Unconnected:
             conn_indexed("Switch", "A", 0),
             conn_indexed("Switch", "B", 1),
         ];
-        let result = render_tree(&nodes, &conns);
+        let result = render_tree(&nodes, &conns, false);
         assert!(result.contains("output 0"));
         assert!(result.contains("output 1"));
     }
@@ -471,7 +554,7 @@ Unconnected:
             "ai_tool".to_string(),
             0,
         )];
-        let result = render_tree(&nodes, &conns);
+        let result = render_tree(&nodes, &conns, false);
         assert!(result.contains("[ai_tool]"));
     }
 
@@ -483,7 +566,7 @@ Unconnected:
             node("End", "n8n-nodes-base.noOp"),
         ];
         let conns = vec![conn("Trigger", "Set"), conn("Set", "End")];
-        let result = render_tree(&nodes, &conns);
+        let result = render_tree(&nodes, &conns, false);
         assert_eq!(
             result,
             "\
@@ -491,5 +574,73 @@ Trigger (n8n-nodes-base.manualTrigger)
 \u{2514}\u{2500}\u{2500} Set (n8n-nodes-base.set)
     \u{2514}\u{2500}\u{2500} End (n8n-nodes-base.noOp)"
         );
+    }
+
+    #[test]
+    fn test_detail_display() {
+        let nodes = vec![
+            node_with_detail("Webhook", "n8n-nodes-base.webhook", "path=/api/hook"),
+            node_with_detail("HTTP", "n8n-nodes-base.httpRequest", "GET https://example.com"),
+            node_with_detail("Set", "n8n-nodes-base.set", "3 fields"),
+        ];
+        let conns = vec![conn("Webhook", "HTTP"), conn("HTTP", "Set")];
+        let result = render_tree(&nodes, &conns, false);
+        assert!(result.contains("path=/api/hook"));
+        assert!(result.contains("GET https://example.com"));
+        assert!(result.contains("3 fields"));
+        // Detail appears after the type
+        assert!(result.contains("(n8n-nodes-base.webhook) path=/api/hook"));
+    }
+
+    #[test]
+    fn test_color_output() {
+        let nodes = vec![
+            node("Trigger", "n8n-nodes-base.manualTrigger"),
+            node_with_cred("Email", "n8n-nodes-base.emailSend", "Gmail"),
+            TreeNode {
+                name: "Skip".to_string(),
+                node_type: "n8n-nodes-base.noOp".to_string(),
+                credentials: vec![],
+                disabled: true,
+                detail: None,
+            },
+        ];
+        let conns = vec![conn("Trigger", "Email"), conn("Trigger", "Skip")];
+        let result = render_tree(&nodes, &conns, true);
+        // Bold node names
+        assert!(result.contains("\x1b[1mTrigger\x1b[0m"));
+        // Dim type
+        assert!(result.contains("\x1b[2m(n8n-nodes-base.manualTrigger)\x1b[0m"));
+        // Cyan credentials
+        assert!(result.contains("\x1b[36m[cred: Gmail]\x1b[0m"));
+        // Yellow disabled
+        assert!(result.contains("\x1b[33m[disabled]\x1b[0m"));
+    }
+
+    #[test]
+    fn test_color_branch_labels() {
+        let nodes = vec![
+            node("IF", "n8n-nodes-base.if"),
+            node("Yes", "n8n-nodes-base.set"),
+            node("No", "n8n-nodes-base.noOp"),
+        ];
+        let conns = vec![
+            conn_indexed("IF", "Yes", 0),
+            conn_indexed("IF", "No", 1),
+        ];
+        let result = render_tree(&nodes, &conns, true);
+        // Green branch labels
+        assert!(result.contains("\x1b[32mtrue\x1b[0m"));
+        assert!(result.contains("\x1b[32mfalse\x1b[0m"));
+    }
+
+    #[test]
+    fn test_no_color_output() {
+        let nodes = vec![
+            node_with_cred("Email", "n8n-nodes-base.emailSend", "Gmail"),
+        ];
+        let result = render_tree(&nodes, &[], false);
+        // No ANSI escape codes
+        assert!(!result.contains("\x1b["));
     }
 }

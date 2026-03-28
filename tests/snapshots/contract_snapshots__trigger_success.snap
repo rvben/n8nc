@@ -1,0 +1,21 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "trigger",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "status": 200,
+    "headers": {
+      "content-length": "18",
+      "content-type": "application/json",
+      "date": "[DATE]"
+    },
+    "body": {
+      "order_id": "123"
+    }
+  }
+}

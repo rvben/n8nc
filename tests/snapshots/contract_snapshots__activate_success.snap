@@ -3,12 +3,13 @@ source: tests/contract_snapshots.rs
 expression: json
 ---
 {
-  "ok": false,
-  "command": "diff",
+  "ok": true,
+  "command": "activate",
   "version": "[VERSION]",
   "contract_version": 1,
-  "error": {
-    "code": "resource.not_found",
-    "message": "[MESSAGE]"
+  "data": {
+    "workflow_id": "wf-1",
+    "active": true,
+    "webhooks": []
   }
 }

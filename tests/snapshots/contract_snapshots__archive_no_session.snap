@@ -1,0 +1,15 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": false,
+  "command": "archive",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "error": {
+    "code": "auth.failed",
+    "message": "[ERROR_MSG]",
+    "suggestion": "Run `n8nc auth session add mock --cookie <n8n-auth=...> --browser-id <browser-id>` or set N8NC_SESSION_COOKIE_MOCK and N8NC_BROWSER_ID_MOCK."
+  }
+}

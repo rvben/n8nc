@@ -1,0 +1,35 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "runs",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "count": 2,
+    "executions": [
+      {
+        "id": "101",
+        "workflow_id": "wf-1",
+        "workflow_name": "Alpha Workflow",
+        "status": "success",
+        "mode": "trigger",
+        "started_at": "2026-03-26T12:00:00.000Z",
+        "stopped_at": "2026-03-26T12:00:00.250Z",
+        "duration_ms": 250
+      },
+      {
+        "id": "100",
+        "workflow_id": "wf-1",
+        "workflow_name": "Alpha Workflow",
+        "status": "error",
+        "mode": "manual",
+        "started_at": "2026-03-26T11:59:00.000Z",
+        "stopped_at": "2026-03-26T11:59:01.000Z",
+        "duration_ms": 1000
+      }
+    ]
+  }
+}

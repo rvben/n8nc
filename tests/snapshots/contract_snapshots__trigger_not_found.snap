@@ -1,0 +1,26 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": false,
+  "command": "trigger",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "error": {
+    "code": "trigger.http_404",
+    "message": "[ERROR_MSG]",
+    "suggestion": "[SUGGESTION]"
+  },
+  "data": {
+    "status": 404,
+    "headers": {
+      "content-length": "36",
+      "content-type": "application/json",
+      "date": "[DATE]"
+    },
+    "body": {
+      "message": "Webhook not registered"
+    }
+  }
+}

@@ -99,6 +99,14 @@ struct BatchPullResult {
     error: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct BatchPruneResult {
+    workflow_id: String,
+    name: String,
+    instance: String,
+    workflow_path: PathBuf,
+}
+
 fn is_zero(value: &usize) -> bool {
     *value == 0
 }
@@ -1614,11 +1622,68 @@ async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError>
         }
     }
 
+    // Prune local tracked workflows that no longer exist on the remote
+    let mut pruned_results: Vec<BatchPruneResult> = Vec::new();
+    if args.prune {
+        let remote_ids: BTreeSet<String> = workflows
+            .iter()
+            .filter_map(workflow_id)
+            .collect();
+
+        let local_statuses = scan_local_status(&repo, &[])?;
+        for entry in &local_statuses {
+            if entry.state == LocalWorkflowState::Untracked
+                || entry.state == LocalWorkflowState::OrphanedMeta
+            {
+                continue;
+            }
+
+            let Some(ref wf_id) = entry.workflow_id else {
+                continue;
+            };
+            let Some(ref instance) = entry.instance else {
+                continue;
+            };
+
+            if instance != &alias {
+                continue;
+            }
+
+            if remote_ids.contains(wf_id) {
+                continue;
+            }
+
+            let wf_name = entry
+                .name
+                .clone()
+                .unwrap_or_else(|| "<unnamed>".to_string());
+            let workflow_path = entry.file.clone();
+            let meta_path = sidecar_path_for(&workflow_path);
+            let cache_path = cache_snapshot_path(&repo.root, &alias, wf_id);
+
+            let _ = fs::remove_file(&workflow_path);
+            let _ = fs::remove_file(&meta_path);
+            let _ = fs::remove_file(&cache_path);
+
+            if !context.json {
+                println!("Pruned {} ({})", wf_id, workflow_path.display());
+            }
+
+            pruned_results.push(BatchPruneResult {
+                workflow_id: wf_id.clone(),
+                name: wf_name,
+                instance: alias.clone(),
+                workflow_path,
+            });
+        }
+    }
+    let pruned_count = pruned_results.len();
+
     if !context.json {
         println!("---");
         println!(
-            "Pulled: {}, Unchanged: {}, Failed: {}",
-            pulled_count, unchanged_count, failed_count
+            "Pulled: {}, Unchanged: {}, Failed: {}, Pruned: {}",
+            pulled_count, unchanged_count, failed_count, pruned_count
         );
     }
 
@@ -1628,8 +1693,10 @@ async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError>
         "pulled": pulled_count,
         "unchanged": unchanged_count,
         "failed": failed_count,
+        "pruned": pruned_count,
         "warning_count": total_warning_count,
         "results": results,
+        "pruned_results": pruned_results,
     });
 
     if failed_count > 0 {
@@ -2320,21 +2387,46 @@ async fn cmd_workflow_show(context: &Context, args: WorkflowShowArgs) -> Result<
 
     // Build tree data if --tree requested
     let tree_data = if args.tree {
+        // Build a lookup from node name to raw JSON for detail extraction
+        let raw_nodes_by_name: std::collections::HashMap<String, &Value> = workflow
+            .get("nodes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|n| {
+                n.get("name")
+                    .and_then(Value::as_str)
+                    .map(|name| (name.to_string(), n))
+            })
+            .collect();
+
         let tree_nodes: Vec<tree::TreeNode> = nodes
             .iter()
-            .map(|n| tree::TreeNode {
-                name: n.name.clone(),
-                node_type: n.node_type.clone().unwrap_or_default(),
-                credentials: n
-                    .credentials
-                    .iter()
-                    .filter_map(|c| {
-                        c.credential_name
-                            .clone()
-                            .or_else(|| Some(c.credential_type.clone()))
-                    })
-                    .collect(),
-                disabled: n.disabled.unwrap_or(false),
+            .map(|n| {
+                let detail =
+                    raw_nodes_by_name
+                        .get(&n.name)
+                        .and_then(|raw| {
+                            extract_node_detail(
+                                n.node_type.as_deref().unwrap_or(""),
+                                raw,
+                            )
+                        });
+                tree::TreeNode {
+                    name: n.name.clone(),
+                    node_type: n.node_type.clone().unwrap_or_default(),
+                    credentials: n
+                        .credentials
+                        .iter()
+                        .filter_map(|c| {
+                            c.credential_name
+                                .clone()
+                                .or_else(|| Some(c.credential_type.clone()))
+                        })
+                        .collect(),
+                    disabled: n.disabled.unwrap_or(false),
+                    detail,
+                }
             })
             .collect();
         let tree_conns: Vec<(String, String, String, usize)> = connections
@@ -2382,8 +2474,11 @@ async fn cmd_workflow_show(context: &Context, args: WorkflowShowArgs) -> Result<
             println!("Instance: {instance}");
         }
         if let Some((tree_nodes, tree_conns)) = &tree_data {
+            let colorize = !args.no_color
+                && std::env::var_os("NO_COLOR").is_none()
+                && std::io::IsTerminal::is_terminal(&std::io::stdout());
             println!();
-            println!("{}", tree::render_tree(tree_nodes, tree_conns));
+            println!("{}", tree::render_tree(tree_nodes, tree_conns, colorize));
         } else {
             print_workflow_nodes(&nodes);
             print_workflow_connections(&connections);
@@ -3337,6 +3432,12 @@ async fn cmd_diff(context: &Context, args: DiffArgs) -> Result<(), AppError> {
         return Err(AppError::usage(
             "diff",
             "Diff expects a `.workflow.json` file path.",
+        ));
+    }
+    if !file.exists() {
+        return Err(AppError::not_found(
+            "diff",
+            format!("File not found: {}", file.display()),
         ));
     }
     let diff = if args.refresh {
@@ -4942,6 +5043,55 @@ fn summarize_node_credentials(node: &Value) -> Vec<NodeCredentialRow> {
             ))
     });
     rows
+}
+
+/// Extract a key parameter summary from a raw workflow node JSON value.
+/// Returns a short string for display in tree output: webhook path, HTTP method+URL, set field count.
+fn extract_node_detail(node_type: &str, raw_node: &Value) -> Option<String> {
+    let params = raw_node.get("parameters")?;
+    match node_type {
+        "n8n-nodes-base.webhook" => {
+            let path = params.get("path").and_then(Value::as_str)?;
+            Some(format!("path=/{path}"))
+        }
+        "n8n-nodes-base.httpRequest" => {
+            let method = params
+                .get("method")
+                .or_else(|| params.get("requestMethod"))
+                .and_then(Value::as_str)
+                .unwrap_or("GET");
+            let url = params.get("url").and_then(Value::as_str).unwrap_or("?");
+            Some(format!("{method} {url}"))
+        }
+        "n8n-nodes-base.set" => {
+            // Count fields across all assignment types
+            let count = params
+                .get("assignments")
+                .and_then(|a| a.get("assignments"))
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .or_else(|| {
+                    // Older set node format with values.boolean/number/string arrays
+                    params.get("values").and_then(|v| {
+                        let obj = v.as_object()?;
+                        let total: usize = obj
+                            .values()
+                            .filter_map(Value::as_array)
+                            .map(Vec::len)
+                            .sum();
+                        Some(total)
+                    })
+                });
+            count.map(|c| {
+                if c == 1 {
+                    "1 field".to_string()
+                } else {
+                    format!("{c} fields")
+                }
+            })
+        }
+        _ => None,
+    }
 }
 
 fn summarize_credential_references(

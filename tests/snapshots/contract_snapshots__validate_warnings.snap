@@ -1,0 +1,25 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "validate",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "files_checked": 1,
+    "error_count": 0,
+    "warning_count": 1,
+    "diagnostics": [
+      {
+        "code": "workflow.sensitive_field_literal",
+        "severity": "warning",
+        "message": "[DIAG_MSG]",
+        "file": "[PATH]",
+        "path": "$.nodes[0].parameters.password",
+        "suggestion": "Move the value into n8n credentials or an env-backed expression before committing."
+      }
+    ]
+  }
+}
