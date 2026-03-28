@@ -283,12 +283,12 @@ pub fn store_workflow(
 ) -> Result<StoredWorkflow, AppError> {
     let canonical = canonicalize_workflow(workflow)?;
     let workflow_id = workflow_id(&canonical)
-        .ok_or_else(|| AppError::validation("pull", "Workflow payload is missing `id`."))?;
+        .ok_or_else(|| AppError::validation("store", "Workflow payload is missing `id`."))?;
     let workflow_name = workflow_name(&canonical).unwrap_or_else(|| "workflow".to_string());
 
     fs::create_dir_all(workflow_dir(&repo.root, &repo.config)).map_err(|err| {
         AppError::config(
-            "pull",
+            "store",
             format!(
                 "Failed to create workflow directory {}: {err}",
                 workflow_dir(&repo.root, &repo.config).display()
@@ -309,7 +309,7 @@ pub fn store_workflow(
     let rendered_workflow = pretty_json(&canonical)?;
     fs::write(&target_path, rendered_workflow).map_err(|err| {
         AppError::validation(
-            "pull",
+            "store",
             format!("Failed to write {}: {err}", target_path.display()),
         )
     })?;
@@ -334,12 +334,12 @@ pub fn store_workflow(
     let meta_path = sidecar_path_for(&target_path);
     let meta_json = pretty_json(&canonicalize_generic_json(
         &serde_json::to_value(&meta).map_err(|err| {
-            AppError::validation("pull", format!("Failed to serialize metadata: {err}"))
+            AppError::validation("store", format!("Failed to serialize metadata: {err}"))
         })?,
     ))?;
     fs::write(&meta_path, meta_json).map_err(|err| {
         AppError::validation(
-            "pull",
+            "store",
             format!("Failed to write {}: {err}", meta_path.display()),
         )
     })?;
@@ -348,7 +348,7 @@ pub fn store_workflow(
     if let Some(parent) = cache_path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
             AppError::config(
-                "pull",
+                "store",
                 format!(
                     "Failed to create cache directory {}: {err}",
                     parent.display()
@@ -358,7 +358,7 @@ pub fn store_workflow(
     }
     fs::write(&cache_path, pretty_json(&canonical)?).map_err(|err| {
         AppError::validation(
-            "pull",
+            "store",
             format!("Failed to write {}: {err}", cache_path.display()),
         )
     })?;
