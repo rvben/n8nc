@@ -1981,6 +1981,197 @@ async fn push_json_rejects_unsupported_top_level_changes() {
 }
 
 #[tokio::test]
+async fn push_all_json_pushes_modified_workflows() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    let wf1_calls = Arc::new(AtomicUsize::new(0));
+    let wf2_calls = Arc::new(AtomicUsize::new(0));
+
+    let wf1_fixture = workflow_fixture("wf-1", "Alpha", false);
+    let wf2_fixture = workflow_fixture("wf-2", "Beta", false);
+
+    // wf-1: will be modified, so GET is called during pull, then during push (check + re-fetch)
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(JsonSequenceResponder {
+            calls: wf1_calls.clone(),
+            responses: vec![
+                // pull
+                json!({"data": wf1_fixture}),
+                // push: check remote state
+                json!({"data": wf1_fixture}),
+                // push: re-fetch after update
+                json!({"data": {
+                    "id": "wf-1",
+                    "name": "Alpha Renamed",
+                    "active": false,
+                    "nodes": [],
+                    "connections": {}
+                }}),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    // wf-2: not modified, so GET is called during pull only;
+    // push --all sees it as clean so no remote calls needed
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-2"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(JsonSequenceResponder {
+            calls: wf2_calls.clone(),
+            responses: vec![json!({"data": wf2_fixture})],
+        })
+        .mount(&server)
+        .await;
+
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-1",
+                "name": "Alpha Renamed",
+                "active": false,
+                "nodes": [],
+                "connections": {}
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // Pull both workflows
+    let pull1 = base_command(repo.path())
+        .arg("pull")
+        .arg("wf-1")
+        .output()
+        .expect("pull wf-1");
+    assert!(pull1.status.success(), "pull wf-1 failed");
+
+    let pull2 = base_command(repo.path())
+        .arg("pull")
+        .arg("wf-2")
+        .output()
+        .expect("pull wf-2");
+    assert!(pull2.status.success(), "pull wf-2 failed");
+
+    // Modify wf-1's name locally
+    let wf1_path = repo
+        .path()
+        .join("workflows")
+        .join("alpha--wf-1.workflow.json");
+    let mut wf1 = read_json_file(&wf1_path);
+    wf1["name"] = json!("Alpha Renamed");
+    fs::write(
+        &wf1_path,
+        serde_json::to_string_pretty(&wf1).expect("serialize"),
+    )
+    .expect("write modified wf-1");
+
+    // Push --all
+    let push_output = base_command(repo.path())
+        .arg("push")
+        .arg("--all")
+        .output()
+        .expect("push --all");
+
+    assert!(
+        push_output.status.success(),
+        "push --all failed: {}",
+        String::from_utf8_lossy(&push_output.stdout)
+    );
+    let envelope = parse_json(&push_output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "push");
+    assert_eq!(envelope["data"]["pushed"], 1);
+    assert_eq!(envelope["data"]["unchanged"], 1);
+    assert_eq!(envelope["data"]["failed"], 0);
+    assert_eq!(envelope["data"]["total"], 2);
+
+    let results = envelope["data"]["results"]
+        .as_array()
+        .expect("results array");
+    let statuses: BTreeSet<&str> = results
+        .iter()
+        .map(|r| r["status"].as_str().unwrap())
+        .collect();
+    assert!(statuses.contains("pushed"));
+    assert!(statuses.contains("unchanged"));
+}
+
+#[tokio::test]
+async fn push_all_json_skips_clean_workflows() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    let wf1_fixture = workflow_fixture("wf-1", "Alpha", false);
+    let wf2_fixture = workflow_fixture("wf-2", "Beta", false);
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": wf1_fixture})),
+        )
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-2"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": wf2_fixture})),
+        )
+        .mount(&server)
+        .await;
+
+    // Pull both workflows without modifying
+    let pull1 = base_command(repo.path())
+        .arg("pull")
+        .arg("wf-1")
+        .output()
+        .expect("pull wf-1");
+    assert!(pull1.status.success());
+
+    let pull2 = base_command(repo.path())
+        .arg("pull")
+        .arg("wf-2")
+        .output()
+        .expect("pull wf-2");
+    assert!(pull2.status.success());
+
+    // Push --all with no modifications
+    let push_output = base_command(repo.path())
+        .arg("push")
+        .arg("--all")
+        .output()
+        .expect("push --all");
+
+    assert!(
+        push_output.status.success(),
+        "push --all failed: {}",
+        String::from_utf8_lossy(&push_output.stdout)
+    );
+    let envelope = parse_json(&push_output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "push");
+    assert_eq!(envelope["data"]["pushed"], 0);
+    assert_eq!(envelope["data"]["unchanged"], 2);
+    assert_eq!(envelope["data"]["failed"], 0);
+    assert_eq!(envelope["data"]["total"], 2);
+
+    let results = envelope["data"]["results"]
+        .as_array()
+        .expect("results array");
+    assert!(results.iter().all(|r| r["status"] == "unchanged"));
+}
+
+#[tokio::test]
 async fn deactivate_json_waits_for_remote_state_and_updates_tracked_file() {
     let server = MockServer::start().await;
     let repo = tempdir().expect("tempdir");

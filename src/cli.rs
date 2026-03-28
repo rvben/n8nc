@@ -278,7 +278,11 @@ pub struct PullArgs {
 pub struct PushArgs {
     #[command(flatten)]
     pub remote: RemoteArgs,
-    pub file: PathBuf,
+    /// Workflow file to push (required unless --all is set)
+    pub file: Option<PathBuf>,
+    /// Push all modified tracked workflows
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Debug, Args)]
