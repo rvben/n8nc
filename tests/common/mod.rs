@@ -43,7 +43,12 @@ pub fn workflow_fixture(id: &str, name: &str, active: bool) -> Value {
     })
 }
 
-pub fn write_tracked_workflow(root: &Path, alias: &str, id: &str, name: &str) -> std::path::PathBuf {
+pub fn write_tracked_workflow(
+    root: &Path,
+    alias: &str,
+    id: &str,
+    name: &str,
+) -> std::path::PathBuf {
     let workflow_path = root.join("workflows").join(format!(
         "{}--{}.workflow.json",
         name.to_lowercase().replace(' ', "-"),
@@ -64,7 +69,9 @@ pub fn write_tracked_workflow(root: &Path, alias: &str, id: &str, name: &str) ->
     .expect("write tracked workflow");
 
     let slug = name.to_lowercase().replace(' ', "-");
-    let meta_path = root.join("workflows").join(format!("{slug}--{id}.meta.json"));
+    let meta_path = root
+        .join("workflows")
+        .join(format!("{slug}--{id}.meta.json"));
     let local_relpath = format!("workflows/{slug}--{id}.workflow.json");
     fs::write(
         &meta_path,

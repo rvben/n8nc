@@ -318,15 +318,8 @@ impl ApiClient {
         browser_id: &str,
     ) -> Result<(), AppError> {
         let path = format!("workflows/{workflow_id}/archive");
-        self.request_rest_json_optional(
-            Method::POST,
-            &path,
-            &[],
-            None,
-            session_cookie,
-            browser_id,
-        )
-        .await?;
+        self.request_rest_json_optional(Method::POST, &path, &[], None, session_cookie, browser_id)
+            .await?;
         Ok(())
     }
 
@@ -337,15 +330,8 @@ impl ApiClient {
         browser_id: &str,
     ) -> Result<(), AppError> {
         let path = format!("workflows/{workflow_id}/unarchive");
-        self.request_rest_json_optional(
-            Method::POST,
-            &path,
-            &[],
-            None,
-            session_cookie,
-            browser_id,
-        )
-        .await?;
+        self.request_rest_json_optional(Method::POST, &path, &[], None, session_cookie, browser_id)
+            .await?;
         Ok(())
     }
 

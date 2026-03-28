@@ -1,8 +1,8 @@
 mod common;
 
 use common::{
-    base_command, parse_json, write_repo, write_repo_with_alias, write_tracked_workflow,
-    workflow_fixture,
+    base_command, parse_json, workflow_fixture, write_repo, write_repo_with_alias,
+    write_tracked_workflow,
 };
 
 use std::{
@@ -1771,7 +1771,10 @@ async fn workflow_show_tree_json() {
     let dir = tempdir().unwrap();
     write_repo(dir.path(), "http://localhost:9999");
 
-    let wf_path = dir.path().join("workflows").join("test--wf-1.workflow.json");
+    let wf_path = dir
+        .path()
+        .join("workflows")
+        .join("test--wf-1.workflow.json");
     fs::write(
         &wf_path,
         serde_json::to_string_pretty(&json!({
@@ -4008,11 +4011,13 @@ async fn archive_requires_session_auth() {
     assert!(!output.status.success());
     let json = parse_json(&output.stdout);
     assert_eq!(json["ok"], false);
-    assert!(json["error"]["message"]
-        .as_str()
-        .unwrap()
-        .to_lowercase()
-        .contains("session"));
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("session")
+    );
 }
 
 #[tokio::test]
@@ -4029,12 +4034,10 @@ async fn archive_not_found() {
 
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({
-                "data": [],
-                "nextCursor": null
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [],
+            "nextCursor": null
+        })))
         .mount(&server)
         .await;
 

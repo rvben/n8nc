@@ -42,10 +42,7 @@ fn build_adjacency(
 /// Find nodes that have no incoming main connections and participate in at least one connection.
 /// Nodes with zero connections are treated as unconnected, not roots.
 /// If all connected nodes form cycles (no natural root), pick the first connected node.
-fn find_roots(
-    nodes: &[TreeNode],
-    connections: &[(String, String, String, usize)],
-) -> Vec<String> {
+fn find_roots(nodes: &[TreeNode], connections: &[(String, String, String, usize)]) -> Vec<String> {
     let has_incoming: HashSet<&str> = connections
         .iter()
         .filter(|(_, _, kind, _)| kind == "main")
@@ -57,13 +54,17 @@ fn find_roots(
         .collect();
     let roots: Vec<String> = nodes
         .iter()
-        .filter(|n| !has_incoming.contains(n.name.as_str()) && participates.contains(n.name.as_str()))
+        .filter(|n| {
+            !has_incoming.contains(n.name.as_str()) && participates.contains(n.name.as_str())
+        })
         .map(|n| n.name.clone())
         .collect();
     // If no natural roots but there are connections, pick the first connected node to break cycles
     if roots.is_empty()
         && !connections.is_empty()
-        && let Some(first) = nodes.iter().find(|n| participates.contains(n.name.as_str()))
+        && let Some(first) = nodes
+            .iter()
+            .find(|n| participates.contains(n.name.as_str()))
     {
         return vec![first.name.clone()];
     }
@@ -92,7 +93,11 @@ fn derive_label(node_type: &str, output_index: usize, max_outputs: usize) -> Opt
         return None;
     }
     if node_type == "n8n-nodes-base.if" {
-        return Some(if output_index == 0 { "true".to_string() } else { "false".to_string() });
+        return Some(if output_index == 0 {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        });
     }
     Some(format!("output {output_index}"))
 }
@@ -174,10 +179,7 @@ fn render_subtree(
     };
     lines.push(format!("{prefix}{connector}{node_line}"));
 
-    let children: Vec<(String, String, usize)> = adj
-        .get(name)
-        .cloned()
-        .unwrap_or_default();
+    let children: Vec<(String, String, usize)> = adj.get(name).cloned().unwrap_or_default();
 
     // Separate main and non-main connections
     let main_children: Vec<_> = children.iter().filter(|(_, k, _)| k == "main").collect();
@@ -189,16 +191,27 @@ fn render_subtree(
         format!(
             "{}{}",
             prefix,
-            if connector.starts_with('\u{251C}') { "\u{2502}   " } else { "    " }
+            if connector.starts_with('\u{251C}') {
+                "\u{2502}   "
+            } else {
+                "    "
+            }
         )
     };
 
-    let node_type = node_map.get(name).map(|n| n.node_type.as_str()).unwrap_or("");
+    let node_type = node_map
+        .get(name)
+        .map(|n| n.node_type.as_str())
+        .unwrap_or("");
     let max_out = max_outputs.get(name).copied().unwrap_or(1);
 
     for (idx, (target, _kind, output_index)) in main_children.iter().enumerate() {
         let is_last = idx == main_children.len() - 1 && other_children.is_empty();
-        let conn = if is_last { "\u{2514}\u{2500}\u{2500} " } else { "\u{251C}\u{2500}\u{2500} " };
+        let conn = if is_last {
+            "\u{2514}\u{2500}\u{2500} "
+        } else {
+            "\u{251C}\u{2500}\u{2500} "
+        };
         let label = derive_label(node_type, *output_index, max_out);
         let labeled_conn = if let Some(label) = label {
             format!("{conn}{label} \u{2192} ")
@@ -219,7 +232,11 @@ fn render_subtree(
 
     for (idx, (target, kind, _output_index)) in other_children.iter().enumerate() {
         let is_last = idx == other_children.len() - 1;
-        let conn = if is_last { "\u{2514}\u{2500}\u{2500} " } else { "\u{251C}\u{2500}\u{2500} " };
+        let conn = if is_last {
+            "\u{2514}\u{2500}\u{2500} "
+        } else {
+            "\u{251C}\u{2500}\u{2500} "
+        };
         let labeled_conn = format!("{conn}[{kind}] \u{2192} ");
         render_subtree(
             target,
@@ -236,14 +253,26 @@ fn render_subtree(
 
 /// Build structured tree data for JSON output.
 /// Uses DFS from roots to find reachable nodes, consistent with render_tree.
-pub fn build_tree_data(nodes: &[TreeNode], connections: &[(String, String, String, usize)]) -> TreeData {
+pub fn build_tree_data(
+    nodes: &[TreeNode],
+    connections: &[(String, String, String, usize)],
+) -> TreeData {
     let roots = find_roots(nodes, connections);
     let adj = build_adjacency(connections);
     let edges: Vec<TreeEdge> = connections
         .iter()
         .map(|(from, to, kind, output_index)| {
-            let node_type = nodes.iter().find(|n| n.name == *from).map(|n| n.node_type.as_str()).unwrap_or("");
-            let max_out = connections.iter().filter(|(f, _, _, _)| f == from).map(|(_, _, _, idx)| idx + 1).max().unwrap_or(1);
+            let node_type = nodes
+                .iter()
+                .find(|n| n.name == *from)
+                .map(|n| n.node_type.as_str())
+                .unwrap_or("");
+            let max_out = connections
+                .iter()
+                .filter(|(f, _, _, _)| f == from)
+                .map(|(_, _, _, idx)| idx + 1)
+                .max()
+                .unwrap_or(1);
             TreeEdge {
                 from: from.clone(),
                 to: to.clone(),
@@ -272,7 +301,11 @@ pub fn build_tree_data(nodes: &[TreeNode], connections: &[(String, String, Strin
         .map(|n| n.name.clone())
         .collect();
 
-    TreeData { roots, edges, unconnected }
+    TreeData {
+        roots,
+        edges,
+        unconnected,
+    }
 }
 
 #[cfg(test)]
@@ -302,7 +335,12 @@ mod tests {
     }
 
     fn conn_indexed(from: &str, to: &str, output_index: usize) -> (String, String, String, usize) {
-        (from.to_string(), to.to_string(), "main".to_string(), output_index)
+        (
+            from.to_string(),
+            to.to_string(),
+            "main".to_string(),
+            output_index,
+        )
     }
 
     #[test]
@@ -427,9 +465,12 @@ Unconnected:
             node("Agent", "n8n-nodes-base.agent"),
             node("Tool", "n8n-nodes-base.httpRequest"),
         ];
-        let conns = vec![
-            ("Agent".to_string(), "Tool".to_string(), "ai_tool".to_string(), 0),
-        ];
+        let conns = vec![(
+            "Agent".to_string(),
+            "Tool".to_string(),
+            "ai_tool".to_string(),
+            0,
+        )];
         let result = render_tree(&nodes, &conns);
         assert!(result.contains("[ai_tool]"));
     }

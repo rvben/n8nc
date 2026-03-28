@@ -13,7 +13,6 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
-    tree,
     api::{ApiClient, ExecutionListOptions, ListOptions},
     auth::{
         browser_id_env_var_name, ensure_alias_exists, list_auth_statuses,
@@ -56,6 +55,7 @@ use crate::{
         refresh_local_status, scan_local_status, sidecar_path_for, store_workflow, workflow_active,
         workflow_id, workflow_name, workflow_updated_at,
     },
+    tree,
     validate::{Severity, sensitive_data_diagnostics, validate_workflow_path},
 };
 
@@ -3515,10 +3515,7 @@ async fn cmd_activation(context: &Context, args: IdArgs, active: bool) -> Result
     }
 }
 
-fn require_session_auth(
-    alias: &str,
-    command: &'static str,
-) -> Result<(String, String), AppError> {
+fn require_session_auth(alias: &str, command: &'static str) -> Result<(String, String), AppError> {
     let cookie = resolve_session_cookie(alias, command)?
         .ok_or_else(|| {
             AppError::auth(
@@ -3668,7 +3665,9 @@ async fn cmd_archive(context: &Context, args: IdArgs, archive: bool) -> Result<(
         }
         println!("  Note: uses n8n internal API (session auth required)");
         if !refetch_ok {
-            println!("  Warning: could not re-fetch workflow after archive (public API may not expose archived workflows)");
+            println!(
+                "  Warning: could not re-fetch workflow after archive (public API may not expose archived workflows)"
+            );
         }
         Ok(())
     }

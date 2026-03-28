@@ -68,10 +68,7 @@ async fn snapshot_ls_success() {
         .mount(&server)
         .await;
 
-    let output = base_command(dir.path())
-        .arg("ls")
-        .output()
-        .expect("run ls");
+    let output = base_command(dir.path()).arg("ls").output().expect("run ls");
 
     assert!(output.status.success());
     let json = parse_json(&output.stdout);
@@ -301,9 +298,9 @@ async fn snapshot_push_success() {
         .respond_with(JsonSequenceResponder {
             calls: get_calls,
             responses: vec![
-                wf_fixture.clone(),   // pull
-                wf_fixture.clone(),   // push: check remote hash
-                wf_updated.clone(),   // push: re-fetch after update
+                wf_fixture.clone(), // pull
+                wf_fixture.clone(), // push: check remote hash
+                wf_updated.clone(), // push: re-fetch after update
             ],
         })
         .mount(&server)
@@ -326,11 +323,13 @@ async fn snapshot_push_success() {
     assert!(pull_output.status.success());
 
     // Modify the local workflow name
-    let wf_path = dir.path().join("workflows").join("example--wf-1.workflow.json");
-    let mut wf: Value = serde_json::from_str(
-        &std::fs::read_to_string(&wf_path).expect("read workflow"),
-    )
-    .expect("parse workflow");
+    let wf_path = dir
+        .path()
+        .join("workflows")
+        .join("example--wf-1.workflow.json");
+    let mut wf: Value =
+        serde_json::from_str(&std::fs::read_to_string(&wf_path).expect("read workflow"))
+            .expect("parse workflow");
     wf["name"] = json!("Example Renamed");
     std::fs::write(
         &wf_path,
@@ -389,7 +388,7 @@ async fn snapshot_push_conflict() {
             calls: get_calls,
             responses: vec![
                 wf_original.clone(),       // pull
-                wf_remote_changed.clone(),  // push: check remote hash -> mismatch
+                wf_remote_changed.clone(), // push: check remote hash -> mismatch
             ],
         })
         .mount(&server)
@@ -404,11 +403,13 @@ async fn snapshot_push_conflict() {
     assert!(pull_output.status.success());
 
     // Modify locally
-    let wf_path = dir.path().join("workflows").join("example--wf-1.workflow.json");
-    let mut wf: Value = serde_json::from_str(
-        &std::fs::read_to_string(&wf_path).expect("read workflow"),
-    )
-    .expect("parse workflow");
+    let wf_path = dir
+        .path()
+        .join("workflows")
+        .join("example--wf-1.workflow.json");
+    let mut wf: Value =
+        serde_json::from_str(&std::fs::read_to_string(&wf_path).expect("read workflow"))
+            .expect("parse workflow");
     wf["name"] = json!("Example Local Edit");
     std::fs::write(
         &wf_path,
@@ -553,10 +554,9 @@ async fn snapshot_diff_success() {
         .expect("workflow path");
 
     // Modify the local workflow
-    let mut wf: Value = serde_json::from_str(
-        &std::fs::read_to_string(workflow_path).expect("read workflow"),
-    )
-    .expect("parse workflow");
+    let mut wf: Value =
+        serde_json::from_str(&std::fs::read_to_string(workflow_path).expect("read workflow"))
+            .expect("parse workflow");
     wf["name"] = json!("Diff Example Modified");
     std::fs::write(
         workflow_path,
