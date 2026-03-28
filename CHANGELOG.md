@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+
+## [0.2.1](https://github.com/rvben/n8nc/compare/v0.2.0...v0.2.1) - 2026-03-28
+
+### Added
+
+- batch 2 improvements ([f66fcbb](https://github.com/rvben/n8nc/commit/f66fcbb6bcb3601a251899cdbbd8095e6fc4e104))
+
 ## [0.2.0](https://github.com/rvben/n8nc/compare/v0.1.0...v0.2.0) - 2026-03-28
 
 ### Added
