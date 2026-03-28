@@ -3891,18 +3891,198 @@ async fn fmt_check_returns_nonzero_when_formatting_needed() {
     );
 }
 
-fn base_command(repo_root: &Path) -> Command {
-    let mut command = Command::cargo_bin("n8nc").expect("n8nc binary");
-    command
-        .arg("--json")
-        .arg("--repo-root")
-        .arg(repo_root)
-        .env("N8NC_TOKEN_MOCK", "test-token");
-    command
+#[tokio::test]
+async fn archive_success() {
+    let server = MockServer::start().await;
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("X-N8N-API-KEY", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "wf-1",
+            "name": "Test Workflow",
+            "active": true,
+            "isArchived": false,
+            "settings": {},
+            "nodes": [],
+            "connections": {}
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/rest/workflows/wf-1/archive"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let output = base_command(dir.path())
+        .env("N8NC_SESSION_COOKIE_MOCK", "test-session-cookie")
+        .env("N8NC_BROWSER_ID_MOCK", "test-browser-id")
+        .arg("archive")
+        .arg("wf-1")
+        .output()
+        .expect("run archive");
+
+    assert!(output.status.success());
+    let json = parse_json(&output.stdout);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["action"], "archive");
+    assert_eq!(json["data"]["workflow_id"], "wf-1");
+    assert_eq!(json["data"]["active_before"], true);
 }
 
-fn write_repo(root: &Path, base_url: &str) {
-    write_repo_with_alias(root, base_url, "mock");
+#[tokio::test]
+async fn unarchive_success() {
+    let server = MockServer::start().await;
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("X-N8N-API-KEY", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "wf-1",
+            "name": "Test Workflow",
+            "active": false,
+            "isArchived": true,
+            "settings": {},
+            "nodes": [],
+            "connections": {}
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/rest/workflows/wf-1/unarchive"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let output = base_command(dir.path())
+        .env("N8NC_SESSION_COOKIE_MOCK", "test-session-cookie")
+        .env("N8NC_BROWSER_ID_MOCK", "test-browser-id")
+        .arg("unarchive")
+        .arg("wf-1")
+        .output()
+        .expect("run unarchive");
+
+    assert!(output.status.success());
+    let json = parse_json(&output.stdout);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["action"], "unarchive");
+    assert_eq!(json["data"]["workflow_id"], "wf-1");
+    assert_eq!(json["data"]["active_before"], false);
+}
+
+#[tokio::test]
+async fn archive_requires_session_auth() {
+    let server = MockServer::start().await;
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("X-N8N-API-KEY", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "wf-1",
+            "name": "Test Workflow",
+            "active": true,
+            "isArchived": false,
+            "settings": {},
+            "nodes": [],
+            "connections": {}
+        })))
+        .mount(&server)
+        .await;
+
+    // No session cookie env vars set — should fail with auth error
+    let output = base_command(dir.path())
+        .arg("archive")
+        .arg("wf-1")
+        .output()
+        .expect("run archive");
+
+    assert!(!output.status.success());
+    let json = parse_json(&output.stdout);
+    assert_eq!(json["ok"], false);
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("session"));
+}
+
+#[tokio::test]
+async fn archive_not_found() {
+    let server = MockServer::start().await;
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-missing"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({
+                "data": [],
+                "nextCursor": null
+            })),
+        )
+        .mount(&server)
+        .await;
+
+    let output = base_command(dir.path())
+        .env("N8NC_SESSION_COOKIE_MOCK", "test-session-cookie")
+        .env("N8NC_BROWSER_ID_MOCK", "test-browser-id")
+        .arg("archive")
+        .arg("wf-missing")
+        .output()
+        .expect("run archive");
+
+    assert!(!output.status.success());
+    let json = parse_json(&output.stdout);
+    assert_eq!(json["ok"], false);
+}
+
+#[tokio::test]
+async fn archive_already_archived() {
+    let server = MockServer::start().await;
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "wf-1",
+            "name": "Test",
+            "active": false,
+            "isArchived": true,
+            "settings": {},
+            "nodes": [],
+            "connections": {}
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(dir.path())
+        .env("N8NC_SESSION_COOKIE_MOCK", "test-session-cookie")
+        .env("N8NC_BROWSER_ID_MOCK", "test-browser-id")
+        .arg("archive")
+        .arg("wf-1")
+        .output()
+        .expect("run archive");
+
+    assert!(output.status.success());
+    let json = parse_json(&output.stdout);
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["data"]["already_archived"], true);
 }
 
 fn write_repo_with_execute_command(

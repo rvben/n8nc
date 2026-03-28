@@ -311,6 +311,44 @@ impl ApiClient {
         .map(|_| ())
     }
 
+    pub async fn archive_workflow(
+        &self,
+        workflow_id: &str,
+        session_cookie: &str,
+        browser_id: &str,
+    ) -> Result<(), AppError> {
+        let path = format!("workflows/{workflow_id}/archive");
+        self.request_rest_json_optional(
+            Method::POST,
+            &path,
+            &[],
+            None,
+            session_cookie,
+            browser_id,
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn unarchive_workflow(
+        &self,
+        workflow_id: &str,
+        session_cookie: &str,
+        browser_id: &str,
+    ) -> Result<(), AppError> {
+        let path = format!("workflows/{workflow_id}/unarchive");
+        self.request_rest_json_optional(
+            Method::POST,
+            &path,
+            &[],
+            None,
+            session_cookie,
+            browser_id,
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn delete_workflow(&self, workflow_id: &str) -> Result<(), AppError> {
         self.request_json_optional(
             Method::DELETE,
@@ -688,6 +726,12 @@ impl ApiClient {
 
         if status == StatusCode::NOT_FOUND {
             return Ok(None);
+        }
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(AppError::auth(
+                self.command,
+                "Session credentials expired or invalid. Re-run `n8nc auth session add` to update.",
+            ));
         }
 
         if !status.is_success() {
