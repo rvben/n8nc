@@ -63,6 +63,7 @@ n8nc get <id-or-name>              Fetch and print a workflow
 n8nc pull <id-or-name>             Pull a workflow into the repo
 n8nc pull --all [--active]         Pull all workflows
 n8nc push <file>                   Push a tracked workflow back
+n8nc push --all                    Push all modified tracked workflows
 n8nc activate <id-or-name>         Activate a workflow
 n8nc deactivate <id-or-name>       Deactivate a workflow
 
@@ -86,6 +87,7 @@ n8nc diff <file> [--refresh]       Show local changes
 n8nc trigger <url>                 Call a webhook URL
 n8nc fmt [--check]                 Format workflow files
 n8nc validate                      Validate workflow files
+n8nc completions <shell>           Generate shell completions
 ```
 
 ## Repo model
