@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::common::{
-    absolutize, client_for_instance, emit_json, load_loaded_repo, truncate, Context,
+    Context, absolutize, client_for_instance, emit_json, load_loaded_repo, truncate,
 };
 
 // ---------------------------------------------------------------------------

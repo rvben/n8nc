@@ -18,13 +18,10 @@ use crate::{
 use super::{
     auth::session_auth_setup_hint,
     common::{
-        emit_edit_result, emit_json, load_loaded_repo, remote_client, resolve_local_file_path,
-        truncate, Context,
+        Context, emit_edit_result, emit_json, load_loaded_repo, remote_client,
+        resolve_local_file_path, truncate,
     },
-    workflow::{
-        CredentialReferenceRow,
-        summarize_credential_references,
-    },
+    workflow::{CredentialReferenceRow, summarize_credential_references},
 };
 
 use serde::Serialize;
@@ -56,7 +53,10 @@ struct CredentialListResult {
 // Commands
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn cmd_credential(context: &Context, args: CredentialArgs) -> Result<(), AppError> {
+pub(crate) async fn cmd_credential(
+    context: &Context,
+    args: CredentialArgs,
+) -> Result<(), AppError> {
     match args.command {
         CredentialCommand::Ls(args) => cmd_credential_list(context, args).await,
         CredentialCommand::Schema(args) => cmd_credential_schema(context, args).await,

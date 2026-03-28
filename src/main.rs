@@ -9,6 +9,7 @@ mod config;
 mod edit;
 mod error;
 mod execute;
+mod lint;
 mod repo;
 mod tree;
 mod validate;

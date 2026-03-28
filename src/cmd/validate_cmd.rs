@@ -8,7 +8,7 @@ use crate::{
     validate::{Severity, validate_workflow_path},
 };
 
-use super::common::{emit_json, Context};
+use super::common::{Context, emit_json};
 
 // ---------------------------------------------------------------------------
 // Commands

@@ -67,6 +67,10 @@ pub enum Command {
     Fmt(FmtArgs),
     /// Validate local workflow files
     Validate(ValidateArgs),
+    /// Lint workflow files against configurable rules
+    Lint(LintArgs),
+    /// Search local workflow files for patterns
+    Search(SearchArgs),
     /// Generate shell completions
     Completions(CompletionsArgs),
 }
@@ -211,6 +215,8 @@ pub enum RunsCommand {
     Get(RunsGetArgs),
     /// Watch recent executions for changes
     Watch(RunsWatchArgs),
+    /// Show execution statistics
+    Stats(RunsStatsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -259,6 +265,16 @@ pub struct RunsWatchArgs {
     /// Number of polls to perform before exiting
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     pub iterations: Option<u32>,
+}
+
+#[derive(Debug, Args)]
+pub struct RunsStatsArgs {
+    #[command(flatten)]
+    pub remote: RemoteArgs,
+    #[command(flatten)]
+    pub time: RunsTimeArgs,
+    /// Workflow ID, name, or file path
+    pub workflow: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -643,4 +659,32 @@ pub struct FmtArgs {
 pub struct ValidateArgs {
     #[arg(value_name = "PATH")]
     pub paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct LintArgs {
+    /// Workflow files to lint (defaults to all tracked workflows)
+    #[arg(value_name = "PATH")]
+    pub paths: Vec<PathBuf>,
+    /// Run only the specified rule
+    #[arg(long, value_name = "RULE")]
+    pub rule: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    /// Text pattern to search for in workflow JSON
+    pub query: Option<String>,
+    /// Filter by node type (substring match)
+    #[arg(long, value_name = "TYPE")]
+    pub node_type: Option<String>,
+    /// Filter by credential name or type
+    #[arg(long, value_name = "NAME")]
+    pub credential: Option<String>,
+    /// Filter by expression content inside ={{...}}
+    #[arg(long, value_name = "PATTERN")]
+    pub expression: Option<String>,
+    /// Use case-sensitive matching
+    #[arg(long)]
+    pub case_sensitive: bool,
 }

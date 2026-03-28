@@ -1,8 +1,4 @@
-use std::{
-    collections::BTreeSet,
-    fs,
-    path::PathBuf,
-};
+use std::{collections::BTreeSet, fs, path::PathBuf};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -21,7 +17,7 @@ use crate::{
 };
 
 use super::common::{
-    emit_json, is_zero, load_loaded_repo, print_sensitive_warning_summary, remote_client, Context,
+    Context, emit_json, is_zero, load_loaded_repo, print_sensitive_warning_summary, remote_client,
 };
 
 #[derive(Debug, Serialize)]

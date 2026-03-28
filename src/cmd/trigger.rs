@@ -1,11 +1,8 @@
-use crate::{
-    cli::TriggerArgs,
-    error::AppError,
-};
+use crate::{cli::TriggerArgs, error::AppError};
 
 use super::common::{
-    emit_json, load_loaded_repo, parse_pairs, print_response_body, read_request_body,
-    remote_client, Context,
+    Context, emit_json, load_loaded_repo, parse_pairs, print_response_body, read_request_body,
+    remote_client,
 };
 
 // ---------------------------------------------------------------------------

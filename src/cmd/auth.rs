@@ -16,7 +16,7 @@ use crate::{
     error::AppError,
 };
 
-use super::common::{emit_json, load_loaded_repo, remote_client, Context};
+use super::common::{Context, emit_json, load_loaded_repo, remote_client};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct AuthListRow {

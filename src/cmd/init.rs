@@ -8,7 +8,7 @@ use crate::{
     error::AppError,
 };
 
-use super::common::{emit_json, Context};
+use super::common::{Context, emit_json};
 
 pub(crate) async fn cmd_init(context: &Context, args: InitArgs) -> Result<(), AppError> {
     let root = if let Some(path) = &context.repo_root {
@@ -43,6 +43,7 @@ pub(crate) async fn cmd_init(context: &Context, args: InitArgs) -> Result<(), Ap
         default_instance: args.instance,
         workflow_dir: args.workflow_dir,
         instances,
+        lint: None,
     };
 
     save_repo_config(&root, &config)?;

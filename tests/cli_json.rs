@@ -4319,3 +4319,709 @@ fn parse_json_lines(bytes: &[u8]) -> Vec<Value> {
         .map(|line| serde_json::from_str(line).expect("valid json line"))
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// search
+// ---------------------------------------------------------------------------
+
+fn write_workflow_file(root: &Path, filename: &str, workflow: &Value) {
+    let workflow_dir = root.join("workflows");
+    fs::create_dir_all(&workflow_dir).expect("create workflows dir");
+    fs::write(
+        workflow_dir.join(filename),
+        serde_json::to_string_pretty(workflow).expect("serialize workflow"),
+    )
+    .expect("write workflow file");
+}
+
+#[test]
+fn search_text_finds_matching_node() {
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), "http://localhost:1234");
+
+    let workflow = json!({
+        "id": "wf-42",
+        "name": "Order Processor",
+        "active": false,
+        "nodes": [
+            {
+                "name": "HTTP Request",
+                "type": "n8n-nodes-base.httpRequest",
+                "parameters": {
+                    "url": "https://api.example.com/orders",
+                    "method": "GET"
+                }
+            }
+        ],
+        "connections": {}
+    });
+    write_workflow_file(
+        dir.path(),
+        "order-processor--wf-42.workflow.json",
+        &workflow,
+    );
+
+    let output = base_command(dir.path())
+        .args(["search", "example.com"])
+        .output()
+        .expect("run search");
+
+    assert!(output.status.success(), "exit 0");
+    let json = parse_json(output.stdout.as_slice());
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["command"], "search");
+    assert_eq!(json["data"]["workflows_matched"], 1);
+    assert!(json["data"]["total_matches"].as_u64().unwrap() >= 1);
+
+    let results = json["data"]["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["workflow_name"], "Order Processor");
+
+    let matches = results[0]["matches"].as_array().unwrap();
+    assert!(
+        matches
+            .iter()
+            .any(|m| m["value"].as_str().unwrap().contains("example.com")),
+        "should find example.com in matches"
+    );
+}
+
+#[test]
+fn search_node_type_filter() {
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), "http://localhost:1234");
+
+    let workflow = json!({
+        "id": "wf-10",
+        "name": "Webhook Flow",
+        "active": false,
+        "nodes": [
+            {
+                "name": "Webhook",
+                "type": "n8n-nodes-base.webhook",
+                "parameters": {"path": "/hook"}
+            },
+            {
+                "name": "Code",
+                "type": "n8n-nodes-base.code",
+                "parameters": {}
+            }
+        ],
+        "connections": {}
+    });
+    write_workflow_file(dir.path(), "webhook-flow--wf-10.workflow.json", &workflow);
+
+    let output = base_command(dir.path())
+        .args(["search", "--node-type", "webhook"])
+        .output()
+        .expect("run search");
+
+    assert!(output.status.success(), "exit 0");
+    let json = parse_json(output.stdout.as_slice());
+    assert_eq!(json["data"]["total_matches"], 1);
+
+    let matches = json["data"]["results"][0]["matches"].as_array().unwrap();
+    assert_eq!(matches[0]["node_name"], "Webhook");
+    assert_eq!(matches[0]["node_type"], "n8n-nodes-base.webhook");
+}
+
+#[test]
+fn search_credential_filter() {
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), "http://localhost:1234");
+
+    let workflow = json!({
+        "id": "wf-20",
+        "name": "Slack Notifier",
+        "active": false,
+        "nodes": [
+            {
+                "name": "Send Message",
+                "type": "n8n-nodes-base.slack",
+                "parameters": {"channel": "#general"},
+                "credentials": {
+                    "slackApi": {
+                        "id": "cred-1",
+                        "name": "Slack Production"
+                    }
+                }
+            }
+        ],
+        "connections": {}
+    });
+    write_workflow_file(dir.path(), "slack-notifier--wf-20.workflow.json", &workflow);
+
+    let output = base_command(dir.path())
+        .args(["search", "--credential", "Slack"])
+        .output()
+        .expect("run search");
+
+    assert!(output.status.success(), "exit 0");
+    let json = parse_json(output.stdout.as_slice());
+    assert_eq!(json["data"]["total_matches"], 1);
+    assert_eq!(
+        json["data"]["results"][0]["matches"][0]["node_name"],
+        "Send Message"
+    );
+}
+
+#[test]
+fn search_expression_filter() {
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), "http://localhost:1234");
+
+    let workflow = json!({
+        "id": "wf-30",
+        "name": "Expression Flow",
+        "active": false,
+        "nodes": [
+            {
+                "name": "Set",
+                "type": "n8n-nodes-base.set",
+                "parameters": {
+                    "email": "={{ $json.email }}",
+                    "static_field": "hello"
+                }
+            }
+        ],
+        "connections": {}
+    });
+    write_workflow_file(
+        dir.path(),
+        "expression-flow--wf-30.workflow.json",
+        &workflow,
+    );
+
+    let output = base_command(dir.path())
+        .args(["search", "--expression", "json.email"])
+        .output()
+        .expect("run search");
+
+    assert!(output.status.success(), "exit 0");
+    let json = parse_json(output.stdout.as_slice());
+    assert_eq!(json["data"]["total_matches"], 1);
+    assert_eq!(json["data"]["results"][0]["matches"][0]["node_name"], "Set");
+}
+
+#[test]
+fn search_no_matches_exit_11() {
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), "http://localhost:1234");
+
+    let workflow = json!({
+        "id": "wf-1",
+        "name": "Simple",
+        "active": false,
+        "nodes": [],
+        "connections": {}
+    });
+    write_workflow_file(dir.path(), "simple--wf-1.workflow.json", &workflow);
+
+    let output = base_command(dir.path())
+        .args(["search", "nonexistent-xyz-pattern"])
+        .output()
+        .expect("run search");
+
+    assert_eq!(output.status.code(), Some(11));
+    let json = parse_json(output.stdout.as_slice());
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "resource.not_found");
+}
+
+#[test]
+fn search_no_query_or_filters_exit_2() {
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), "http://localhost:1234");
+
+    let output = base_command(dir.path())
+        .args(["search"])
+        .output()
+        .expect("run search");
+
+    assert_eq!(output.status.code(), Some(2));
+    let json = parse_json(output.stdout.as_slice());
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "usage.invalid");
+}
+
+#[test]
+fn search_combined_filters() {
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), "http://localhost:1234");
+
+    let workflow = json!({
+        "id": "wf-50",
+        "name": "Multi Filter",
+        "active": false,
+        "nodes": [
+            {
+                "name": "HTTP Node",
+                "type": "n8n-nodes-base.httpRequest",
+                "parameters": {
+                    "url": "https://api.example.com"
+                }
+            },
+            {
+                "name": "Webhook Node",
+                "type": "n8n-nodes-base.webhook",
+                "parameters": {
+                    "path": "/api.example.com"
+                }
+            }
+        ],
+        "connections": {}
+    });
+    write_workflow_file(dir.path(), "multi-filter--wf-50.workflow.json", &workflow);
+
+    // Searching for "example.com" + --node-type "httpRequest" should only match the HTTP node
+    let output = base_command(dir.path())
+        .args(["search", "example.com", "--node-type", "httpRequest"])
+        .output()
+        .expect("run search");
+
+    assert!(output.status.success(), "exit 0");
+    let json = parse_json(output.stdout.as_slice());
+    let matches = json["data"]["results"][0]["matches"].as_array().unwrap();
+    assert!(
+        matches
+            .iter()
+            .all(|m| m["node_type"].as_str().unwrap().contains("httpRequest")),
+        "all matches should be httpRequest nodes"
+    );
+}
+
+#[test]
+fn search_case_sensitive() {
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), "http://localhost:1234");
+
+    let workflow = json!({
+        "id": "wf-60",
+        "name": "Case Test",
+        "active": false,
+        "nodes": [
+            {
+                "name": "HTTP Request",
+                "type": "n8n-nodes-base.httpRequest",
+                "parameters": {
+                    "url": "https://API.Example.COM/data"
+                }
+            }
+        ],
+        "connections": {}
+    });
+    write_workflow_file(dir.path(), "case-test--wf-60.workflow.json", &workflow);
+
+    // Case-insensitive (default) should match
+    let output = base_command(dir.path())
+        .args(["search", "api.example.com"])
+        .output()
+        .expect("run search case insensitive");
+    assert!(output.status.success(), "case-insensitive should match");
+
+    // Case-sensitive should NOT match (wrong case)
+    let output = base_command(dir.path())
+        .args(["search", "api.example.com", "--case-sensitive"])
+        .output()
+        .expect("run search case sensitive");
+    assert_eq!(
+        output.status.code(),
+        Some(11),
+        "case-sensitive should not match lowercase query against uppercase URL"
+    );
+
+    // Case-sensitive with correct case SHOULD match
+    let output = base_command(dir.path())
+        .args(["search", "API.Example.COM", "--case-sensitive"])
+        .output()
+        .expect("run search case sensitive exact");
+    assert!(
+        output.status.success(),
+        "case-sensitive with exact case should match"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// runs stats
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn runs_stats_basic() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "101",
+                    "workflowId": "wf-1",
+                    "status": "success",
+                    "mode": "trigger",
+                    "startedAt": "2026-03-26T12:00:00.000Z",
+                    "stoppedAt": "2026-03-26T12:00:00.250Z"
+                },
+                {
+                    "id": "102",
+                    "workflowId": "wf-1",
+                    "status": "success",
+                    "mode": "trigger",
+                    "startedAt": "2026-03-26T12:01:00.000Z",
+                    "stoppedAt": "2026-03-26T12:01:00.750Z"
+                },
+                {
+                    "id": "103",
+                    "workflowId": "wf-1",
+                    "status": "error",
+                    "mode": "manual",
+                    "startedAt": "2026-03-26T12:02:00.000Z",
+                    "stoppedAt": "2026-03-26T12:02:01.000Z"
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("runs")
+        .arg("stats")
+        .arg("--instance")
+        .arg("mock")
+        .arg("--since")
+        .arg("2026-03-26T00:00:00Z")
+        .output()
+        .expect("run runs stats");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "runs");
+    assert_eq!(envelope["data"]["total"], 3);
+    assert_eq!(envelope["data"]["succeeded"], 2);
+    assert_eq!(envelope["data"]["failed"], 1);
+    assert_eq!(envelope["data"]["running"], 0);
+    assert_eq!(envelope["data"]["waiting"], 0);
+    assert_eq!(envelope["data"]["capped"], false);
+    assert_eq!(
+        envelope["data"]["period"],
+        "since 2026-03-26T00:00:00+00:00"
+    );
+
+    let rate = envelope["data"]["success_rate"].as_f64().unwrap();
+    assert!((rate - 66.666).abs() < 1.0, "success_rate should be ~66.7%");
+
+    let duration = &envelope["data"]["duration_ms"];
+    assert_eq!(duration["min"], 250);
+    assert_eq!(duration["max"], 1000);
+    assert_eq!(duration["avg"], 666);
+}
+
+#[tokio::test]
+async fn runs_stats_empty() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": []
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("runs")
+        .arg("stats")
+        .arg("--instance")
+        .arg("mock")
+        .output()
+        .expect("run runs stats empty");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["total"], 0);
+    assert_eq!(envelope["data"]["succeeded"], 0);
+    assert_eq!(envelope["data"]["failed"], 0);
+    assert_eq!(envelope["data"]["success_rate"], 0.0);
+    assert!(envelope["data"]["duration_ms"].is_null());
+    assert_eq!(envelope["data"]["period"], "last 24h");
+}
+
+#[tokio::test]
+async fn runs_stats_for_workflow() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("workflowId", "wf-42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "200",
+                    "workflowId": "wf-42",
+                    "status": "success",
+                    "mode": "trigger",
+                    "startedAt": "2026-03-26T12:00:00.000Z",
+                    "stoppedAt": "2026-03-26T12:00:02.000Z"
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-42"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-42",
+                "name": "Test Workflow"
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("runs")
+        .arg("stats")
+        .arg("--instance")
+        .arg("mock")
+        .arg("--since")
+        .arg("2026-03-26T00:00:00Z")
+        .arg("wf-42")
+        .output()
+        .expect("run runs stats for workflow");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["total"], 1);
+    assert_eq!(envelope["data"]["succeeded"], 1);
+    assert_eq!(envelope["data"]["workflow_id"], "wf-42");
+    assert_eq!(envelope["data"]["workflow_name"], "Test Workflow");
+    assert_eq!(envelope["data"]["duration_ms"]["min"], 2000);
+    assert_eq!(envelope["data"]["duration_ms"]["max"], 2000);
+    assert_eq!(envelope["data"]["duration_ms"]["avg"], 2000);
+}
+
+// ---------------------------------------------------------------------------
+// Lint
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lint_clean_workflow() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_repo(root, "http://unused:5678");
+
+    let wf_path = root.join("workflows").join("clean--wf-1.workflow.json");
+    std::fs::write(
+        &wf_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "id": "wf-1",
+            "name": "Clean Workflow",
+            "active": false,
+            "nodes": [
+                {
+                    "name": "Start",
+                    "type": "n8n-nodes-base.start",
+                    "parameters": {}
+                }
+            ],
+            "connections": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = base_command(root).arg("lint").output().expect("run lint");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["error_count"], 0);
+}
+
+#[test]
+fn lint_with_warnings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_repo(root, "http://unused:5678");
+
+    let wf_path = root.join("workflows").join("warn--wf-2.workflow.json");
+    std::fs::write(
+        &wf_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "id": "wf-2",
+            "name": "Warn Workflow",
+            "active": false,
+            "nodes": [
+                {
+                    "name": "Paused Node",
+                    "type": "n8n-nodes-base.set",
+                    "disabled": true,
+                    "parameters": {}
+                }
+            ],
+            "connections": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = base_command(root).arg("lint").output().expect("run lint");
+
+    // Warnings don't cause failure
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["warning_count"], 1);
+    assert_eq!(envelope["data"]["error_count"], 0);
+}
+
+#[test]
+fn lint_with_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Write repo with lint config that elevates no-disabled-nodes to error
+    std::fs::create_dir_all(root.join("workflows")).unwrap();
+    std::fs::create_dir_all(root.join(".n8n").join("cache")).unwrap();
+    let config = r#"schema_version = 1
+default_instance = "mock"
+workflow_dir = "workflows"
+
+[instances.mock]
+base_url = "http://unused:5678"
+api_version = "v1"
+
+[lint]
+no-disabled-nodes = "error"
+"#;
+    std::fs::write(root.join("n8n.toml"), config).unwrap();
+
+    let wf_path = root.join("workflows").join("err--wf-3.workflow.json");
+    std::fs::write(
+        &wf_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "id": "wf-3",
+            "name": "Error Workflow",
+            "active": false,
+            "nodes": [
+                {
+                    "name": "Disabled",
+                    "type": "n8n-nodes-base.set",
+                    "disabled": true,
+                    "parameters": {}
+                }
+            ],
+            "connections": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = base_command(root).arg("lint").output().expect("run lint");
+
+    assert!(!output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["data"]["error_count"], 1);
+}
+
+#[test]
+fn lint_rule_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_repo(root, "http://unused:5678");
+
+    let wf_path = root.join("workflows").join("multi--wf-4.workflow.json");
+    std::fs::write(
+        &wf_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "id": "wf-4",
+            "name": "Multi Issue",
+            "active": false,
+            "nodes": [
+                {
+                    "name": "HTTP Request",
+                    "type": "n8n-nodes-base.httpRequest",
+                    "disabled": true,
+                    "parameters": { "url": "https://example.com" }
+                }
+            ],
+            "connections": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = base_command(root)
+        .arg("lint")
+        .arg("--rule")
+        .arg("no-disabled-nodes")
+        .output()
+        .expect("run lint with rule filter");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+
+    // Only no-disabled-nodes diagnostics should appear
+    let results = envelope["data"]["results"].as_array().unwrap();
+    for result in results {
+        for diag in result["diagnostics"].as_array().unwrap() {
+            assert_eq!(diag["rule"], "no-disabled-nodes");
+        }
+    }
+}
+
+#[test]
+fn lint_no_config_uses_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_repo(root, "http://unused:5678");
+
+    let wf_path = root.join("workflows").join("defaults--wf-5.workflow.json");
+    std::fs::write(
+        &wf_path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "id": "wf-5",
+            "name": "Defaults Test",
+            "active": false,
+            "nodes": [
+                {
+                    "name": "Disabled",
+                    "type": "n8n-nodes-base.set",
+                    "disabled": true,
+                    "parameters": {}
+                }
+            ],
+            "connections": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // No [lint] section in n8n.toml, defaults should apply
+    let output = base_command(root)
+        .arg("lint")
+        .output()
+        .expect("run lint with defaults");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    // no-disabled-nodes defaults to warn, so should produce a warning
+    assert_eq!(envelope["data"]["warning_count"], 1);
+    assert_eq!(envelope["data"]["error_count"], 0);
+}

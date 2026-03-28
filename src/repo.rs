@@ -1220,6 +1220,7 @@ mod tests {
                 default_instance: "prod".to_string(),
                 workflow_dir: "workflows".into(),
                 instances,
+                lint: None,
             },
         }
     }

@@ -4,9 +4,9 @@ use serde::Serialize;
 
 use crate::{
     api::{ApiClient, ListOptions},
-    cmd::credential::probe_credential_inventory_capability,
     auth::{ensure_alias_exists, resolve_token},
     cli::DoctorArgs,
+    cmd::credential::probe_credential_inventory_capability,
     config::LoadedRepo,
     error::AppError,
     execute::{execute_backend_setup_hint, probe_execute_backend},
@@ -14,7 +14,7 @@ use crate::{
     validate::sensitive_data_diagnostics,
 };
 
-use super::common::{emit_json, load_loaded_repo, truncate, Context};
+use super::common::{Context, emit_json, load_loaded_repo, truncate};
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

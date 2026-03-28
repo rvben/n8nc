@@ -7,18 +7,15 @@ use crate::{
         NodeSetArgs,
     },
     edit::{
-        add_connection, add_node, remove_connection, remove_node, rename_node,
-        set_node_expression, set_node_value, workflow_id_string,
+        add_connection, add_node, remove_connection, remove_node, rename_node, set_node_expression,
+        set_node_value, workflow_id_string,
     },
     error::AppError,
     repo::workflow_id,
 };
 
 use super::{
-    common::{
-        emit_edit_result, emit_json, parse_node_value, resolve_local_file_path,
-        Context,
-    },
+    common::{Context, emit_edit_result, emit_json, parse_node_value, resolve_local_file_path},
     workflow::{print_workflow_nodes, summarize_workflow_nodes},
 };
 

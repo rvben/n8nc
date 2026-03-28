@@ -8,14 +8,17 @@ use serde_json::{Value, json};
 
 use crate::{
     api::{ApiClient, ExecutionListOptions},
-    cli::{RunsArgs, RunsCommand, RunsGetArgs, RunsListArgs, RunsTimeArgs, RunsWatchArgs},
+    cli::{
+        RunsArgs, RunsCommand, RunsGetArgs, RunsListArgs, RunsStatsArgs, RunsTimeArgs,
+        RunsWatchArgs,
+    },
     config::resolve_instance_alias,
     error::AppError,
     repo::{workflow_active, workflow_name},
 };
 
 use super::common::{
-    emit_json, emit_json_line, load_loaded_repo, remote_client, truncate, value_string, Context,
+    Context, emit_json, emit_json_line, load_loaded_repo, remote_client, truncate, value_string,
 };
 
 // ---------------------------------------------------------------------------
@@ -69,6 +72,7 @@ pub(crate) async fn cmd_runs(context: &Context, args: RunsArgs) -> Result<(), Ap
         RunsCommand::Ls(args) => cmd_runs_ls(context, args).await,
         RunsCommand::Get(args) => cmd_runs_get(context, args).await,
         RunsCommand::Watch(args) => cmd_runs_watch(context, args).await,
+        RunsCommand::Stats(args) => cmd_runs_stats(context, args).await,
     }
 }
 
@@ -264,6 +268,191 @@ async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppErr
                     );
                 }
             }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stats
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+struct StatsOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_name: Option<String>,
+    period: String,
+    capped: bool,
+    total: usize,
+    succeeded: usize,
+    failed: usize,
+    running: usize,
+    waiting: usize,
+    success_rate: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<DurationStats>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DurationStats {
+    min: i64,
+    max: i64,
+    avg: i64,
+}
+
+async fn cmd_runs_stats(context: &Context, args: RunsStatsArgs) -> Result<(), AppError> {
+    let repo = load_loaded_repo(context)?;
+    let (client, _, _) = remote_client(&repo, args.remote.instance.as_deref(), "runs")?;
+
+    // Resolve workflow: file path or ID/name
+    let workflow_id = if let Some(ref identifier) = args.workflow {
+        if identifier.contains('/') || identifier.ends_with(".workflow.json") {
+            let content = std::fs::read_to_string(identifier).map_err(|err| {
+                AppError::not_found("runs", format!("Cannot read workflow file: {err}"))
+            })?;
+            let wf: Value = serde_json::from_str(&content)
+                .map_err(|err| AppError::usage("runs", format!("Invalid workflow JSON: {err}")))?;
+            crate::repo::workflow_id(&wf)
+        } else {
+            resolve_execution_workflow_id(&client, Some(identifier)).await?
+        }
+    } else {
+        None
+    };
+
+    // Fetch workflow name if we have an ID
+    let wf_name = if let Some(ref wf_id) = workflow_id {
+        match client.get_workflow_by_id(wf_id).await? {
+            Some(wf) => workflow_name(wf.get("data").unwrap_or(&wf)),
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    // Determine time window
+    let time_filter = parse_runs_time_filter("runs", &args.time)?;
+    let (since, period_label) = if time_filter.since.is_some() || time_filter.last.is_some() {
+        let since = time_filter.effective_since();
+        let label = if let Some(ref last) = time_filter.last_label {
+            format!("last {last}")
+        } else {
+            format!("since {}", since.unwrap().to_rfc3339())
+        };
+        (since, label)
+    } else {
+        let since = Utc::now() - ChronoDuration::try_hours(24).unwrap();
+        (Some(since), "last 24h".to_string())
+    };
+
+    // Fetch executions directly (not via fetch_execution_rows which clamps at 250)
+    let executions = client
+        .list_executions(&ExecutionListOptions {
+            limit: 1000,
+            workflow_id: workflow_id.clone(),
+            status: None,
+            since,
+        })
+        .await?;
+
+    let capped = executions.len() == 1000;
+
+    // Aggregate stats
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut running = 0usize;
+    let mut waiting = 0usize;
+    let mut durations = Vec::new();
+
+    for execution in &executions {
+        match value_string(execution, "status").as_deref() {
+            Some("success") => succeeded += 1,
+            Some("error") => failed += 1,
+            Some("running") => running += 1,
+            Some("waiting") => waiting += 1,
+            _ => {}
+        }
+        if let Some(ms) = execution_duration_ms(execution) {
+            durations.push(ms);
+        }
+    }
+
+    let total = executions.len();
+    let success_rate = if total > 0 {
+        succeeded as f64 / total as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    let duration_stats = if durations.is_empty() {
+        None
+    } else {
+        let min = *durations.iter().min().unwrap();
+        let max = *durations.iter().max().unwrap();
+        let avg = durations.iter().sum::<i64>() / durations.len() as i64;
+        Some(DurationStats { min, max, avg })
+    };
+
+    let stats = StatsOutput {
+        workflow_id: workflow_id.clone(),
+        workflow_name: wf_name.clone(),
+        period: period_label.clone(),
+        capped,
+        total,
+        succeeded,
+        failed,
+        running,
+        waiting,
+        success_rate,
+        duration_ms: duration_stats.clone(),
+    };
+
+    if context.json {
+        emit_json("runs", &json!(stats))
+    } else {
+        match (wf_name.as_deref(), workflow_id.as_deref()) {
+            (Some(name), Some(id)) => println!("Workflow: {name} ({id})"),
+            (Some(name), None) => println!("Workflow: {name}"),
+            (None, Some(id)) => println!("Workflow ID: {id}"),
+            (None, None) => {}
+        }
+        println!("Period: {period_label}");
+        if capped {
+            println!("Note: results capped at 1000 executions");
+        }
+        println!();
+        println!("Total:      {total}");
+        if total > 0 {
+            println!(
+                "Succeeded:  {succeeded} ({:.1}%)",
+                succeeded as f64 / total as f64 * 100.0
+            );
+            println!(
+                "Failed:     {failed} ({:.1}%)",
+                failed as f64 / total as f64 * 100.0
+            );
+            if running > 0 {
+                println!(
+                    "Running:    {running} ({:.1}%)",
+                    running as f64 / total as f64 * 100.0
+                );
+            }
+            if waiting > 0 {
+                println!(
+                    "Waiting:    {waiting} ({:.1}%)",
+                    waiting as f64 / total as f64 * 100.0
+                );
+            }
+            println!("Success rate: {success_rate:.1}%");
+        }
+        if let Some(ref ds) = duration_stats {
+            println!();
+            println!("Duration (completed executions):");
+            println!("  Min: {}", format_duration(Some(ds.min)));
+            println!("  Max: {}", format_duration(Some(ds.max)));
+            println!("  Avg: {}", format_duration(Some(ds.avg)));
         }
         Ok(())
     }

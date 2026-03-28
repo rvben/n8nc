@@ -9,7 +9,7 @@ use crate::{
     repo::{collect_json_targets, format_json_file},
 };
 
-use super::common::{emit_json, Context};
+use super::common::{Context, emit_json};
 
 // ---------------------------------------------------------------------------
 // Commands

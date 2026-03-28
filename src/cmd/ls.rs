@@ -8,7 +8,7 @@ use crate::{
     repo::{workflow_active, workflow_id, workflow_name, workflow_updated_at},
 };
 
-use super::common::{emit_json, load_loaded_repo, remote_client, truncate, Context};
+use super::common::{Context, emit_json, load_loaded_repo, remote_client, truncate};
 
 #[derive(Debug, Serialize)]
 struct WorkflowListRow {

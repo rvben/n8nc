@@ -13,10 +13,8 @@ use crate::{
 
 use super::{
     auth::session_auth_setup_hint,
-    common::{
-        emit_json, load_loaded_repo, remote_client, wait_for_workflow_active_state, Context,
-    },
-    workflow::{summarize_workflow_webhooks, print_workflow_webhooks},
+    common::{Context, emit_json, load_loaded_repo, remote_client, wait_for_workflow_active_state},
+    workflow::{print_workflow_webhooks, summarize_workflow_webhooks},
 };
 
 // ---------------------------------------------------------------------------
@@ -102,7 +100,9 @@ pub(crate) async fn cmd_archive(
     let active_before = workflow_active(&workflow).unwrap_or(false);
     let workflow_name_str = workflow_name(&workflow).unwrap_or_else(|| "<unnamed>".to_string());
 
-    let is_archived = workflow.get("isArchived").and_then(serde_json::Value::as_bool);
+    let is_archived = workflow
+        .get("isArchived")
+        .and_then(serde_json::Value::as_bool);
     if archive && is_archived == Some(true) {
         if context.json {
             return emit_json(

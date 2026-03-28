@@ -15,6 +15,8 @@ pub struct RepoConfig {
     #[serde(default = "default_workflow_dir")]
     pub workflow_dir: PathBuf,
     pub instances: BTreeMap<String, InstanceConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lint: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -28,19 +28,17 @@ pub async fn run(cli: Cli) -> Result<(), AppError> {
         Command::Credential(args) => crate::cmd::credential::cmd_credential(&context, args).await,
         Command::Status(args) => crate::cmd::status::cmd_status(&context, args).await,
         Command::Diff(args) => crate::cmd::status::cmd_diff(&context, args).await,
-        Command::Activate(args) => {
-            crate::cmd::activate::cmd_activation(&context, args, true).await
-        }
+        Command::Activate(args) => crate::cmd::activate::cmd_activation(&context, args, true).await,
         Command::Deactivate(args) => {
             crate::cmd::activate::cmd_activation(&context, args, false).await
         }
         Command::Archive(args) => crate::cmd::activate::cmd_archive(&context, args, true).await,
-        Command::Unarchive(args) => {
-            crate::cmd::activate::cmd_archive(&context, args, false).await
-        }
+        Command::Unarchive(args) => crate::cmd::activate::cmd_archive(&context, args, false).await,
         Command::Trigger(args) => crate::cmd::trigger::cmd_trigger(&context, args).await,
         Command::Fmt(args) => crate::cmd::fmt::cmd_fmt(&context, args).await,
         Command::Validate(args) => crate::cmd::validate_cmd::cmd_validate(&context, args).await,
+        Command::Lint(args) => crate::cmd::lint::cmd_lint(&context, args).await,
+        Command::Search(args) => crate::cmd::search::cmd_search(&context, args).await,
         Command::Completions(args) => {
             clap_complete::generate(
                 args.shell,

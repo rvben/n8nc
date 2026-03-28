@@ -17,7 +17,7 @@ use crate::{
     canonical::{canonicalize_workflow, pretty_json},
     cli::ValueModeArgs,
     config::{LoadedRepo, load_repo, resolve_instance_alias, workflow_dir},
-    edit::{default_workflow_file_name, default_workflow_settings, EditResult},
+    edit::{EditResult, default_workflow_file_name, default_workflow_settings},
     error::AppError,
     repo::{load_workflow_file, workflow_active},
     validate::{Severity, sensitive_data_diagnostics, validate_workflow_path},
@@ -200,10 +200,7 @@ pub(crate) fn context_root(context: &Context) -> Result<PathBuf, AppError> {
     }
 }
 
-pub(crate) fn resolve_local_file_path(
-    context: &Context,
-    path: &Path,
-) -> Result<PathBuf, AppError> {
+pub(crate) fn resolve_local_file_path(context: &Context, path: &Path) -> Result<PathBuf, AppError> {
     if path.is_absolute() {
         return Ok(path.to_path_buf());
     }
@@ -215,10 +212,7 @@ pub(crate) fn resolve_local_file_path(
     Ok(context_root(context)?.join(path))
 }
 
-pub(crate) fn resolve_existing_workflow_path(
-    context: &Context,
-    target: &str,
-) -> Option<PathBuf> {
+pub(crate) fn resolve_existing_workflow_path(context: &Context, target: &str) -> Option<PathBuf> {
     let raw = Path::new(target);
     let resolved = resolve_local_file_path(context, raw).ok()?;
     if resolved.is_file() {
@@ -644,7 +638,9 @@ pub(crate) fn read_request_body(
     Ok(None)
 }
 
-pub(crate) fn parse_workflow_execute_input(body: Option<Vec<u8>>) -> Result<Option<Value>, AppError> {
+pub(crate) fn parse_workflow_execute_input(
+    body: Option<Vec<u8>>,
+) -> Result<Option<Value>, AppError> {
     let Some(body) = body else {
         return Ok(None);
     };
