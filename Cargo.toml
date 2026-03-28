@@ -2,6 +2,13 @@
 name = "n8nc"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.90"
+description = "CLI for n8n workflow automation"
+license = "MIT"
+repository = "https://github.com/rvben/n8nc"
+homepage = "https://github.com/rvben/n8nc"
+keywords = ["n8n", "workflow", "automation", "cli"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 base64 = "0.22.1"
