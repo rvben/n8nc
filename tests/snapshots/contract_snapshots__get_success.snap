@@ -1,0 +1,32 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "get",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "workflow": {
+      "id": "wf-1",
+      "name": "Test Workflow",
+      "active": true,
+      "settings": {},
+      "nodes": [
+        {
+          "id": "node-1",
+          "name": "Start",
+          "parameters": {},
+          "position": [
+            0,
+            0
+          ],
+          "type": "n8n-nodes-base.manualTrigger",
+          "typeVersion": 1
+        }
+      ],
+      "connections": {}
+    }
+  }
+}

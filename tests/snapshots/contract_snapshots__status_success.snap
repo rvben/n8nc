@@ -1,0 +1,39 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "status",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "summary": {
+      "clean": 1,
+      "modified": 0,
+      "untracked": 1,
+      "invalid": 0,
+      "orphaned_meta": 0
+    },
+    "workflows": [
+      {
+        "state": "clean",
+        "file": "[PATH]",
+        "sidecar": "[PATH]",
+        "workflow_id": "wf-1",
+        "name": "Tracked Workflow",
+        "instance": "mock",
+        "local_hash": "[HASH]",
+        "recorded_hash": "sha256:65c6b983700c2ff48547f83dfd22ff9c32441bddb4ea730c2ac75e90c9cdd7cc"
+      },
+      {
+        "state": "untracked",
+        "file": "[PATH]",
+        "workflow_id": "wf-draft",
+        "name": "Untracked Draft",
+        "local_hash": "[HASH]",
+        "detail": "No metadata sidecar found."
+      }
+    ]
+  }
+}

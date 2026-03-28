@@ -1,3 +1,10 @@
+mod common;
+
+use common::{
+    base_command, parse_json, write_repo, write_repo_with_alias, write_tracked_workflow,
+    workflow_fixture,
+};
+
 use std::{
     collections::BTreeSet,
     fs,
@@ -3896,22 +3903,6 @@ fn rest_session_cookie(browser_id: &str) -> String {
     )
 }
 
-fn write_repo_with_alias(root: &Path, base_url: &str, alias: &str) {
-    fs::create_dir_all(root.join("workflows")).expect("workflow dir");
-    fs::create_dir_all(root.join(".n8n").join("cache")).expect("cache dir");
-    let config = format!(
-        r#"schema_version = 1
-default_instance = "{alias}"
-workflow_dir = "workflows"
-
-[instances.{alias}]
-base_url = "{base_url}"
-api_version = "v1"
-"#
-    );
-    fs::write(root.join("n8n.toml"), config).expect("write n8n.toml");
-}
-
 fn write_execute_backend_script(root: &Path) -> PathBuf {
     let script_path = root.join("mock-execute-backend.sh");
     let script = r#"#!/bin/sh
@@ -3941,64 +3932,6 @@ printf '{"workflow_id":"%s","workflow_name":"%s","instance_alias":"%s","argv":["
     script_path
 }
 
-fn workflow_fixture(id: &str, name: &str, active: bool) -> Value {
-    json!({
-        "id": id,
-        "name": name,
-        "active": active,
-        "nodes": [],
-        "connections": {}
-    })
-}
-
-fn write_tracked_workflow(root: &Path, alias: &str, id: &str, name: &str) -> PathBuf {
-    let workflow_path = root.join("workflows").join(format!(
-        "{}--{}.workflow.json",
-        name.to_lowercase().replace(' ', "-"),
-        id
-    ));
-    fs::write(
-        &workflow_path,
-        serde_json::to_string_pretty(&json!({
-            "id": id,
-            "name": name,
-            "active": false,
-            "settings": {},
-            "nodes": [],
-            "connections": {}
-        }))
-        .expect("serialize workflow"),
-    )
-    .expect("write tracked workflow");
-
-    fs::write(
-        workflow_path.with_file_name(format!("{}--{}.meta.json", name.to_lowercase().replace(' ', "-"), id)),
-        serde_json::to_string_pretty(&json!({
-            "schema_version": 1,
-            "canonical_version": 1,
-            "hash_algorithm": "sha256",
-            "instance": alias,
-            "workflow_id": id,
-            "local_relpath": format!("workflows/{}--{}.workflow.json", name.to_lowercase().replace(' ', "-"), id),
-            "pulled_at": "2026-03-26T00:00:00Z",
-            "remote_updated_at": null,
-            "remote_hash": "sha256:test"
-        }))
-        .expect("serialize meta"),
-    )
-    .expect("write meta");
-
-    fs::write(
-        root.join(".n8n")
-            .join("cache")
-            .join(format!("{alias}--{id}.workflow.json")),
-        serde_json::to_string_pretty(&workflow_fixture(id, name, false)).expect("serialize cache"),
-    )
-    .expect("write cache");
-
-    workflow_path
-}
-
 fn workflow_with_sensitive_literal() -> Value {
     json!({
         "id": "wf-sensitive",
@@ -4018,10 +3951,6 @@ fn workflow_with_sensitive_literal() -> Value {
 fn read_json_file(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).expect("read json file"))
         .expect("parse json file")
-}
-
-fn parse_json(bytes: &[u8]) -> Value {
-    serde_json::from_slice(bytes).expect("valid json output")
 }
 
 fn parse_json_lines(bytes: &[u8]) -> Vec<Value> {

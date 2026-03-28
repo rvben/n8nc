@@ -1,0 +1,15 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": false,
+  "command": "push",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "error": {
+    "code": "conflict.remote_changed",
+    "message": "[ERROR_MSG]",
+    "suggestion": "Run `n8nc pull <id>` again before pushing."
+  }
+}

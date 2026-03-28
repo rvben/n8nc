@@ -1,0 +1,21 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "ls",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "count": 1,
+    "workflows": [
+      {
+        "id": "wf-1",
+        "name": "Test Workflow",
+        "active": true,
+        "updated_at": "2026-01-02T00:00:00Z"
+      }
+    ]
+  }
+}

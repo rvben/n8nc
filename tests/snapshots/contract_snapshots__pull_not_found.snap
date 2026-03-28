@@ -1,0 +1,14 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": false,
+  "command": "pull",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "error": {
+    "code": "resource.not_found",
+    "message": "[ERROR_MSG]"
+  }
+}

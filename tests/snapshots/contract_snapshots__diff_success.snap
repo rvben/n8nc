@@ -1,0 +1,30 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "diff",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "status": {
+      "state": "modified",
+      "file": "[PATH]",
+      "sidecar": "[PATH]",
+      "workflow_id": "wf-1",
+      "name": "Diff Example Modified",
+      "instance": "mock",
+      "local_hash": "[HASH]",
+      "recorded_hash": "sha256:924e0683b8885eda9bec41babd298f3c9ff10e779af2a629a6d3e2ed8ca047ef"
+    },
+    "base_hash": "sha256:924e0683b8885eda9bec41babd298f3c9ff10e779af2a629a6d3e2ed8ca047ef",
+    "base_snapshot_available": true,
+    "changed_sections": [
+      "name"
+    ],
+    "patch": "--- base\n+++ local\n@@ -1,6 +1,6 @@\n {\n   \"id\": \"wf-1\",\n-  \"name\": \"Diff Example\",\n+  \"name\": \"Diff Example Modified\",\n   \"active\": false,\n   \"settings\": {},\n   \"nodes\": [],\n",
+    "remote_comparison_available": false,
+    "remote_changed_sections": []
+  }
+}

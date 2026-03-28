@@ -1,0 +1,17 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "pull",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "instance": "mock",
+    "workflow_path": "[PATH]",
+    "meta_path": "[PATH]",
+    "workflow_id": "wf-1",
+    "warning_count": 0
+  }
+}

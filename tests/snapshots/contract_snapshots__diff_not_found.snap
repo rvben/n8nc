@@ -1,0 +1,21 @@
+---
+source: tests/contract_snapshots.rs
+expression: json
+---
+{
+  "ok": true,
+  "command": "diff",
+  "version": "[VERSION]",
+  "contract_version": 1,
+  "data": {
+    "status": {
+      "state": "invalid",
+      "file": "[PATH]",
+      "detail": "[DETAIL]"
+    },
+    "base_snapshot_available": false,
+    "changed_sections": [],
+    "remote_comparison_available": false,
+    "remote_changed_sections": []
+  }
+}
