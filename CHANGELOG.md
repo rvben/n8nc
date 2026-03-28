@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
+
+## [0.3.0](https://github.com/rvben/n8nc/compare/v0.2.1...v0.3.0) - 2026-03-28
+
+### Added
+
+- add search, runs stats, and lint commands ([f587d5e](https://github.com/rvben/n8nc/commit/f587d5e05a3f87c0d8e95d5c6af59f4f23fbcac0))
+
 ## [0.2.1](https://github.com/rvben/n8nc/compare/v0.2.0...v0.2.1) - 2026-03-28
 
 ### Added
