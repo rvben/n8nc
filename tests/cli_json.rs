@@ -3245,6 +3245,416 @@ async fn pull_without_identifier_or_all_returns_usage_error() {
     assert_eq!(envelope["error"]["code"], "usage.invalid");
 }
 
+#[tokio::test]
+async fn auth_test_json_verifies_token_against_api() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "wf-1", "name": "Example Workflow", "active": true}
+            ],
+            "nextCursor": null
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("auth")
+        .arg("test")
+        .arg("mock")
+        .output()
+        .expect("run auth test");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "auth");
+    assert_eq!(envelope["data"]["alias"], "mock");
+    assert_eq!(envelope["data"]["token_source"], "env");
+    assert_eq!(envelope["data"]["reachable"], true);
+    assert_eq!(envelope["data"]["sample_count"], 1);
+}
+
+#[tokio::test]
+async fn auth_test_json_verifies_token_with_empty_workflow_list() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .and(query_param("limit", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [],
+            "nextCursor": null
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("auth")
+        .arg("test")
+        .arg("mock")
+        .output()
+        .expect("run auth test empty");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["reachable"], true);
+    assert_eq!(envelope["data"]["sample_count"], 0);
+}
+
+#[tokio::test]
+async fn auth_test_json_fails_when_api_returns_unauthorized() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "code": 401,
+            "message": "Unauthorized"
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("auth")
+        .arg("test")
+        .arg("mock")
+        .output()
+        .expect("run auth test unauthorized");
+
+    assert!(!output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["command"], "auth");
+}
+
+#[tokio::test]
+async fn auth_list_json_reports_token_missing_when_no_env_var_set() {
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), "https://example.test");
+
+    // Run without the default N8NC_TOKEN_MOCK env var by clearing it.
+    let output = base_command(repo.path())
+        .env_remove("N8NC_TOKEN_MOCK")
+        .arg("auth")
+        .arg("list")
+        .output()
+        .expect("run auth list without token env");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["instances"][0]["token_source"], "missing");
+    assert_eq!(
+        envelope["data"]["instances"][0]["session_cookie_source"],
+        "missing"
+    );
+    assert_eq!(
+        envelope["data"]["instances"][0]["browser_id_source"],
+        "missing"
+    );
+    assert_eq!(envelope["data"]["instances"][0]["session_ready"], false);
+}
+
+#[tokio::test]
+async fn auth_list_json_reports_token_source_as_env() {
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), "https://example.test");
+
+    // base_command sets N8NC_TOKEN_MOCK=test-token, so token_source must be "env".
+    let output = base_command(repo.path())
+        .arg("auth")
+        .arg("list")
+        .output()
+        .expect("run auth list with token");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["instances"][0]["alias"], "mock");
+    assert_eq!(envelope["data"]["instances"][0]["token_source"], "env");
+    assert_eq!(
+        envelope["data"]["instances"][0]["session_cookie_source"],
+        "missing"
+    );
+    assert_eq!(envelope["data"]["instances"][0]["session_ready"], false);
+}
+
+#[tokio::test]
+async fn auth_session_test_json_fails_without_session_credentials() {
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), "https://example.test");
+
+    let output = base_command(repo.path())
+        .arg("auth")
+        .arg("session")
+        .arg("test")
+        .arg("mock")
+        .output()
+        .expect("run auth session test without creds");
+
+    assert!(!output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["command"], "auth");
+}
+
+#[tokio::test]
+async fn init_creates_repo_layout_and_config() {
+    let dir = tempdir().expect("tempdir");
+    let root = dir.path();
+
+    let output = Command::cargo_bin("n8nc")
+        .expect("n8nc binary")
+        .arg("--json")
+        .arg("--repo-root")
+        .arg(root)
+        .arg("init")
+        .arg("--instance")
+        .arg("prod")
+        .arg("--url")
+        .arg("https://example.com")
+        .output()
+        .expect("run init");
+
+    assert!(output.status.success(), "init failed: {:?}", output);
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "init");
+
+    let config_path = root.join("n8n.toml");
+    assert!(config_path.exists(), "n8n.toml should exist");
+    let config_content = fs::read_to_string(&config_path).expect("read n8n.toml");
+    assert!(
+        config_content.contains("prod"),
+        "config should reference the instance name"
+    );
+    assert!(
+        config_content.contains("https://example.com"),
+        "config should contain the base URL"
+    );
+
+    assert!(
+        root.join("workflows").is_dir(),
+        "workflows/ directory should exist"
+    );
+    assert!(
+        root.join(".n8n").join("cache").is_dir(),
+        ".n8n/cache/ directory should exist"
+    );
+}
+
+#[tokio::test]
+async fn get_json_returns_workflow_data() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-42"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-42",
+                "name": "My Workflow",
+                "active": false,
+                "nodes": [],
+                "connections": {}
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("get")
+        .arg("wf-42")
+        .arg("--instance")
+        .arg("mock")
+        .output()
+        .expect("run get");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "get");
+    assert_eq!(envelope["data"]["workflow"]["id"], "wf-42");
+    assert_eq!(envelope["data"]["workflow"]["name"], "My Workflow");
+}
+
+#[tokio::test]
+async fn activate_json_waits_for_remote_state_and_updates_tracked_file() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    let tracked_path = write_tracked_workflow(repo.path(), "mock", "wf-1", "Activate Me");
+    fs::write(
+        &tracked_path,
+        serde_json::to_string_pretty(&json!({
+            "id": "wf-1",
+            "name": "Activate Me",
+            "active": false,
+            "settings": {},
+            "nodes": [],
+            "connections": {}
+        }))
+        .expect("serialize tracked workflow"),
+    )
+    .expect("write tracked workflow");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(JsonSequenceResponder {
+            calls: calls.clone(),
+            responses: vec![
+                json!({
+                    "data": {
+                        "id": "wf-1",
+                        "name": "Activate Me",
+                        "active": false,
+                        "settings": {},
+                        "nodes": [],
+                        "connections": {}
+                    }
+                }),
+                json!({
+                    "data": {
+                        "id": "wf-1",
+                        "name": "Activate Me",
+                        "active": false,
+                        "settings": {},
+                        "nodes": [],
+                        "connections": {}
+                    }
+                }),
+                json!({
+                    "data": {
+                        "id": "wf-1",
+                        "name": "Activate Me",
+                        "active": true,
+                        "settings": {},
+                        "nodes": [],
+                        "connections": {}
+                    }
+                }),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/wf-1/activate"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .arg("activate")
+        .arg("wf-1")
+        .output()
+        .expect("run activate");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["active"], true);
+    assert_eq!(envelope["data"]["workflow_id"], "wf-1");
+
+    let tracked = read_json_file(&tracked_path);
+    assert_eq!(tracked["active"], true);
+}
+
+#[tokio::test]
+async fn fmt_json_formats_workflow_files_in_place() {
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), "https://example.test");
+
+    // Write a workflow file with non-canonical key ordering and no trailing newline.
+    let workflow_path = repo
+        .path()
+        .join("workflows")
+        .join("example.workflow.json");
+    fs::write(
+        &workflow_path,
+        r#"{"connections":{},"active":false,"nodes":[],"name":"Example","id":"wf-1"}"#,
+    )
+    .expect("write workflow");
+
+    let output = base_command(repo.path())
+        .arg("fmt")
+        .output()
+        .expect("run fmt");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["command"], "fmt");
+    let changed = envelope["data"]["changed"]
+        .as_array()
+        .expect("changed array");
+    assert_eq!(changed.len(), 1, "one file should have been formatted");
+
+    let reformatted = fs::read_to_string(&workflow_path).expect("read formatted file");
+    assert!(
+        reformatted.ends_with('\n'),
+        "formatted file should end with a newline"
+    );
+    // After formatting the file content must be valid JSON.
+    let _: Value = serde_json::from_str(&reformatted).expect("formatted file should be valid JSON");
+}
+
+#[tokio::test]
+async fn fmt_check_returns_nonzero_when_formatting_needed() {
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), "https://example.test");
+
+    let workflow_path = repo
+        .path()
+        .join("workflows")
+        .join("unformatted.workflow.json");
+    fs::write(
+        &workflow_path,
+        r#"{"connections":{},"nodes":[],"name":"Unformatted","id":"wf-2","active":false}"#,
+    )
+    .expect("write unformatted workflow");
+
+    let output = base_command(repo.path())
+        .arg("fmt")
+        .arg("--check")
+        .output()
+        .expect("run fmt --check");
+
+    assert!(
+        !output.status.success(),
+        "fmt --check should fail when files need formatting"
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], false);
+
+    // The file must be unchanged — --check must not modify files.
+    let content_after = fs::read_to_string(&workflow_path).expect("read file after check");
+    assert_eq!(
+        content_after,
+        r#"{"connections":{},"nodes":[],"name":"Unformatted","id":"wf-2","active":false}"#,
+        "fmt --check must not modify files"
+    );
+}
+
 fn base_command(repo_root: &Path) -> Command {
     let mut command = Command::cargo_bin("n8nc").expect("n8nc binary");
     command
