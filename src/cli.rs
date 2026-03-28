@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -11,12 +11,6 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
-    #[arg(long, global = true)]
-    pub no_color: bool,
-    #[arg(long, global = true)]
-    pub quiet: bool,
-    #[arg(long, global = true, action = ArgAction::Count)]
-    pub verbose: u8,
     #[arg(long, global = true)]
     pub repo_root: Option<PathBuf>,
     #[command(subcommand)]

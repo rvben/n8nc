@@ -3051,7 +3051,11 @@ async fn pull_all_json_pulls_all_workflows() {
         .output()
         .expect("pull --all");
 
-    assert!(output.status.success(), "stdout: {}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     let envelope = parse_json(&output.stdout);
     assert_eq!(envelope["ok"], true);
     assert_eq!(envelope["command"], "pull");
@@ -3060,7 +3064,9 @@ async fn pull_all_json_pulls_all_workflows() {
     assert_eq!(envelope["data"]["unchanged"], 0);
     assert_eq!(envelope["data"]["failed"], 0);
 
-    let results = envelope["data"]["results"].as_array().expect("results array");
+    let results = envelope["data"]["results"]
+        .as_array()
+        .expect("results array");
     assert_eq!(results.len(), 2);
     assert_eq!(results[0]["status"], "pulled");
     assert_eq!(results[1]["status"], "pulled");
@@ -3174,7 +3180,10 @@ async fn pull_all_json_reports_partial_failure() {
     assert_eq!(envelope["data"]["failed"], 1);
 
     let results = envelope["data"]["results"].as_array().expect("results");
-    let failed = results.iter().find(|r| r["status"] == "failed").expect("failed result");
+    let failed = results
+        .iter()
+        .find(|r| r["status"] == "failed")
+        .expect("failed result");
     assert_eq!(failed["workflow_id"], "wf-2");
     assert!(failed["error"].as_str().unwrap_or_default().len() > 0);
 }

@@ -9,6 +9,8 @@ repository = "https://github.com/rvben/n8nc"
 homepage = "https://github.com/rvben/n8nc"
 keywords = ["n8n", "workflow", "automation", "cli"]
 categories = ["command-line-utilities"]
+readme = "README.md"
+exclude = ["docs/superpowers/", ".github/"]
 
 [dependencies]
 base64 = "0.22.1"

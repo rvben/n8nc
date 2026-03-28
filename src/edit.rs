@@ -543,10 +543,10 @@ fn rename_connection_targets(
                     continue;
                 };
                 for entry in entries {
-                    if entry.get("node").and_then(Value::as_str) == Some(current_name) {
-                        if let Some(object) = entry.as_object_mut() {
-                            object.insert("node".to_string(), Value::String(next_name.to_string()));
-                        }
+                    if entry.get("node").and_then(Value::as_str) == Some(current_name)
+                        && let Some(object) = entry.as_object_mut()
+                    {
+                        object.insert("node".to_string(), Value::String(next_name.to_string()));
                     }
                 }
             }

@@ -60,16 +60,16 @@ pub fn probe_execute_backend(
                 .cwd
                 .as_ref()
                 .map(|path| resolve_repo_path(repo_root, path));
-            if let Some(cwd) = &cwd {
-                if !cwd.is_dir() {
-                    return Err(AppError::config(
-                        command,
-                        format!(
-                            "Workflow execute backend working directory does not exist: {}",
-                            cwd.display()
-                        ),
-                    ));
-                }
+            if let Some(cwd) = &cwd
+                && !cwd.is_dir()
+            {
+                return Err(AppError::config(
+                    command,
+                    format!(
+                        "Workflow execute backend working directory does not exist: {}",
+                        cwd.display()
+                    ),
+                ));
             }
 
             let stdin_mode = if config.stdin_json {
@@ -108,16 +108,16 @@ fn execute_command_backend(
         .as_ref()
         .map(|path| resolve_repo_path(repo_root, path));
 
-    if let Some(cwd) = &cwd {
-        if !cwd.is_dir() {
-            return Err(AppError::config(
-                command,
-                format!(
-                    "Workflow execute backend working directory does not exist: {}",
-                    cwd.display()
-                ),
-            ));
-        }
+    if let Some(cwd) = &cwd
+        && !cwd.is_dir()
+    {
+        return Err(AppError::config(
+            command,
+            format!(
+                "Workflow execute backend working directory does not exist: {}",
+                cwd.display()
+            ),
+        ));
     }
 
     let mut process = Command::new(&resolved_program);

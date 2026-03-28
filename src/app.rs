@@ -601,10 +601,7 @@ async fn cmd_auth_list(context: &Context) -> Result<(), AppError> {
     if context.json {
         emit_json("auth", &json!({ "instances": rows }))
     } else {
-        println!(
-            "{:<16} {:<10} {:<22} {}",
-            "ALIAS", "TOKEN", "SESSION", "BASE URL"
-        );
+        println!("{:<16} {:<10} {:<22} BASE URL", "ALIAS", "TOKEN", "SESSION");
         for row in rows {
             println!(
                 "{:<16} {:<10} {:<22} {}",
@@ -913,7 +910,7 @@ async fn build_doctor_report(
                         Some(alias.clone()),
                         "workflow_execute",
                         err.message,
-                        Some(format!("{}", execute_backend_setup_hint(&alias))),
+                        Some(execute_backend_setup_hint(&alias).to_string()),
                     ),
                 }
             }
@@ -1119,8 +1116,8 @@ fn print_doctor_report(report: &DoctorReport) {
         println!("Selected instance: {alias}");
     }
     println!(
-        "{:<8} {:<10} {:<16} {:<18} {}",
-        "STATUS", "SCOPE", "TARGET", "CHECK", "DETAIL"
+        "{:<8} {:<10} {:<16} {:<18} DETAIL",
+        "STATUS", "SCOPE", "TARGET", "CHECK"
     );
     for check in &report.checks {
         println!(
@@ -1220,7 +1217,7 @@ async fn cmd_ls(context: &Context, args: ListArgs) -> Result<(), AppError> {
     if context.json {
         emit_json("ls", &json!({ "count": rows.len(), "workflows": rows }))
     } else {
-        println!("{:<20} {:<8} {:<24} {}", "ID", "ACTIVE", "UPDATED", "NAME");
+        println!("{:<20} {:<8} {:<24} NAME", "ID", "ACTIVE", "UPDATED");
         for row in rows {
             println!(
                 "{:<20} {:<8} {:<24} {}",
@@ -1254,7 +1251,7 @@ async fn cmd_runs_ls(context: &Context, args: RunsListArgs) -> Result<(), AppErr
         &client,
         workflow_id.as_deref(),
         args.status.as_deref(),
-        since.clone(),
+        since,
         args.limit,
     )
     .await?;
@@ -1425,10 +1422,7 @@ async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppErr
             let nodes = node_executions.unwrap_or_default();
             if !nodes.is_empty() {
                 println!();
-                println!(
-                    "{:<32} {:<10} {:<10} {}",
-                    "NODE", "STATUS", "TIME", "OUTPUTS"
-                );
+                println!("{:<32} {:<10} {:<10} OUTPUTS", "NODE", "STATUS", "TIME");
                 for node in nodes {
                     println!(
                         "{:<32} {:<10} {:<10} {}",
@@ -1463,9 +1457,9 @@ async fn cmd_pull(context: &Context, args: PullArgs) -> Result<(), AppError> {
         return cmd_pull_all(context, args).await;
     }
 
-    let identifier = args.identifier.ok_or_else(|| {
-        AppError::usage("pull", "Provide a workflow identifier or use --all.")
-    })?;
+    let identifier = args
+        .identifier
+        .ok_or_else(|| AppError::usage("pull", "Provide a workflow identifier or use --all."))?;
 
     let repo = load_loaded_repo(context)?;
     let alias = resolve_instance_alias(&repo, args.remote.instance.as_deref(), "pull")?;
@@ -1531,17 +1525,13 @@ async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError>
 
         match pull_one_workflow(&repo, &client, &alias, &wf_id).await {
             Ok(PullOneResult::Pulled(stored)) => {
-                let warnings = sensitive_data_diagnostics(&stored.workflow_path)
-                    .unwrap_or_default();
+                let warnings =
+                    sensitive_data_diagnostics(&stored.workflow_path).unwrap_or_default();
                 let wc = warnings.len();
                 total_warning_count += wc;
 
                 if !context.json {
-                    println!(
-                        "Pulled {} -> {}",
-                        wf_id,
-                        stored.workflow_path.display()
-                    );
+                    println!("Pulled {} -> {}", wf_id, stored.workflow_path.display());
                     print_sensitive_warning_summary(&stored.workflow_path, wc);
                 }
 
@@ -1646,19 +1636,16 @@ async fn pull_one_workflow(
     let response = client
         .get_workflow_by_id(wf_id)
         .await?
-        .ok_or_else(|| {
-            AppError::not_found(
-                "pull",
-                format!("Workflow `{wf_id}` was not found."),
-            )
-        })?;
+        .ok_or_else(|| AppError::not_found("pull", format!("Workflow `{wf_id}` was not found.")))?;
     let workflow = response.get("data").cloned().unwrap_or(response);
     let canonical = canonicalize_workflow(&workflow)?;
     let remote_hash = hash_value(&canonical)?;
 
     if let Some(existing_path) = find_existing_workflow_path(repo, wf_id) {
         let meta_path = sidecar_path_for(&existing_path);
-        if let Ok(meta) = load_meta(&meta_path, "pull") && meta.remote_hash == remote_hash {
+        if let Ok(meta) = load_meta(&meta_path, "pull")
+            && meta.remote_hash == remote_hash
+        {
             return Ok(PullOneResult::Unchanged(existing_path));
         }
     }
@@ -2010,7 +1997,7 @@ async fn cmd_workflow_show(context: &Context, args: WorkflowShowArgs) -> Result<
     let nodes = summarize_workflow_nodes(&workflow);
     let connections = summarize_workflow_connections(&workflow);
     let webhooks = summarize_workflow_webhooks(&workflow, base_url.as_deref());
-    let credentials = summarize_credential_references(&[workflow.clone()], None);
+    let credentials = summarize_credential_references(std::slice::from_ref(&workflow), None);
 
     if context.json {
         emit_json(
@@ -2372,8 +2359,8 @@ async fn cmd_credential_list(context: &Context, args: CredentialListArgs) -> Res
             return Ok(());
         }
         println!(
-            "{:<24} {:<18} {:<28} {:<8} {}",
-            "TYPE", "ID", "NAME", "USES", "WORKFLOWS"
+            "{:<24} {:<18} {:<28} {:<8} WORKFLOWS",
+            "TYPE", "ID", "NAME", "USES"
         );
         for row in &result.credentials {
             let workflows = row
@@ -2645,10 +2632,10 @@ fn merge_credential_inventory(
         else {
             continue;
         };
-        if let Some(filter) = credential_type_filter {
-            if credential_type != filter {
-                continue;
-            }
+        if let Some(filter) = credential_type_filter
+            && credential_type != filter
+        {
+            continue;
         }
 
         let credential_id = item
@@ -2922,13 +2909,13 @@ async fn cmd_status(context: &Context, args: StatusArgs) -> Result<(), AppError>
     } else {
         if args.refresh {
             println!(
-                "{:<14} {:<14} {:<14} {:<20} {:<20} {}",
-                "LOCAL", "SYNC", "INSTANCE", "ID", "LOCAL HASH", "FILE"
+                "{:<14} {:<14} {:<14} {:<20} {:<20} FILE",
+                "LOCAL", "SYNC", "INSTANCE", "ID", "LOCAL HASH"
             );
         } else {
             println!(
-                "{:<14} {:<14} {:<20} {:<20} {}",
-                "STATE", "INSTANCE", "ID", "LOCAL HASH", "FILE"
+                "{:<14} {:<14} {:<20} {:<20} FILE",
+                "STATE", "INSTANCE", "ID", "LOCAL HASH"
             );
         }
         for status in &statuses {
@@ -3635,8 +3622,8 @@ fn execution_workflow_label(row: &ExecutionListRow) -> String {
 
 fn print_execution_rows(rows: &[ExecutionListRow]) {
     println!(
-        "{:<10} {:<10} {:<10} {:<10} {:<24} {}",
-        "ID", "STATUS", "MODE", "DURATION", "STARTED", "WORKFLOW"
+        "{:<10} {:<10} {:<10} {:<10} {:<24} WORKFLOW",
+        "ID", "STATUS", "MODE", "DURATION", "STARTED"
     );
     for row in rows {
         println!(
@@ -4681,8 +4668,8 @@ fn print_workflow_nodes(rows: &[WorkflowNodeRow]) {
 
     println!("Nodes:");
     println!(
-        "{:<24} {:<28} {:<10} {:<14} {:<8} {}",
-        "NAME", "TYPE", "VERSION", "POSITION", "DISABLED", "CREDS"
+        "{:<24} {:<28} {:<10} {:<14} {:<8} CREDS",
+        "NAME", "TYPE", "VERSION", "POSITION", "DISABLED"
     );
     for row in rows {
         let position = row
@@ -4737,8 +4724,8 @@ fn print_credential_references(rows: &[CredentialReferenceRow]) {
 
     println!("Credentials:");
     println!(
-        "{:<24} {:<18} {:<28} {:<8} {}",
-        "TYPE", "ID", "NAME", "USES", "WORKFLOWS"
+        "{:<24} {:<18} {:<28} {:<8} WORKFLOWS",
+        "TYPE", "ID", "NAME", "USES"
     );
     for row in rows {
         let workflows = row
@@ -4777,8 +4764,8 @@ fn print_workflow_connections(rows: &[WorkflowConnectionRow]) {
 
     println!("Connections:");
     println!(
-        "{:<24} {:<10} {:<6} {:<24} {:<12} {}",
-        "FROM", "KIND", "OUT", "TO", "TARGET", "IN"
+        "{:<24} {:<10} {:<6} {:<24} {:<12} IN",
+        "FROM", "KIND", "OUT", "TO", "TARGET"
     );
     for row in rows {
         println!(

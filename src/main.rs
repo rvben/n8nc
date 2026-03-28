@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 mod api;
 mod app;
 mod auth;

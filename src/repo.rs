@@ -298,12 +298,12 @@ pub fn store_workflow(
 
     let file_name = format!("{}--{}.workflow.json", slugify(&workflow_name), workflow_id);
     let target_path = workflow_dir(&repo.root, &repo.config).join(file_name);
-    if let Some(existing) = find_existing_workflow_path(repo, &workflow_id) {
-        if existing != target_path {
-            let existing_meta = sidecar_path_for(&existing);
-            let _ = fs::remove_file(&existing);
-            let _ = fs::remove_file(existing_meta);
-        }
+    if let Some(existing) = find_existing_workflow_path(repo, &workflow_id)
+        && existing != target_path
+    {
+        let existing_meta = sidecar_path_for(&existing);
+        let _ = fs::remove_file(&existing);
+        let _ = fs::remove_file(existing_meta);
     }
 
     let rendered_workflow = pretty_json(&canonical)?;
