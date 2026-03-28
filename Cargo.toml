@@ -1,11 +1,7 @@
 [package]
-name = "n8n-cli"
+name = "n8nc"
 version = "0.1.0"
 edition = "2024"
-
-[[bin]]
-name = "n8nc"
-path = "src/main.rs"
 
 [dependencies]
 base64 = "0.22.1"

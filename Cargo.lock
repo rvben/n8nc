@@ -901,7 +901,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "n8n-cli"
+name = "n8nc"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
