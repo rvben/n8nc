@@ -81,6 +81,8 @@ pub enum Command {
     Search(SearchArgs),
     /// Generate shell completions
     Completions(CompletionsArgs),
+    /// Dump CLI schema as JSON for agent introspection
+    Schema,
 }
 
 #[derive(Debug, Args)]

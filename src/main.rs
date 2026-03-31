@@ -11,6 +11,7 @@ mod error;
 mod execute;
 mod lint;
 mod repo;
+mod schema;
 mod tree;
 mod validate;
 

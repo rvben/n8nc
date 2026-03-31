@@ -49,5 +49,9 @@ pub async fn run(cli: Cli, json: bool) -> Result<(), AppError> {
             );
             Ok(())
         }
+        Command::Schema => {
+            crate::schema::print_schema();
+            Ok(())
+        }
     }
 }
