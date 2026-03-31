@@ -30,7 +30,15 @@ use crate::{
 #[derive(Debug, Clone)]
 pub(crate) struct Context {
     pub json: bool,
+    pub quiet: bool,
     pub repo_root: Option<PathBuf>,
+}
+
+/// Print a human-readable message to stderr. Suppressed by `--quiet` or `--json`.
+pub(crate) fn print_message(context: &Context, msg: &str) {
+    if !context.quiet && !context.json {
+        eprintln!("{msg}");
+    }
 }
 
 #[derive(Debug, Serialize)]

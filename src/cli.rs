@@ -10,10 +10,18 @@ use clap_complete::Shell;
     about = "Human- and agent-friendly CLI for n8n workflows"
 )]
 pub struct Cli {
+    /// Output as JSON (auto-enabled when stdout is not a terminal)
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// Suppress non-data output (summary lines, confirmations)
+    #[arg(long, global = true)]
+    pub quiet: bool,
+
+    /// Override the repository root directory
     #[arg(long, global = true)]
     pub repo_root: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }

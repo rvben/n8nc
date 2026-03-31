@@ -9,6 +9,7 @@ use crate::{
 pub async fn run(cli: Cli) -> Result<(), AppError> {
     let context = Context {
         json: cli.json,
+        quiet: cli.quiet,
         repo_root: cli.repo_root,
     };
 
