@@ -6,9 +6,9 @@ use crate::{
     error::AppError,
 };
 
-pub async fn run(cli: Cli) -> Result<(), AppError> {
+pub async fn run(cli: Cli, json: bool) -> Result<(), AppError> {
     let context = Context {
-        json: cli.json,
+        json,
         quiet: cli.quiet,
         repo_root: cli.repo_root,
     };
