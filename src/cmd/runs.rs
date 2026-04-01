@@ -18,7 +18,8 @@ use crate::{
 };
 
 use super::common::{
-    Context, emit_json, emit_json_line, load_loaded_repo, remote_client, truncate, value_string,
+    Context, emit_json, emit_json_line, load_loaded_repo, print_message, remote_client, truncate,
+    value_string,
 };
 
 // ---------------------------------------------------------------------------
@@ -102,16 +103,16 @@ async fn cmd_runs_ls(context: &Context, args: RunsListArgs) -> Result<(), AppErr
         emit_json("runs", &Value::Object(data))
     } else {
         if let Some(workflow) = args.workflow.as_deref() {
-            println!("Workflow filter: {workflow}");
+            print_message(context, &format!("Workflow filter: {workflow}"));
         }
         if let Some(status) = args.status.as_deref() {
-            println!("Status filter: {status}");
+            print_message(context, &format!("Status filter: {status}"));
         }
         if let Some(since_label) = time_filter.describe(&since) {
-            println!("{since_label}");
+            print_message(context, &since_label);
         }
         if let Some(note) = note {
-            println!("Note: {note}");
+            print_message(context, &format!("Note: {note}"));
         }
         print_execution_rows(&rows);
         Ok(())
@@ -161,28 +162,31 @@ async fn cmd_runs_watch(context: &Context, args: RunsWatchArgs) -> Result<(), Ap
                 }),
             )?;
         } else if poll == 1 {
-            println!(
-                "Watching executions on `{alias}` every {}s. Press Ctrl-C to stop.",
-                args.interval.max(1)
+            print_message(
+                context,
+                &format!(
+                    "Watching executions on `{alias}` every {}s. Press Ctrl-C to stop.",
+                    args.interval.max(1)
+                ),
             );
             if let Some(workflow) = args.workflow.as_deref() {
-                println!("Workflow filter: {workflow}");
+                print_message(context, &format!("Workflow filter: {workflow}"));
             }
             if let Some(status) = args.status.as_deref() {
-                println!("Status filter: {status}");
+                print_message(context, &format!("Status filter: {status}"));
             }
             if let Some(since_label) = time_filter.describe(&since) {
-                println!("{since_label}");
+                print_message(context, &since_label);
             }
             if rows.is_empty() {
-                println!("No executions found.");
+                print_message(context, "No executions found.");
             } else {
-                println!("Current executions:");
+                print_message(context, "Current executions:");
                 print_execution_rows(&rows);
             }
         } else if !new_rows.is_empty() {
-            println!();
-            println!("New executions:");
+            print_message(context, "");
+            print_message(context, "New executions:");
             print_execution_rows(&new_rows);
         }
 
@@ -420,7 +424,7 @@ async fn cmd_runs_stats(context: &Context, args: RunsStatsArgs) -> Result<(), Ap
         }
         println!("Period: {period_label}");
         if capped {
-            println!("Note: results capped at 1000 executions");
+            print_message(context, "Note: results capped at 1000 executions");
         }
         println!();
         println!("Total:      {total}");

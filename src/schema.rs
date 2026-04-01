@@ -135,10 +135,10 @@ fn walk_commands(
             );
             entry.insert("dangerous".into(), json!(meta.is_some_and(|m| m.dangerous)));
 
-            if let Some(m) = meta {
-                if !m.output_fields.is_empty() {
-                    entry.insert("output_fields".into(), json!(m.output_fields));
-                }
+            if let Some(m) = meta
+                && !m.output_fields.is_empty()
+            {
+                entry.insert("output_fields".into(), json!(m.output_fields));
             }
 
             out.insert(path, Value::Object(entry));
@@ -201,7 +201,8 @@ fn build_metadata() -> HashMap<&'static str, CommandMeta> {
 
     macro_rules! meta {
         ($path:expr, $($field:ident: $val:expr),* $(,)?) => {
-            m.insert($path, CommandMeta { $($field: $val,)* ..Default::default() });
+            #[allow(clippy::needless_update)]
+            { m.insert($path, CommandMeta { $($field: $val,)* ..Default::default() }); }
         };
     }
 

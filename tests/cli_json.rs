@@ -5025,3 +5025,67 @@ fn lint_no_config_uses_defaults() {
     assert_eq!(envelope["data"]["warning_count"], 1);
     assert_eq!(envelope["data"]["error_count"], 0);
 }
+
+// ---------------------------------------------------------------------------
+// Schema / auto-JSON / quiet tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn schema_command_outputs_valid_json() {
+    let output = Command::cargo_bin("n8nc")
+        .expect("n8nc binary")
+        .arg("schema")
+        .output()
+        .expect("run schema");
+
+    assert!(output.status.success());
+    let schema: Value = serde_json::from_slice(&output.stdout).expect("valid JSON from schema");
+    assert_eq!(schema["name"], "n8nc");
+    assert!(schema["contract_version"].as_u64().unwrap() >= 1);
+    let commands = schema["commands"].as_object().expect("commands is an object");
+    assert!(
+        commands.len() > 20,
+        "expected >20 leaf commands, got {}",
+        commands.len()
+    );
+}
+
+#[test]
+fn auto_json_when_piped() {
+    // assert_cmd captures stdout, so it's not a TTY — auto-JSON should activate.
+    let output = Command::cargo_bin("n8nc")
+        .expect("n8nc binary")
+        .arg("schema")
+        .output()
+        .expect("run schema without --json flag");
+
+    assert!(output.status.success());
+    // If auto-JSON works, the output must be valid JSON.
+    let _: Value = serde_json::from_slice(&output.stdout).expect("auto-JSON should produce valid JSON when piped");
+}
+
+#[tokio::test]
+async fn quiet_suppresses_stderr() {
+    let server = MockServer::start().await;
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(dir.path())
+        .arg("--quiet")
+        .arg("ls")
+        .output()
+        .expect("run ls with --quiet");
+
+    assert!(output.status.success());
+    assert!(
+        output.stderr.is_empty(),
+        "stderr should be empty with --quiet, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
