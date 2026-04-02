@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.4.0](https://github.com/rvben/n8nc/compare/v0.3.0...v0.4.0) - 2026-04-02
+
+### Added
+
+- add agent-friendly CLI patterns (schema, auto-JSON, --quiet) ([b2d0c12](https://github.com/rvben/n8nc/commit/b2d0c12583b99474aa3c97b0f26389f62e493eaa))
+
+### Fixed
+
+- extend --quiet coverage and strengthen schema/auto-JSON tests ([c541b95](https://github.com/rvben/n8nc/commit/c541b95838f69807a529a4bf4f55dea2ab877b68))
+
 ## [0.3.0](https://github.com/rvben/n8nc/compare/v0.2.1...v0.3.0) - 2026-03-28
 
 ### Added
