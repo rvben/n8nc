@@ -6,9 +6,10 @@ use crate::{
     error::AppError,
 };
 
-pub async fn run(cli: Cli) -> Result<(), AppError> {
+pub async fn run(cli: Cli, json: bool) -> Result<(), AppError> {
     let context = Context {
-        json: cli.json,
+        json,
+        quiet: cli.quiet,
         repo_root: cli.repo_root,
     };
 
@@ -46,6 +47,10 @@ pub async fn run(cli: Cli) -> Result<(), AppError> {
                 "n8nc",
                 &mut std::io::stdout(),
             );
+            Ok(())
+        }
+        Command::Schema => {
+            crate::schema::print_schema();
             Ok(())
         }
     }

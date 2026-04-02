@@ -8,7 +8,7 @@ use crate::{
     error::AppError,
 };
 
-use super::common::{Context, emit_json};
+use super::common::{Context, emit_json, print_message};
 
 pub(crate) async fn cmd_init(context: &Context, args: InitArgs) -> Result<(), AppError> {
     let root = if let Some(path) = &context.repo_root {
@@ -58,9 +58,12 @@ pub(crate) async fn cmd_init(context: &Context, args: InitArgs) -> Result<(), Ap
     if context.json {
         emit_json("init", &data)
     } else {
-        println!("Initialized n8n repo at {}", root.display());
-        println!("Config: {}", root.join("n8n.toml").display());
-        println!("Workflow dir: {}", root.join(config.workflow_dir).display());
+        print_message(context, &format!("Initialized n8n repo at {}", root.display()));
+        print_message(context, &format!("Config: {}", root.join("n8n.toml").display()));
+        print_message(
+            context,
+            &format!("Workflow dir: {}", root.join(config.workflow_dir).display()),
+        );
         Ok(())
     }
 }

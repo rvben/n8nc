@@ -11,9 +11,11 @@ mod error;
 mod execute;
 mod lint;
 mod repo;
+mod schema;
 mod tree;
 mod validate;
 
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -23,8 +25,8 @@ use crate::cli::Cli;
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let json = cli.json;
-    match app::run(cli).await {
+    let json = cli.json || !std::io::stdout().is_terminal();
+    match app::run(cli, json).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => err.emit_and_exit(json),
     }

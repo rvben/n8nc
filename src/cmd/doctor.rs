@@ -60,12 +60,12 @@ pub(crate) async fn cmd_doctor(context: &Context, args: DoctorArgs) -> Result<()
         if context.json {
             emit_json("doctor", &report)
         } else {
-            print_doctor_report(&report);
+            print_doctor_report(context, &report);
             Ok(())
         }
     } else {
         if !context.json {
-            print_doctor_report(&report);
+            print_doctor_report(context, &report);
         }
         Err(doctor_failed_error(&report)?)
     }
@@ -513,10 +513,11 @@ fn doctor_failed_error(report: &DoctorReport) -> Result<AppError, AppError> {
     .with_json_data(data))
 }
 
-fn print_doctor_report(report: &DoctorReport) {
-    println!("Repo root: {}", report.repo_root.display());
+fn print_doctor_report(context: &Context, report: &DoctorReport) {
+    use crate::cmd::common::print_message;
+    print_message(context, &format!("Repo root: {}", report.repo_root.display()));
     if let Some(alias) = report.selected_instance.as_deref() {
-        println!("Selected instance: {alias}");
+        print_message(context, &format!("Selected instance: {alias}"));
     }
     println!(
         "{:<8} {:<10} {:<16} {:<18} DETAIL",
@@ -535,9 +536,12 @@ fn print_doctor_report(report: &DoctorReport) {
             println!("  {}", suggestion);
         }
     }
-    println!(
-        "Summary: ok={}, fail={}, skip={}",
-        report.summary.ok, report.summary.fail, report.summary.skip
+    print_message(
+        context,
+        &format!(
+            "Summary: ok={}, fail={}, skip={}",
+            report.summary.ok, report.summary.fail, report.summary.skip
+        ),
     );
 }
 

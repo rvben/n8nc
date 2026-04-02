@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::common::{
-    Context, absolutize, client_for_instance, emit_json, load_loaded_repo, truncate,
+    Context, absolutize, client_for_instance, emit_json, load_loaded_repo, print_message, truncate,
 };
 
 // ---------------------------------------------------------------------------
@@ -131,23 +131,29 @@ pub(crate) async fn cmd_status(context: &Context, args: StatusArgs) -> Result<()
                 println!("  {}", detail);
             }
         }
-        println!(
-            "Local summary: clean={}, modified={}, untracked={}, invalid={}, orphaned_meta={}",
-            summary.clean,
-            summary.modified,
-            summary.untracked,
-            summary.invalid,
-            summary.orphaned_meta
+        print_message(
+            context,
+            &format!(
+                "Local summary: clean={}, modified={}, untracked={}, invalid={}, orphaned_meta={}",
+                summary.clean,
+                summary.modified,
+                summary.untracked,
+                summary.invalid,
+                summary.orphaned_meta
+            ),
         );
         if let Some(sync_summary) = sync_summary {
-            println!(
-                "Sync summary: clean={}, modified={}, drifted={}, conflict={}, missing_remote={}, unavailable={}",
-                sync_summary.clean,
-                sync_summary.modified,
-                sync_summary.drifted,
-                sync_summary.conflict,
-                sync_summary.missing_remote,
-                sync_summary.unavailable
+            print_message(
+                context,
+                &format!(
+                    "Sync summary: clean={}, modified={}, drifted={}, conflict={}, missing_remote={}, unavailable={}",
+                    sync_summary.clean,
+                    sync_summary.modified,
+                    sync_summary.drifted,
+                    sync_summary.conflict,
+                    sync_summary.missing_remote,
+                    sync_summary.unavailable
+                ),
             );
         }
         Ok(())
