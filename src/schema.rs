@@ -343,4 +343,51 @@ mod tests {
         assert!(codes.contains_key("11"));
         assert!(codes.contains_key("12"));
     }
+
+    #[test]
+    fn all_leaf_commands_have_metadata() {
+        let cmd = test_cmd();
+        let metadata = build_metadata();
+
+        // Collect all leaf command paths the same way walk_commands does.
+        fn collect_leaf_paths(cmd: &clap::Command, prefix: &str, out: &mut Vec<String>) {
+            for sub in cmd.get_subcommands() {
+                let name = sub.get_name();
+                if name == "help" {
+                    continue;
+                }
+                let path = if prefix.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{prefix} {name}")
+                };
+                let has_subcommands = sub.get_subcommands().any(|s| s.get_name() != "help");
+                if has_subcommands {
+                    collect_leaf_paths(sub, &path, out);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+
+        let mut leaf_paths = Vec::new();
+        collect_leaf_paths(&cmd, "", &mut leaf_paths);
+
+        let mut missing = Vec::new();
+        for path in &leaf_paths {
+            // "schema" and "completions" are meta-commands; exclude them from the check.
+            if path == "schema" || path == "completions" || path == "help" {
+                continue;
+            }
+            if !metadata.contains_key(path.as_str()) {
+                missing.push(path.clone());
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "The following leaf commands are missing from the schema metadata map in schema.rs — add a `meta!(...)` entry for each:\n  {}",
+            missing.join("\n  ")
+        );
+    }
 }

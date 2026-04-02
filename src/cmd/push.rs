@@ -17,7 +17,7 @@ use crate::{
 
 use super::common::{
     Context, absolutize, emit_json, fetch_workflow_required, is_zero, load_loaded_repo,
-    print_sensitive_warning_summary, remote_client, unsupported_push_fields,
+    print_message, print_sensitive_warning_summary, remote_client, unsupported_push_fields,
     workflow_update_payload,
 };
 
@@ -119,7 +119,7 @@ pub(crate) async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), Ap
                 &json!({"workflow_id": meta.workflow_id, "changed": false}),
             );
         }
-        println!("No changes to push for {}.", meta.workflow_id);
+        print_message(context, &format!("No changes to push for {}.", meta.workflow_id));
         return Ok(());
     }
 
@@ -161,8 +161,11 @@ pub(crate) async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), Ap
         }
         emit_json("push", &Value::Object(data))
     } else {
-        println!("Pushed {}.", meta.workflow_id);
-        println!("Updated local file: {}", stored.workflow_path.display());
+        print_message(context, &format!("Pushed {}.", meta.workflow_id));
+        print_message(
+            context,
+            &format!("Updated local file: {}", stored.workflow_path.display()),
+        );
         print_sensitive_warning_summary(&stored.workflow_path, warning_count);
         Ok(())
     }
@@ -189,9 +192,7 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
         match entry.state {
             LocalWorkflowState::Modified => {}
             LocalWorkflowState::Clean => {
-                if !context.json {
-                    println!("Unchanged {} ({})", wf_id, entry.file.display());
-                }
+                print_message(context, &format!("Unchanged {} ({})", wf_id, entry.file.display()));
                 results.push(BatchPushResult {
                     workflow_id: wf_id,
                     name: wf_name,
@@ -212,9 +213,10 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
                     LocalWorkflowState::OrphanedMeta => "orphaned metadata",
                     _ => "unknown",
                 };
-                if !context.json {
-                    println!("Skipped {} ({}) — {}", wf_id, entry.file.display(), reason);
-                }
+                print_message(
+                    context,
+                    &format!("Skipped {} ({}) — {}", wf_id, entry.file.display(), reason),
+                );
                 results.push(BatchPushResult {
                     workflow_id: wf_id,
                     name: wf_name,
@@ -233,9 +235,7 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
         let meta_path = match &entry.sidecar {
             Some(path) => path.clone(),
             None => {
-                if !context.json {
-                    println!("Skipped {} — missing sidecar", wf_id);
-                }
+                print_message(context, &format!("Skipped {wf_id} — missing sidecar"));
                 results.push(BatchPushResult {
                     workflow_id: wf_id,
                     name: wf_name,
@@ -265,10 +265,11 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
                 let wc = warnings.len();
                 total_warning_count += wc;
 
-                if !context.json {
-                    println!("Pushed {} -> {}", wf_id, stored.workflow_path.display());
-                    print_sensitive_warning_summary(&stored.workflow_path, wc);
-                }
+                print_message(
+                    context,
+                    &format!("Pushed {} -> {}", wf_id, stored.workflow_path.display()),
+                );
+                print_sensitive_warning_summary(&stored.workflow_path, wc);
 
                 results.push(BatchPushResult {
                     workflow_id: wf_id,
@@ -283,9 +284,7 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
                 pushed_count += 1;
             }
             Ok(PushOneResult::Unchanged) => {
-                if !context.json {
-                    println!("Unchanged {} ({})", wf_id, entry.file.display());
-                }
+                print_message(context, &format!("Unchanged {} ({})", wf_id, entry.file.display()));
                 results.push(BatchPushResult {
                     workflow_id: wf_id,
                     name: wf_name,
@@ -299,9 +298,7 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
                 unchanged_count += 1;
             }
             Err(err) => {
-                if !context.json {
-                    println!("Failed {}: {}", wf_id, err.message);
-                }
+                print_message(context, &format!("Failed {}: {}", wf_id, err.message));
                 results.push(BatchPushResult {
                     workflow_id: wf_id,
                     name: wf_name,
@@ -317,13 +314,13 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
         }
     }
 
-    if !context.json {
-        println!("---");
-        println!(
-            "Pushed: {}, Unchanged: {}, Skipped: {}, Failed: {}",
-            pushed_count, unchanged_count, skipped_count, failed_count
-        );
-    }
+    print_message(context, "---");
+    print_message(
+        context,
+        &format!(
+            "Pushed: {pushed_count}, Unchanged: {unchanged_count}, Skipped: {skipped_count}, Failed: {failed_count}"
+        ),
+    );
 
     let data = json!({
         "total": results.len(),

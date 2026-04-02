@@ -31,10 +31,10 @@ use crate::{
 use super::common::{
     Context, WEBHOOK_NODE_TYPE, emit_edit_result, emit_json, fetch_workflow_required,
     finalize_created_workflow_source, load_loaded_repo, normalize_webhook_path,
-    parse_workflow_execute_input, print_response_body, print_sensitive_warning_summary,
-    read_request_body, remote_client, resolve_existing_workflow_path, resolve_local_file_path,
-    resolve_new_workflow_path, truncate, value_string, wait_for_workflow_active_state,
-    workflow_create_payload,
+    parse_workflow_execute_input, print_message, print_response_body,
+    print_sensitive_warning_summary, read_request_body, remote_client,
+    resolve_existing_workflow_path, resolve_local_file_path, resolve_new_workflow_path, truncate,
+    value_string, wait_for_workflow_active_state, workflow_create_payload,
 };
 
 // ---------------------------------------------------------------------------
@@ -248,19 +248,28 @@ async fn cmd_workflow_create(context: &Context, args: WorkflowCreateArgs) -> Res
         }
         emit_json("workflow", &Value::Object(data))
     } else {
-        println!(
-            "Created remote workflow {} -> {}",
-            stored.meta.workflow_id,
-            stored.workflow_path.display()
+        print_message(
+            context,
+            &format!(
+                "Created remote workflow {} -> {}",
+                stored.meta.workflow_id,
+                stored.workflow_path.display()
+            ),
         );
-        println!("Metadata: {}", stored.meta_path.display());
+        print_message(context, &format!("Metadata: {}", stored.meta_path.display()));
         if source_removed {
-            println!("Removed original draft: {}", source_path.display());
+            print_message(
+                context,
+                &format!("Removed original draft: {}", source_path.display()),
+            );
         } else if source_path != stored.workflow_path {
-            println!("Original local file kept at {}", source_path.display());
+            print_message(
+                context,
+                &format!("Original local file kept at {}", source_path.display()),
+            );
         }
         if let Some(cleanup_warning) = cleanup_warning {
-            println!("{cleanup_warning}");
+            print_message(context, &cleanup_warning);
         }
         print_workflow_webhooks(&webhooks);
         print_sensitive_warning_summary(&stored.workflow_path, warning_count);
@@ -482,28 +491,31 @@ async fn cmd_workflow_remove(context: &Context, args: WorkflowRemoveArgs) -> Res
         emit_json("workflow", &result)
     } else {
         if result.remote_removed {
-            println!(
-                "Deleted remote workflow {}{}.",
-                result
-                    .workflow_id
-                    .as_deref()
-                    .unwrap_or(result.target.as_str()),
-                result
-                    .workflow_name
-                    .as_deref()
-                    .map(|name| format!(" ({name})"))
-                    .unwrap_or_default()
+            print_message(
+                context,
+                &format!(
+                    "Deleted remote workflow {}{}.",
+                    result
+                        .workflow_id
+                        .as_deref()
+                        .unwrap_or(result.target.as_str()),
+                    result
+                        .workflow_name
+                        .as_deref()
+                        .map(|name| format!(" ({name})"))
+                        .unwrap_or_default()
+                ),
             );
         }
         if result.local_removed {
-            println!("Removed local artifacts:");
+            print_message(context, "Removed local artifacts:");
             for path in &result.removed_paths {
-                println!("  {}", path.display());
+                print_message(context, &format!("  {}", path.display()));
             }
         } else if args.keep_local {
-            println!("Kept local artifacts.");
+            print_message(context, "Kept local artifacts.");
         } else if !result.remote_removed {
-            println!("Removed local workflow file.");
+            print_message(context, "Removed local workflow file.");
         }
         Ok(())
     }

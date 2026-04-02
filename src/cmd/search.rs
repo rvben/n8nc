@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::{cli::SearchArgs, config::workflow_dir, error::AppError, repo::load_workflow_file};
 
-use super::common::{Context, emit_json, load_loaded_repo};
+use super::common::{Context, emit_json, load_loaded_repo, print_message};
 
 const COMMAND: &str = "search";
 
@@ -332,7 +332,7 @@ pub(crate) async fn cmd_search(context: &Context, args: SearchArgs) -> Result<()
                 println!("    {}: \"{}\"", m.field, m.value);
             }
         }
-        println!("{total_matches} match(es) across {workflows_matched} workflow(s).");
+        print_message(context, &format!("{total_matches} match(es) across {workflows_matched} workflow(s)."));
         Ok(())
     }
 }

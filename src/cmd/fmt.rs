@@ -9,7 +9,7 @@ use crate::{
     repo::{collect_json_targets, format_json_file},
 };
 
-use super::common::{Context, emit_json};
+use super::common::{Context, emit_json, print_message};
 
 // ---------------------------------------------------------------------------
 // Commands
@@ -51,11 +51,11 @@ pub(crate) async fn cmd_fmt(context: &Context, args: FmtArgs) -> Result<(), AppE
         )
     } else {
         if changed.is_empty() {
-            println!("All files are already formatted.");
+            print_message(context, "All files are already formatted.");
         } else if args.check {
-            println!("{} file(s) would be reformatted.", changed.len());
+            print_message(context, &format!("{} file(s) would be reformatted.", changed.len()));
         } else {
-            println!("Formatted {} file(s).", changed.len());
+            print_message(context, &format!("Formatted {} file(s).", changed.len()));
         }
         Ok(())
     }

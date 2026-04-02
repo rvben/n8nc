@@ -5050,18 +5050,34 @@ fn schema_command_outputs_valid_json() {
     );
 }
 
-#[test]
-fn auto_json_when_piped() {
+#[tokio::test]
+async fn auto_json_when_piped() {
     // assert_cmd captures stdout, so it's not a TTY — auto-JSON should activate.
+    // Use `ls` (a real command with data output) rather than `schema` (always JSON).
+    let server = MockServer::start().await;
+    let dir = tempdir().unwrap();
+    write_repo(dir.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+        .mount(&server)
+        .await;
+
+    // Intentionally omit --json to verify auto-JSON activates when not a TTY.
     let output = Command::cargo_bin("n8nc")
         .expect("n8nc binary")
-        .arg("schema")
+        .arg("--repo-root")
+        .arg(dir.path())
+        .env("N8NC_TOKEN_MOCK", "test-token")
+        .arg("ls")
         .output()
-        .expect("run schema without --json flag");
+        .expect("run ls without --json flag");
 
     assert!(output.status.success());
-    // If auto-JSON works, the output must be valid JSON.
-    let _: Value = serde_json::from_slice(&output.stdout).expect("auto-JSON should produce valid JSON when piped");
+    let envelope: Value = serde_json::from_slice(&output.stdout)
+        .expect("auto-JSON should produce valid JSON when stdout is not a TTY");
+    assert_eq!(envelope["ok"], true);
 }
 
 #[tokio::test]

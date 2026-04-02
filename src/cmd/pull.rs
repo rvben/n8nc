@@ -17,7 +17,8 @@ use crate::{
 };
 
 use super::common::{
-    Context, emit_json, is_zero, load_loaded_repo, print_sensitive_warning_summary, remote_client,
+    Context, emit_json, is_zero, load_loaded_repo, print_message, print_sensitive_warning_summary,
+    remote_client,
 };
 
 #[derive(Debug, Serialize)]
@@ -80,12 +81,18 @@ pub(crate) async fn cmd_pull(context: &Context, args: PullArgs) -> Result<(), Ap
         }
         emit_json("pull", &Value::Object(data))
     } else {
-        println!(
-            "Pulled {} -> {}",
-            stored.meta.workflow_id,
-            stored.workflow_path.display()
+        print_message(
+            context,
+            &format!(
+                "Pulled {} -> {}",
+                stored.meta.workflow_id,
+                stored.workflow_path.display()
+            ),
         );
-        println!("Metadata: {}", stored.meta_path.display());
+        print_message(
+            context,
+            &format!("Metadata: {}", stored.meta_path.display()),
+        );
         print_sensitive_warning_summary(&stored.workflow_path, warning_count);
         Ok(())
     }
@@ -129,10 +136,11 @@ async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError>
                 let wc = warnings.len();
                 total_warning_count += wc;
 
-                if !context.json {
-                    println!("Pulled {} -> {}", wf_id, stored.workflow_path.display());
-                    print_sensitive_warning_summary(&stored.workflow_path, wc);
-                }
+                print_message(
+                    context,
+                    &format!("Pulled {} -> {}", wf_id, stored.workflow_path.display()),
+                );
+                print_sensitive_warning_summary(&stored.workflow_path, wc);
 
                 results.push(BatchPullResult {
                     workflow_id: wf_id,
@@ -147,9 +155,7 @@ async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError>
                 pulled_count += 1;
             }
             Ok(PullOneResult::Unchanged(path)) => {
-                if !context.json {
-                    println!("Unchanged {} ({})", wf_id, path.display());
-                }
+                print_message(context, &format!("Unchanged {} ({})", wf_id, path.display()));
 
                 results.push(BatchPullResult {
                     workflow_id: wf_id,
@@ -164,9 +170,7 @@ async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError>
                 unchanged_count += 1;
             }
             Err(err) => {
-                if !context.json {
-                    println!("Failed {}: {}", wf_id, err.message);
-                }
+                print_message(context, &format!("Failed {}: {}", wf_id, err.message));
 
                 results.push(BatchPullResult {
                     workflow_id: wf_id,
@@ -223,9 +227,7 @@ async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError>
             let _ = fs::remove_file(&meta_path);
             let _ = fs::remove_file(&cache_path);
 
-            if !context.json {
-                println!("Pruned {} ({})", wf_id, workflow_path.display());
-            }
+            print_message(context, &format!("Pruned {} ({})", wf_id, workflow_path.display()));
 
             pruned_results.push(BatchPruneResult {
                 workflow_id: wf_id.clone(),
@@ -237,13 +239,13 @@ async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError>
     }
     let pruned_count = pruned_results.len();
 
-    if !context.json {
-        println!("---");
-        println!(
-            "Pulled: {}, Unchanged: {}, Failed: {}, Pruned: {}",
-            pulled_count, unchanged_count, failed_count, pruned_count
-        );
-    }
+    print_message(context, "---");
+    print_message(
+        context,
+        &format!(
+            "Pulled: {pulled_count}, Unchanged: {unchanged_count}, Failed: {failed_count}, Pruned: {pruned_count}"
+        ),
+    );
 
     let data = json!({
         "instance": alias,

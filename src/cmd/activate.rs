@@ -13,7 +13,10 @@ use crate::{
 
 use super::{
     auth::session_auth_setup_hint,
-    common::{Context, emit_json, load_loaded_repo, remote_client, wait_for_workflow_active_state},
+    common::{
+        Context, emit_json, load_loaded_repo, print_message, remote_client,
+        wait_for_workflow_active_state,
+    },
     workflow::{print_workflow_webhooks, summarize_workflow_webhooks},
 };
 
@@ -63,14 +66,12 @@ pub(crate) async fn cmd_activation(
             &json!({"workflow_id": wf_id, "active": active_state, "webhooks": webhooks}),
         )
     } else {
-        println!(
-            "{} {}.",
-            if active_state {
-                "Activated"
-            } else {
-                "Deactivated"
-            },
-            wf_id
+        print_message(
+            context,
+            &format!(
+                "{} {wf_id}.",
+                if active_state { "Activated" } else { "Deactivated" }
+            ),
         );
         if active_state {
             print_workflow_webhooks(&webhooks);
@@ -119,7 +120,7 @@ pub(crate) async fn cmd_archive(
                 }),
             );
         } else {
-            println!("Already archived: \"{workflow_name_str}\" ({wf_id})");
+            print_message(context, &format!("Already archived: \"{workflow_name_str}\" ({wf_id})"));
             return Ok(());
         }
     }
@@ -139,7 +140,7 @@ pub(crate) async fn cmd_archive(
                 }),
             );
         } else {
-            println!("Already unarchived: \"{workflow_name_str}\" ({wf_id})");
+            print_message(context, &format!("Already unarchived: \"{workflow_name_str}\" ({wf_id})"));
             return Ok(());
         }
     }
@@ -196,14 +197,15 @@ pub(crate) async fn cmd_archive(
         )
     } else {
         let action_word = if archive { "Archived" } else { "Unarchived" };
-        println!("{action_word} \"{workflow_name_str}\" ({wf_id}) on {alias}");
+        print_message(context, &format!("{action_word} \"{workflow_name_str}\" ({wf_id}) on {alias}"));
         if archive && active_before {
-            println!("  Workflow was deactivated automatically");
+            print_message(context, "  Workflow was deactivated automatically");
         }
-        println!("  Note: uses n8n internal API (session auth required)");
+        print_message(context, "  Note: uses n8n internal API (session auth required)");
         if !refetch_ok {
-            println!(
-                "  Warning: could not re-fetch workflow after archive (public API may not expose archived workflows)"
+            print_message(
+                context,
+                "  Warning: could not re-fetch workflow after archive (public API may not expose archived workflows)",
             );
         }
         Ok(())

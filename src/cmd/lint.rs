@@ -10,7 +10,7 @@ use crate::{
     repo::{collect_json_targets, load_workflow_file},
 };
 
-use super::common::{Context, emit_json};
+use super::common::{Context, emit_json, print_message};
 
 pub(crate) async fn cmd_lint(context: &Context, args: LintArgs) -> Result<(), AppError> {
     let repo = load_repo(context.repo_root.as_deref()).ok();
@@ -86,11 +86,14 @@ pub(crate) async fn cmd_lint(context: &Context, args: LintArgs) -> Result<(), Ap
                 }
             }
         }
-        println!(
-            "{} file(s), {} warning(s), {} error(s).",
-            workflow_files.len(),
-            warning_count,
-            error_count
+        print_message(
+            context,
+            &format!(
+                "{} file(s), {} warning(s), {} error(s).",
+                workflow_files.len(),
+                warning_count,
+                error_count
+            ),
         );
     }
 
