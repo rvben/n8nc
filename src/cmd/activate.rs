@@ -70,7 +70,11 @@ pub(crate) async fn cmd_activation(
             context,
             &format!(
                 "{} {wf_id}.",
-                if active_state { "Activated" } else { "Deactivated" }
+                if active_state {
+                    "Activated"
+                } else {
+                    "Deactivated"
+                }
             ),
         );
         if active_state {
@@ -120,7 +124,10 @@ pub(crate) async fn cmd_archive(
                 }),
             );
         } else {
-            print_message(context, &format!("Already archived: \"{workflow_name_str}\" ({wf_id})"));
+            print_message(
+                context,
+                &format!("Already archived: \"{workflow_name_str}\" ({wf_id})"),
+            );
             return Ok(());
         }
     }
@@ -140,7 +147,10 @@ pub(crate) async fn cmd_archive(
                 }),
             );
         } else {
-            print_message(context, &format!("Already unarchived: \"{workflow_name_str}\" ({wf_id})"));
+            print_message(
+                context,
+                &format!("Already unarchived: \"{workflow_name_str}\" ({wf_id})"),
+            );
             return Ok(());
         }
     }
@@ -197,11 +207,17 @@ pub(crate) async fn cmd_archive(
         )
     } else {
         let action_word = if archive { "Archived" } else { "Unarchived" };
-        print_message(context, &format!("{action_word} \"{workflow_name_str}\" ({wf_id}) on {alias}"));
+        print_message(
+            context,
+            &format!("{action_word} \"{workflow_name_str}\" ({wf_id}) on {alias}"),
+        );
         if archive && active_before {
             print_message(context, "  Workflow was deactivated automatically");
         }
-        print_message(context, "  Note: uses n8n internal API (session auth required)");
+        print_message(
+            context,
+            "  Note: uses n8n internal API (session auth required)",
+        );
         if !refetch_ok {
             print_message(
                 context,

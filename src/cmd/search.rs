@@ -332,7 +332,10 @@ pub(crate) async fn cmd_search(context: &Context, args: SearchArgs) -> Result<()
                 println!("    {}: \"{}\"", m.field, m.value);
             }
         }
-        print_message(context, &format!("{total_matches} match(es) across {workflows_matched} workflow(s)."));
+        print_message(
+            context,
+            &format!("{total_matches} match(es) across {workflows_matched} workflow(s)."),
+        );
         Ok(())
     }
 }

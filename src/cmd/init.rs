@@ -58,8 +58,14 @@ pub(crate) async fn cmd_init(context: &Context, args: InitArgs) -> Result<(), Ap
     if context.json {
         emit_json("init", &data)
     } else {
-        print_message(context, &format!("Initialized n8n repo at {}", root.display()));
-        print_message(context, &format!("Config: {}", root.join("n8n.toml").display()));
+        print_message(
+            context,
+            &format!("Initialized n8n repo at {}", root.display()),
+        );
+        print_message(
+            context,
+            &format!("Config: {}", root.join("n8n.toml").display()),
+        );
         print_message(
             context,
             &format!("Workflow dir: {}", root.join(config.workflow_dir).display()),

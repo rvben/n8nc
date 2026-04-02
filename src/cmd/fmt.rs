@@ -53,7 +53,10 @@ pub(crate) async fn cmd_fmt(context: &Context, args: FmtArgs) -> Result<(), AppE
         if changed.is_empty() {
             print_message(context, "All files are already formatted.");
         } else if args.check {
-            print_message(context, &format!("{} file(s) would be reformatted.", changed.len()));
+            print_message(
+                context,
+                &format!("{} file(s) would be reformatted.", changed.len()),
+            );
         } else {
             print_message(context, &format!("Formatted {} file(s).", changed.len()));
         }

@@ -256,7 +256,10 @@ async fn cmd_workflow_create(context: &Context, args: WorkflowCreateArgs) -> Res
                 stored.workflow_path.display()
             ),
         );
-        print_message(context, &format!("Metadata: {}", stored.meta_path.display()));
+        print_message(
+            context,
+            &format!("Metadata: {}", stored.meta_path.display()),
+        );
         if source_removed {
             print_message(
                 context,

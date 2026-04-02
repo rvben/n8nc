@@ -155,7 +155,10 @@ async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError>
                 pulled_count += 1;
             }
             Ok(PullOneResult::Unchanged(path)) => {
-                print_message(context, &format!("Unchanged {} ({})", wf_id, path.display()));
+                print_message(
+                    context,
+                    &format!("Unchanged {} ({})", wf_id, path.display()),
+                );
 
                 results.push(BatchPullResult {
                     workflow_id: wf_id,
@@ -227,7 +230,10 @@ async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError>
             let _ = fs::remove_file(&meta_path);
             let _ = fs::remove_file(&cache_path);
 
-            print_message(context, &format!("Pruned {} ({})", wf_id, workflow_path.display()));
+            print_message(
+                context,
+                &format!("Pruned {} ({})", wf_id, workflow_path.display()),
+            );
 
             pruned_results.push(BatchPruneResult {
                 workflow_id: wf_id.clone(),

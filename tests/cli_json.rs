@@ -5042,7 +5042,9 @@ fn schema_command_outputs_valid_json() {
     let schema: Value = serde_json::from_slice(&output.stdout).expect("valid JSON from schema");
     assert_eq!(schema["name"], "n8nc");
     assert!(schema["contract_version"].as_u64().unwrap() >= 1);
-    let commands = schema["commands"].as_object().expect("commands is an object");
+    let commands = schema["commands"]
+        .as_object()
+        .expect("commands is an object");
     assert!(
         commands.len() > 20,
         "expected >20 leaf commands, got {}",

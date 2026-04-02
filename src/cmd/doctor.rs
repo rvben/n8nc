@@ -515,7 +515,10 @@ fn doctor_failed_error(report: &DoctorReport) -> Result<AppError, AppError> {
 
 fn print_doctor_report(context: &Context, report: &DoctorReport) {
     use crate::cmd::common::print_message;
-    print_message(context, &format!("Repo root: {}", report.repo_root.display()));
+    print_message(
+        context,
+        &format!("Repo root: {}", report.repo_root.display()),
+    );
     if let Some(alias) = report.selected_instance.as_deref() {
         print_message(context, &format!("Selected instance: {alias}"));
     }

@@ -119,7 +119,10 @@ pub(crate) async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), Ap
                 &json!({"workflow_id": meta.workflow_id, "changed": false}),
             );
         }
-        print_message(context, &format!("No changes to push for {}.", meta.workflow_id));
+        print_message(
+            context,
+            &format!("No changes to push for {}.", meta.workflow_id),
+        );
         return Ok(());
     }
 
@@ -192,7 +195,10 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
         match entry.state {
             LocalWorkflowState::Modified => {}
             LocalWorkflowState::Clean => {
-                print_message(context, &format!("Unchanged {} ({})", wf_id, entry.file.display()));
+                print_message(
+                    context,
+                    &format!("Unchanged {} ({})", wf_id, entry.file.display()),
+                );
                 results.push(BatchPushResult {
                     workflow_id: wf_id,
                     name: wf_name,
@@ -284,7 +290,10 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
                 pushed_count += 1;
             }
             Ok(PushOneResult::Unchanged) => {
-                print_message(context, &format!("Unchanged {} ({})", wf_id, entry.file.display()));
+                print_message(
+                    context,
+                    &format!("Unchanged {} ({})", wf_id, entry.file.display()),
+                );
                 results.push(BatchPushResult {
                     workflow_id: wf_id,
                     name: wf_name,
