@@ -1,5 +1,7 @@
 # n8nc
 
+[![codecov](https://codecov.io/gh/rvben/n8nc/graph/badge.svg)](https://codecov.io/gh/rvben/n8nc)
+
 CLI for n8n workflow automation. Sync workflows with Git, author them locally, and manage remote instances from the terminal.
 
 ## Quick start
