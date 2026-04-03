@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.4.2](https://github.com/rvben/n8nc/compare/v0.4.1...v0.4.2) - 2026-04-03
+
 ## [0.4.1](https://github.com/rvben/n8nc/compare/v0.4.0...v0.4.1) - 2026-04-03
 
 ### Added
