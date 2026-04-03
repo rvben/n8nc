@@ -93,10 +93,15 @@ pub struct CompletionsArgs {
 
 #[derive(Debug, Args)]
 pub struct InitArgs {
+    /// Instance alias (prompted interactively when omitted)
     #[arg(long)]
-    pub instance: String,
+    pub instance: Option<String>,
+    /// n8n base URL (prompted interactively when omitted)
     #[arg(long)]
-    pub url: String,
+    pub url: Option<String>,
+    /// API key to store (prompted interactively when omitted)
+    #[arg(long)]
+    pub token: Option<String>,
     #[arg(long, default_value = "workflows")]
     pub workflow_dir: PathBuf,
     #[arg(long)]
