@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.4.1](https://github.com/rvben/n8nc/compare/v0.4.0...v0.4.1) - 2026-04-03
+
+### Added
+
+- add colored terminal output with owo-colors ([d12a837](https://github.com/rvben/n8nc/commit/d12a837e06e68f51f6531520947a53ec7d392f97))
+
 ## [0.4.0](https://github.com/rvben/n8nc/compare/v0.3.0...v0.4.0) - 2026-04-02
 
 ### Added
