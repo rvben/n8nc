@@ -9,6 +9,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.4.3](https://github.com/rvben/n8nc/compare/v0.4.2...v0.4.3) - 2026-04-03
+
+### Added
+
+- **init**: add interactive init with credential validation and next steps ([7b74ef0](https://github.com/rvben/n8nc/commit/7b74ef0d362122bf8442dd2c56b60b9cea06a1a0))
+
 ## [0.4.2](https://github.com/rvben/n8nc/compare/v0.4.1...v0.4.2) - 2026-04-03
 
 ## [0.4.1](https://github.com/rvben/n8nc/compare/v0.4.0...v0.4.1) - 2026-04-03
