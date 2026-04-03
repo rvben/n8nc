@@ -11,6 +11,8 @@ use chrono::Utc;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use owo_colors::OwoColorize;
+
 use crate::{
     api::ApiClient,
     auth::resolve_token,
@@ -142,11 +144,20 @@ pub(crate) fn print_sensitive_warning_summary(workflow_path: &Path, warning_coun
         return;
     }
 
-    println!(
-        "Warning: found {} potential sensitive-data warning(s) in {}.",
-        warning_count,
-        workflow_path.display()
-    );
+    if use_color() {
+        println!(
+            "{} found {} potential sensitive-data warning(s) in {}.",
+            "Warning:".yellow().bold(),
+            warning_count,
+            workflow_path.display()
+        );
+    } else {
+        println!(
+            "Warning: found {} potential sensitive-data warning(s) in {}.",
+            warning_count,
+            workflow_path.display()
+        );
+    }
     println!(
         "Run `n8nc validate {}` to inspect the findings.",
         workflow_path.display()
@@ -670,6 +681,10 @@ pub(crate) fn parse_workflow_execute_input(
 // ---------------------------------------------------------------------------
 // Display / formatting helpers
 // ---------------------------------------------------------------------------
+
+pub(crate) fn use_color() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stdout())
+}
 
 pub(crate) fn print_response_body(value: &Value) -> Result<(), AppError> {
     match value {

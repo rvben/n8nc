@@ -14,8 +14,11 @@ use crate::{
     },
 };
 
+use owo_colors::OwoColorize;
+
 use super::common::{
     Context, absolutize, client_for_instance, emit_json, load_loaded_repo, print_message, truncate,
+    use_color,
 };
 
 // ---------------------------------------------------------------------------
@@ -92,10 +95,32 @@ pub(crate) async fn cmd_status(context: &Context, args: StatusArgs) -> Result<()
         );
         emit_json("status", &Value::Object(data))
     } else {
+        let color = use_color();
         if args.refresh {
+            if color {
+                println!(
+                    "{:<14} {:<14} {:<14} {:<20} {:<20} {}",
+                    "LOCAL".bold(),
+                    "SYNC".bold(),
+                    "INSTANCE".bold(),
+                    "ID".bold(),
+                    "LOCAL HASH".bold(),
+                    "FILE".bold()
+                );
+            } else {
+                println!(
+                    "{:<14} {:<14} {:<14} {:<20} {:<20} FILE",
+                    "LOCAL", "SYNC", "INSTANCE", "ID", "LOCAL HASH"
+                );
+            }
+        } else if color {
             println!(
-                "{:<14} {:<14} {:<14} {:<20} {:<20} FILE",
-                "LOCAL", "SYNC", "INSTANCE", "ID", "LOCAL HASH"
+                "{:<14} {:<14} {:<20} {:<20} {}",
+                "STATE".bold(),
+                "INSTANCE".bold(),
+                "ID".bold(),
+                "LOCAL HASH".bold(),
+                "FILE".bold()
             );
         } else {
             println!(
@@ -104,11 +129,39 @@ pub(crate) async fn cmd_status(context: &Context, args: StatusArgs) -> Result<()
             );
         }
         for status in &statuses {
+            let local_label = local_status_label(status.state);
+            let local_padded = format!("{local_label:<14}");
+            let local_display: String = if color {
+                match status.state {
+                    LocalWorkflowState::Clean => local_padded.green().to_string(),
+                    LocalWorkflowState::Modified => local_padded.yellow().to_string(),
+                    LocalWorkflowState::Untracked => local_padded.cyan().to_string(),
+                    LocalWorkflowState::Invalid | LocalWorkflowState::OrphanedMeta => {
+                        local_padded.red().to_string()
+                    }
+                }
+            } else {
+                local_padded
+            };
             if args.refresh {
+                let sync_label = status.sync_state.map(sync_status_label).unwrap_or("-");
+                let sync_padded = format!("{sync_label:<14}");
+                let sync_display: String = if color {
+                    match status.sync_state {
+                        Some(RemoteSyncState::Clean) => sync_padded.green().to_string(),
+                        Some(RemoteSyncState::Modified) => sync_padded.yellow().to_string(),
+                        Some(RemoteSyncState::Drifted) => sync_padded.yellow().to_string(),
+                        Some(RemoteSyncState::Conflict) => sync_padded.red().to_string(),
+                        Some(RemoteSyncState::MissingRemote) => sync_padded.red().to_string(),
+                        None => sync_padded,
+                    }
+                } else {
+                    sync_padded
+                };
                 println!(
-                    "{:<14} {:<14} {:<14} {:<20} {:<20} {}",
-                    local_status_label(status.state),
-                    status.sync_state.map(sync_status_label).unwrap_or("-"),
+                    "{} {} {:<14} {:<20} {:<20} {}",
+                    local_display,
+                    sync_display,
                     status.instance.as_deref().unwrap_or("-"),
                     truncate(status.workflow_id.as_deref().unwrap_or("-"), 20),
                     truncate(status.local_hash.as_deref().unwrap_or("-"), 20),
@@ -116,8 +169,8 @@ pub(crate) async fn cmd_status(context: &Context, args: StatusArgs) -> Result<()
                 );
             } else {
                 println!(
-                    "{:<14} {:<14} {:<20} {:<20} {}",
-                    local_status_label(status.state),
+                    "{} {:<14} {:<20} {:<20} {}",
+                    local_display,
                     status.instance.as_deref().unwrap_or("-"),
                     truncate(status.workflow_id.as_deref().unwrap_or("-"), 20),
                     truncate(status.local_hash.as_deref().unwrap_or("-"), 20),

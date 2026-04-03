@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use owo_colors::OwoColorize;
 use serde_json::json;
 
 use crate::{
@@ -10,7 +11,7 @@ use crate::{
     repo::{collect_json_targets, load_workflow_file},
 };
 
-use super::common::{Context, emit_json, print_message};
+use super::common::{Context, emit_json, print_message, use_color};
 
 pub(crate) async fn cmd_lint(context: &Context, args: LintArgs) -> Result<(), AppError> {
     let repo = load_repo(context.repo_root.as_deref()).ok();
@@ -70,6 +71,7 @@ pub(crate) async fn cmd_lint(context: &Context, args: LintArgs) -> Result<(), Ap
         }
         emit_json("lint", &summary)?;
     } else {
+        let color = use_color();
         for result in &all_results {
             let file = result["file"].as_str().unwrap_or("-");
             if let Some(diags) = result["diagnostics"].as_array() {
@@ -78,10 +80,19 @@ pub(crate) async fn cmd_lint(context: &Context, args: LintArgs) -> Result<(), Ap
                     let rule = diag["rule"].as_str().unwrap_or("unknown");
                     let node = diag["node"].as_str().unwrap_or("");
                     let message = diag["message"].as_str().unwrap_or("");
-                    if node.is_empty() {
-                        println!("[{severity}] {file} ({rule}) {message}");
+                    let severity_display: String = if color {
+                        match severity {
+                            "error" => format!("[{}]", severity.red().bold()),
+                            "warn" => format!("[{}]", severity.yellow()),
+                            _ => format!("[{severity}]"),
+                        }
                     } else {
-                        println!("[{severity}] {file} node={node} ({rule}) {message}");
+                        format!("[{severity}]")
+                    };
+                    if node.is_empty() {
+                        println!("{severity_display} {file} ({rule}) {message}");
+                    } else {
+                        println!("{severity_display} {file} node={node} ({rule}) {message}");
                     }
                 }
             }

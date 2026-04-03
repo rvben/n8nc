@@ -1,3 +1,4 @@
+use owo_colors::OwoColorize;
 use serde::Serialize;
 use serde_json::json;
 
@@ -16,7 +17,7 @@ use crate::{
     error::AppError,
 };
 
-use super::common::{Context, emit_json, load_loaded_repo, remote_client};
+use super::common::{Context, emit_json, load_loaded_repo, remote_client, use_color};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct AuthListRow {
@@ -210,11 +211,28 @@ async fn cmd_auth_list(context: &Context) -> Result<(), AppError> {
     if context.json {
         emit_json("auth", &json!({ "instances": rows }))
     } else {
-        println!("{:<16} {:<10} {:<22} BASE URL", "ALIAS", "TOKEN", "SESSION");
-        for row in rows {
+        let color = use_color();
+        if color {
             println!(
                 "{:<16} {:<10} {:<22} {}",
-                row.alias,
+                "ALIAS".bold(),
+                "TOKEN".bold(),
+                "SESSION".bold(),
+                "BASE URL".bold()
+            );
+        } else {
+            println!("{:<16} {:<10} {:<22} BASE URL", "ALIAS", "TOKEN", "SESSION");
+        }
+        for row in rows {
+            let alias_padded = format!("{:<16}", row.alias);
+            let alias_display: String = if color {
+                alias_padded.cyan().to_string()
+            } else {
+                alias_padded
+            };
+            println!(
+                "{} {:<10} {:<22} {}",
+                alias_display,
                 row.token_source,
                 auth_session_status_label(&row),
                 row.base_url

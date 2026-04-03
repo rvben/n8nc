@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use owo_colors::OwoColorize;
 use serde::Serialize;
 
 use crate::{
@@ -14,7 +15,7 @@ use crate::{
     validate::sensitive_data_diagnostics,
 };
 
-use super::common::{Context, emit_json, load_loaded_repo, truncate};
+use super::common::{Context, emit_json, load_loaded_repo, truncate, use_color};
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -515,6 +516,7 @@ fn doctor_failed_error(report: &DoctorReport) -> Result<AppError, AppError> {
 
 fn print_doctor_report(context: &Context, report: &DoctorReport) {
     use crate::cmd::common::print_message;
+    let color = use_color();
     print_message(
         context,
         &format!("Repo root: {}", report.repo_root.display()),
@@ -522,21 +524,47 @@ fn print_doctor_report(context: &Context, report: &DoctorReport) {
     if let Some(alias) = report.selected_instance.as_deref() {
         print_message(context, &format!("Selected instance: {alias}"));
     }
-    println!(
-        "{:<8} {:<10} {:<16} {:<18} DETAIL",
-        "STATUS", "SCOPE", "TARGET", "CHECK"
-    );
-    for check in &report.checks {
+    if color {
         println!(
             "{:<8} {:<10} {:<16} {:<18} {}",
-            doctor_status_label(check.status),
+            "STATUS".bold(),
+            "SCOPE".bold(),
+            "TARGET".bold(),
+            "CHECK".bold(),
+            "DETAIL".bold()
+        );
+    } else {
+        println!(
+            "{:<8} {:<10} {:<16} {:<18} DETAIL",
+            "STATUS", "SCOPE", "TARGET", "CHECK"
+        );
+    }
+    for check in &report.checks {
+        let status_label = doctor_status_label(check.status);
+        let status_padded = format!("{status_label:<8}");
+        let status_display: String = if color {
+            match check.status {
+                DoctorCheckStatus::Ok => status_padded.green().to_string(),
+                DoctorCheckStatus::Fail => status_padded.red().to_string(),
+                DoctorCheckStatus::Skip => status_padded.yellow().to_string(),
+            }
+        } else {
+            status_padded
+        };
+        println!(
+            "{} {:<10} {:<16} {:<18} {}",
+            status_display,
             check.scope,
             check.target.as_deref().unwrap_or("-"),
             truncate(&check.name, 18),
             check.detail,
         );
         if let Some(suggestion) = &check.suggestion {
-            println!("  {}", suggestion);
+            if color {
+                println!("  {}", suggestion.dimmed());
+            } else {
+                println!("  {}", suggestion);
+            }
         }
     }
     print_message(

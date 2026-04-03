@@ -1,3 +1,4 @@
+use owo_colors::OwoColorize;
 use serde::Serialize;
 use serde_json::json;
 
@@ -8,7 +9,7 @@ use crate::{
     repo::{workflow_active, workflow_id, workflow_name, workflow_updated_at},
 };
 
-use super::common::{Context, emit_json, load_loaded_repo, remote_client, truncate};
+use super::common::{Context, emit_json, load_loaded_repo, remote_client, truncate, use_color};
 
 #[derive(Debug, Serialize)]
 struct WorkflowListRow {
@@ -48,17 +49,47 @@ pub(crate) async fn cmd_ls(context: &Context, args: ListArgs) -> Result<(), AppE
     if context.json {
         emit_json("ls", &json!({ "count": rows.len(), "workflows": rows }))
     } else {
-        println!("{:<20} {:<8} {:<24} NAME", "ID", "ACTIVE", "UPDATED");
-        for row in rows {
+        let color = use_color();
+        if color {
             println!(
                 "{:<20} {:<8} {:<24} {}",
-                truncate(&row.id, 20),
-                row.active
-                    .map(|value| if value { "true" } else { "false" })
-                    .unwrap_or("-"),
-                row.updated_at.unwrap_or_else(|| "-".to_string()),
-                row.name
+                "ID".bold(),
+                "ACTIVE".bold(),
+                "UPDATED".bold(),
+                "NAME".bold()
             );
+        } else {
+            println!("{:<20} {:<8} {:<24} NAME", "ID", "ACTIVE", "UPDATED");
+        }
+        for row in rows {
+            let id = truncate(&row.id, 20);
+            let active_label = row
+                .active
+                .map(|value| if value { "true" } else { "false" })
+                .unwrap_or("-");
+            let updated = row.updated_at.as_deref().unwrap_or("-");
+            if color {
+                let id_padded = format!("{id:<20}");
+                let active_padded = format!("{active_label:<8}");
+                let updated_padded = format!("{updated:<24}");
+                let active_colored: String = match row.active {
+                    Some(true) => active_padded.green().to_string(),
+                    Some(false) => active_padded.dimmed().to_string(),
+                    None => active_padded,
+                };
+                println!(
+                    "{} {} {} {}",
+                    id_padded.cyan(),
+                    active_colored,
+                    updated_padded.dimmed(),
+                    row.name
+                );
+            } else {
+                println!(
+                    "{:<20} {:<8} {:<24} {}",
+                    id, active_label, updated, row.name
+                );
+            }
         }
         Ok(())
     }

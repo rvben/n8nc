@@ -17,9 +17,11 @@ use crate::{
     repo::{workflow_active, workflow_name},
 };
 
+use owo_colors::OwoColorize;
+
 use super::common::{
     Context, emit_json, emit_json_line, load_loaded_repo, print_message, remote_client, truncate,
-    value_string,
+    use_color, value_string,
 };
 
 // ---------------------------------------------------------------------------
@@ -226,6 +228,7 @@ async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppErr
         }
         emit_json("runs", &Value::Object(data))
     } else {
+        let color = use_color();
         let wf_id = value_string(&execution, "workflowId");
         let wf_name = workflow_name_for_execution(&client, &execution).await?;
         println!(
@@ -233,7 +236,12 @@ async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppErr
             value_string(&execution, "id").unwrap_or(args.execution_id)
         );
         if let Some(status) = value_string(&execution, "status") {
-            println!("Status: {status}");
+            let status_display: String = if color {
+                colorize_execution_status(&status)
+            } else {
+                status
+            };
+            println!("Status: {status_display}");
         }
         if let Some(mode) = value_string(&execution, "mode") {
             println!("Mode: {mode}");
@@ -261,12 +269,34 @@ async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppErr
             let nodes = node_executions.unwrap_or_default();
             if !nodes.is_empty() {
                 println!();
-                println!("{:<32} {:<10} {:<10} OUTPUTS", "NODE", "STATUS", "TIME");
-                for node in nodes {
+                if color {
                     println!(
                         "{:<32} {:<10} {:<10} {}",
+                        "NODE".bold(),
+                        "STATUS".bold(),
+                        "TIME".bold(),
+                        "OUTPUTS".bold()
+                    );
+                } else {
+                    println!("{:<32} {:<10} {:<10} OUTPUTS", "NODE", "STATUS", "TIME");
+                }
+                for node in nodes {
+                    let node_status = node.status.as_deref().unwrap_or("-");
+                    let node_status_padded = format!("{:<10}", truncate(node_status, 10));
+                    let node_status_display: String = if color {
+                        match node_status {
+                            "success" => node_status_padded.green().to_string(),
+                            "error" | "crashed" => node_status_padded.red().to_string(),
+                            "running" => node_status_padded.cyan().to_string(),
+                            _ => node_status_padded,
+                        }
+                    } else {
+                        node_status_padded
+                    };
+                    println!(
+                        "{:<32} {} {:<10} {}",
                         truncate(&node.name, 32),
-                        truncate(node.status.as_deref().unwrap_or("-"), 10),
+                        node_status_display,
                         truncate(&format_duration(node.execution_time_ms), 10),
                         node.output_items
                     );
@@ -765,6 +795,16 @@ fn format_duration(duration_ms: Option<i64>) -> String {
     }
 }
 
+fn colorize_execution_status(status: &str) -> String {
+    match status {
+        "success" => status.green().to_string(),
+        "error" | "crashed" => status.red().to_string(),
+        "running" | "new" => status.cyan().to_string(),
+        "waiting" => status.yellow().to_string(),
+        _ => status.to_string(),
+    }
+}
+
 fn execution_workflow_label(row: &ExecutionListRow) -> String {
     match (row.workflow_name.as_deref(), row.workflow_id.as_deref()) {
         (Some(name), Some(id)) => format!("{name} ({id})"),
@@ -775,15 +815,46 @@ fn execution_workflow_label(row: &ExecutionListRow) -> String {
 }
 
 fn print_execution_rows(rows: &[ExecutionListRow]) {
-    println!(
-        "{:<10} {:<10} {:<10} {:<10} {:<24} WORKFLOW",
-        "ID", "STATUS", "MODE", "DURATION", "STARTED"
-    );
-    for row in rows {
+    let color = use_color();
+    if color {
         println!(
             "{:<10} {:<10} {:<10} {:<10} {:<24} {}",
-            truncate(&row.id, 10),
-            truncate(row.status.as_deref().unwrap_or("-"), 10),
+            "ID".bold(),
+            "STATUS".bold(),
+            "MODE".bold(),
+            "DURATION".bold(),
+            "STARTED".bold(),
+            "WORKFLOW".bold()
+        );
+    } else {
+        println!(
+            "{:<10} {:<10} {:<10} {:<10} {:<24} WORKFLOW",
+            "ID", "STATUS", "MODE", "DURATION", "STARTED"
+        );
+    }
+    for row in rows {
+        let status_str = row.status.as_deref().unwrap_or("-");
+        let status_padded = format!("{:<10}", truncate(status_str, 10));
+        let status_display: String = if color {
+            match status_str {
+                "success" => status_padded.green().to_string(),
+                "error" | "crashed" => status_padded.red().to_string(),
+                "running" | "new" => status_padded.cyan().to_string(),
+                "waiting" => status_padded.yellow().to_string(),
+                _ => status_padded,
+            }
+        } else {
+            status_padded
+        };
+        let id_display: String = if color {
+            format!("{:<10}", truncate(&row.id, 10)).cyan().to_string()
+        } else {
+            format!("{:<10}", truncate(&row.id, 10))
+        };
+        println!(
+            "{} {} {:<10} {:<10} {:<24} {}",
+            id_display,
+            status_display,
             truncate(row.mode.as_deref().unwrap_or("-"), 10),
             truncate(&format_duration(row.duration_ms), 10),
             truncate(row.started_at.as_deref().unwrap_or("-"), 24),

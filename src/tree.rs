@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use owo_colors::OwoColorize;
 use serde::Serialize;
 
 /// A row from the existing `WorkflowNodeRow` — we accept a simplified trait-like interface.
@@ -12,22 +13,15 @@ pub struct TreeNode {
     pub detail: Option<String>,
 }
 
-/// ANSI escape helpers for colored tree output.
+/// Style helpers for colored tree output.
 struct Ansi {
     colorize: bool,
 }
 
 impl Ansi {
-    const BOLD: &str = "\x1b[1m";
-    const DIM: &str = "\x1b[2m";
-    const CYAN: &str = "\x1b[36m";
-    const YELLOW: &str = "\x1b[33m";
-    const GREEN: &str = "\x1b[32m";
-    const RESET: &str = "\x1b[0m";
-
     fn bold(&self, s: &str) -> String {
         if self.colorize {
-            format!("{}{s}{}", Self::BOLD, Self::RESET)
+            s.bold().to_string()
         } else {
             s.to_string()
         }
@@ -35,7 +29,7 @@ impl Ansi {
 
     fn dim(&self, s: &str) -> String {
         if self.colorize {
-            format!("{}{s}{}", Self::DIM, Self::RESET)
+            s.dimmed().to_string()
         } else {
             s.to_string()
         }
@@ -43,7 +37,7 @@ impl Ansi {
 
     fn cyan(&self, s: &str) -> String {
         if self.colorize {
-            format!("{}{s}{}", Self::CYAN, Self::RESET)
+            s.cyan().to_string()
         } else {
             s.to_string()
         }
@@ -51,7 +45,7 @@ impl Ansi {
 
     fn yellow(&self, s: &str) -> String {
         if self.colorize {
-            format!("{}{s}{}", Self::YELLOW, Self::RESET)
+            s.yellow().to_string()
         } else {
             s.to_string()
         }
@@ -59,7 +53,7 @@ impl Ansi {
 
     fn green(&self, s: &str) -> String {
         if self.colorize {
-            format!("{}{s}{}", Self::GREEN, Self::RESET)
+            s.green().to_string()
         } else {
             s.to_string()
         }
@@ -616,13 +610,13 @@ Trigger (n8n-nodes-base.manualTrigger)
         let conns = vec![conn("Trigger", "Email"), conn("Trigger", "Skip")];
         let result = render_tree(&nodes, &conns, true);
         // Bold node names
-        assert!(result.contains("\x1b[1mTrigger\x1b[0m"));
+        assert!(result.contains("\x1b[1mTrigger\x1b["));
         // Dim type
-        assert!(result.contains("\x1b[2m(n8n-nodes-base.manualTrigger)\x1b[0m"));
+        assert!(result.contains("\x1b[2m(n8n-nodes-base.manualTrigger)\x1b["));
         // Cyan credentials
-        assert!(result.contains("\x1b[36m[cred: Gmail]\x1b[0m"));
+        assert!(result.contains("\x1b[36m[cred: Gmail]\x1b["));
         // Yellow disabled
-        assert!(result.contains("\x1b[33m[disabled]\x1b[0m"));
+        assert!(result.contains("\x1b[33m[disabled]\x1b["));
     }
 
     #[test]
@@ -635,8 +629,8 @@ Trigger (n8n-nodes-base.manualTrigger)
         let conns = vec![conn_indexed("IF", "Yes", 0), conn_indexed("IF", "No", 1)];
         let result = render_tree(&nodes, &conns, true);
         // Green branch labels
-        assert!(result.contains("\x1b[32mtrue\x1b[0m"));
-        assert!(result.contains("\x1b[32mfalse\x1b[0m"));
+        assert!(result.contains("\x1b[32mtrue\x1b["));
+        assert!(result.contains("\x1b[32mfalse\x1b["));
     }
 
     #[test]
