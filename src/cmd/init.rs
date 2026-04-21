@@ -34,24 +34,22 @@ pub(crate) async fn cmd_init(context: &Context, args: InitArgs) -> Result<(), Ap
     }
 
     // Resolve instance, URL, and token — from flags or interactive prompts.
-    let (instance, url, token) = if args.instance.is_some() && args.url.is_some() {
-        // Non-interactive: all required values provided via flags.
-        let instance = args.instance.unwrap();
-        let url = args.url.unwrap();
-        (instance, url, args.token)
-    } else if context.json {
-        // JSON mode requires explicit flags — no interactive prompts.
-        return Err(AppError::usage(
-            "init",
-            "`--instance` and `--url` are required in non-interactive / JSON mode.",
-        ));
-    } else if !std::io::stdin().is_terminal() {
-        return Err(AppError::usage(
-            "init",
-            "Run `n8nc init` in an interactive terminal, or pass `--instance` and `--url`.",
-        ));
-    } else {
-        init_interactive(args.instance, args.url, args.token).await?
+    let (instance, url, token) = match (args.instance, args.url) {
+        (Some(instance), Some(url)) => (instance, url, args.token),
+        _ if context.json => {
+            // JSON mode requires explicit flags — no interactive prompts.
+            return Err(AppError::usage(
+                "init",
+                "`--instance` and `--url` are required in non-interactive / JSON mode.",
+            ));
+        }
+        _ if !std::io::stdin().is_terminal() => {
+            return Err(AppError::usage(
+                "init",
+                "Run `n8nc init` in an interactive terminal, or pass `--instance` and `--url`.",
+            ));
+        }
+        (instance, url) => init_interactive(instance, url, args.token).await?,
     };
 
     let base_url = url.trim_end_matches('/').to_string();

@@ -353,15 +353,13 @@ fn walk_for_empty_expressions(
     out: &mut Vec<LintDiagnostic>,
 ) {
     match value {
-        Value::String(s) => {
-            if is_empty_expression(s) {
-                out.push(LintDiagnostic {
-                    severity,
-                    rule: "no-empty-expressions".to_string(),
-                    node: Some(node_name.to_string()),
-                    message: "Empty expression `={{ }}` found.".to_string(),
-                });
-            }
+        Value::String(s) if is_empty_expression(s) => {
+            out.push(LintDiagnostic {
+                severity,
+                rule: "no-empty-expressions".to_string(),
+                node: Some(node_name.to_string()),
+                message: "Empty expression `={{ }}` found.".to_string(),
+            });
         }
         Value::Array(arr) => {
             for item in arr {
