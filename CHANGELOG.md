@@ -10,6 +10,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.4.4](https://github.com/rvben/n8nc/compare/v0.4.3...v0.4.4) - 2026-06-11
+
+### Added
+
+- **clispec**: achieve full v0.2 compliance (24/24) ([535279e](https://github.com/rvben/n8nc/commit/535279eaf5b9b1afe90a8dd16230d69d2c6b6737))
+
+### Fixed
+
+- **lint**: resolve clippy warnings introduced by Rust 1.95 ([7c192e2](https://github.com/rvben/n8nc/commit/7c192e287e91c3c8653a524c3745de0008a6e2dc))
+
 ## [0.4.3](https://github.com/rvben/n8nc/compare/v0.4.2...v0.4.3) - 2026-04-03
 
 ### Added
