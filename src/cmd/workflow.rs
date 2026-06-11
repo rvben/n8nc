@@ -483,6 +483,18 @@ async fn cmd_workflow_show(context: &Context, args: WorkflowShowArgs) -> Result<
 }
 
 async fn cmd_workflow_remove(context: &Context, args: WorkflowRemoveArgs) -> Result<(), AppError> {
+    // Require explicit --yes when not on a TTY to prevent accidental deletions.
+    if !args.yes {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            return Err(AppError::confirmation_required(
+                "workflow rm",
+                format!("Removing workflow '{}' requires confirmation.", args.target),
+            )
+            .with_hint("Re-run with --yes to confirm."));
+        }
+    }
+
     let target_path = resolve_existing_workflow_path(context, &args.target);
     let result = if let Some(path) = target_path {
         remove_workflow_by_path(context, &args, &path).await?

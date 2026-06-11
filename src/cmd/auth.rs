@@ -11,8 +11,8 @@ use crate::{
         session_cookie_env_var_name, store_browser_id, store_session_cookie, store_token,
     },
     cli::{
-        AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, AuthSessionAddArgs, AuthSessionArgs,
-        AuthSessionCommand,
+        AuthAddArgs, AuthAliasArgs, AuthArgs, AuthCommand, AuthListArgs, AuthSessionAddArgs,
+        AuthSessionArgs, AuthSessionCommand,
     },
     error::AppError,
 };
@@ -34,7 +34,7 @@ pub(crate) async fn cmd_auth(context: &Context, args: AuthArgs) -> Result<(), Ap
         AuthCommand::Add(args) => cmd_auth_add(context, args).await,
         AuthCommand::Test(args) => cmd_auth_test(context, args).await,
         AuthCommand::Session(args) => cmd_auth_session(context, args).await,
-        AuthCommand::List => cmd_auth_list(context).await,
+        AuthCommand::List(args) => cmd_auth_list(context, args).await,
         AuthCommand::Remove(args) => cmd_auth_remove(context, args).await,
     }
 }
@@ -194,19 +194,24 @@ async fn cmd_auth_session_test(context: &Context, args: AuthAliasArgs) -> Result
     }
 }
 
-async fn cmd_auth_list(context: &Context) -> Result<(), AppError> {
-    let repo = load_loaded_repo(context)?;
-    let rows: Vec<AuthListRow> = list_auth_statuses(&repo)?
-        .into_iter()
-        .map(|status| AuthListRow {
-            alias: status.alias,
-            base_url: status.base_url,
-            token_source: status.token_source,
-            session_cookie_source: status.session_cookie_source,
-            browser_id_source: status.browser_id_source,
-            session_ready: status.session_ready,
-        })
-        .collect();
+async fn cmd_auth_list(context: &Context, _args: AuthListArgs) -> Result<(), AppError> {
+    // Works without a config file: shows an empty list when no repo is configured.
+    let repo = crate::config::load_repo(context.repo_root.as_deref()).ok();
+    let rows: Vec<AuthListRow> = if let Some(ref repo) = repo {
+        list_auth_statuses(repo)?
+            .into_iter()
+            .map(|status| AuthListRow {
+                alias: status.alias,
+                base_url: status.base_url,
+                token_source: status.token_source,
+                session_cookie_source: status.session_cookie_source,
+                browser_id_source: status.browser_id_source,
+                session_ready: status.session_ready,
+            })
+            .collect()
+    } else {
+        vec![]
+    };
 
     if context.json {
         emit_json("auth", &json!({ "instances": rows }))

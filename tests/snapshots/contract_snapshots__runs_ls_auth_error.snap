@@ -3,13 +3,9 @@ source: tests/contract_snapshots.rs
 expression: json
 ---
 {
-  "ok": false,
-  "command": "runs",
-  "version": "[VERSION]",
-  "contract_version": 1,
   "error": {
-    "code": "auth.failed",
+    "kind": "auth",
     "message": "[ERROR_MSG]",
-    "suggestion": "Run `n8nc auth add notoken --token <api_key>` or set N8NC_TOKEN_NOTOKEN."
+    "hint": "Run `n8nc auth add notoken --token <api_key>` or set N8NC_TOKEN_NOTOKEN."
   }
 }

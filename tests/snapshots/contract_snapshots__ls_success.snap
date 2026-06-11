@@ -8,14 +8,17 @@ expression: json
   "version": "[VERSION]",
   "contract_version": 1,
   "data": {
-    "count": 1,
-    "workflows": [
+    "items": [
       {
         "id": "wf-1",
         "name": "Test Workflow",
         "active": true,
         "updated_at": "2026-01-02T00:00:00Z"
       }
-    ]
+    ],
+    "total": 1,
+    "limit": 100,
+    "offset": 0,
+    "truncated": false
   }
 }

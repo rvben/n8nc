@@ -266,6 +266,11 @@ async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError>
     });
 
     if failed_count > 0 {
+        // Emit the partial results to stdout so agents can see which workflows succeeded
+        // and which failed, then return the error which will be emitted to stderr.
+        if context.json {
+            emit_json("pull", &data).ok();
+        }
         return Err(AppError::api(
             "pull",
             "pull.partial_failure",
@@ -273,8 +278,7 @@ async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError>
                 "{failed_count} of {} workflow(s) failed to pull.",
                 results.len()
             ),
-        )
-        .with_json_data(data));
+        ));
     }
 
     if context.json {

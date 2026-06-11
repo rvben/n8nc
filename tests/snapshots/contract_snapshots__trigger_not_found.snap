@@ -3,24 +3,9 @@ source: tests/contract_snapshots.rs
 expression: json
 ---
 {
-  "ok": false,
-  "command": "trigger",
-  "version": "[VERSION]",
-  "contract_version": 1,
   "error": {
-    "code": "trigger.http_404",
+    "kind": "api",
     "message": "[ERROR_MSG]",
-    "suggestion": "[SUGGESTION]"
-  },
-  "data": {
-    "status": 404,
-    "headers": {
-      "content-length": "36",
-      "content-type": "application/json",
-      "date": "[DATE]"
-    },
-    "body": {
-      "message": "Webhook not registered"
-    }
+    "hint": "Production webhook 404s usually mean the path is wrong, the workflow is inactive, or n8n has not registered the webhook yet. Check `n8nc workflow show <file>` for the expected URL and re-activate the workflow if needed."
   }
 }

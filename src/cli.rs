@@ -3,15 +3,31 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
+/// Output format selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Detect automatically: JSON when stdout is not a TTY, text otherwise
+    Auto,
+    /// Always emit human-readable text
+    Text,
+    /// Always emit JSON
+    Json,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "n8nc",
     version,
-    about = "Human- and agent-friendly CLI for n8n workflows"
+    about = "Human- and agent-friendly CLI for n8n workflows",
+    after_help = "Run `n8nc schema` to get a machine-readable description of all commands."
 )]
 pub struct Cli {
-    /// Output as JSON (auto-enabled when stdout is not a terminal)
-    #[arg(long, global = true)]
+    /// Output format: auto (default), json, or text. Use `schema` for full introspection.
+    #[arg(long, short = 'o', global = true, value_enum, default_value = "auto")]
+    pub output: OutputFormat,
+
+    /// Output as JSON (hidden alias for --output json)
+    #[arg(long, global = true, hide = true, conflicts_with = "output")]
     pub json: bool,
 
     /// Suppress non-data output (summary lines, confirmations)
@@ -24,6 +40,21 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    /// Resolve the effective JSON mode: --output json or --json or auto-detect from TTY.
+    pub fn json_output(&self) -> bool {
+        use std::io::IsTerminal;
+        if self.json {
+            return true;
+        }
+        match self.output {
+            OutputFormat::Json => true,
+            OutputFormat::Text => false,
+            OutputFormat::Auto => !std::io::stdout().is_terminal(),
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -132,9 +163,22 @@ pub enum AuthCommand {
     /// Store, verify, or remove browser-session auth for internal REST fallbacks
     Session(AuthSessionArgs),
     /// Show configured aliases and token availability
-    List,
+    List(AuthListArgs),
     /// Remove a stored token
     Remove(AuthAliasArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AuthListArgs {
+    /// Maximum number of instances to return
+    #[arg(long, default_value_t = 100)]
+    pub limit: u16,
+    /// Number of instances to skip (for pagination)
+    #[arg(long, default_value_t = 0)]
+    pub offset: u32,
+    /// Comma-separated list of fields to include in output
+    #[arg(long, value_name = "FIELDS")]
+    pub fields: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -194,8 +238,15 @@ pub struct ListArgs {
     pub inactive: bool,
     #[arg(long)]
     pub name: Option<String>,
+    /// Maximum number of workflows to return
     #[arg(long, default_value_t = 100)]
     pub limit: u16,
+    /// Number of workflows to skip (for pagination)
+    #[arg(long, default_value_t = 0)]
+    pub offset: u32,
+    /// Comma-separated list of fields to include in output
+    #[arg(long, value_name = "FIELDS")]
+    pub fields: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -246,8 +297,15 @@ pub struct RunsListArgs {
     /// Filter by execution status, for example `success`, `error`, or `waiting`
     #[arg(long)]
     pub status: Option<String>,
+    /// Maximum number of executions to return
     #[arg(long, default_value_t = 20)]
     pub limit: u16,
+    /// Number of executions to skip (for pagination)
+    #[arg(long, default_value_t = 0)]
+    pub offset: u32,
+    /// Comma-separated list of fields to include in output
+    #[arg(long, value_name = "FIELDS")]
+    pub fields: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -411,6 +469,9 @@ pub struct WorkflowRemoveArgs {
     /// Delete remotely but keep local workflow files and metadata
     #[arg(long, conflicts_with = "local_only")]
     pub keep_local: bool,
+    /// Confirm destructive operation without interactive prompt
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Debug, Args)]

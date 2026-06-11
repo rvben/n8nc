@@ -95,10 +95,23 @@ async fn cmd_runs_ls(context: &Context, args: RunsListArgs) -> Result<(), AppErr
     .await?;
     let note = execution_history_note(&client, workflow_id.as_deref(), &rows).await?;
 
+    let offset = args.offset as usize;
+    let limit = args.limit as usize;
+    let total = rows.len();
+
+    // Apply in-band offset/limit so callers can paginate the result set.
+    let page: Vec<_> = rows.iter().skip(offset).take(limit).cloned().collect();
+
     if context.json {
         let mut data = serde_json::Map::new();
-        data.insert("count".to_string(), json!(rows.len()));
-        data.insert("executions".to_string(), json!(rows));
+        data.insert("items".to_string(), json!(page));
+        data.insert("total".to_string(), json!(total));
+        data.insert("limit".to_string(), json!(limit));
+        data.insert("offset".to_string(), json!(offset));
+        data.insert(
+            "truncated".to_string(),
+            json!((offset + page.len()) < total),
+        );
         if let Some(note) = note {
             data.insert("note".to_string(), json!(note));
         }
@@ -116,7 +129,15 @@ async fn cmd_runs_ls(context: &Context, args: RunsListArgs) -> Result<(), AppErr
         if let Some(note) = note {
             print_message(context, &format!("Note: {note}"));
         }
-        print_execution_rows(&rows);
+        print_execution_rows(&page);
+        if offset > 0 || (offset + page.len()) < total {
+            eprintln!(
+                "Showing {}-{} of {} results. Use --offset and --limit to paginate.",
+                offset,
+                offset + page.len(),
+                total
+            );
+        }
         Ok(())
     }
 }
@@ -1008,7 +1029,7 @@ mod tests {
         )
         .expect_err("invalid since should fail");
 
-        assert_eq!(err.code, "usage.invalid");
+        assert_eq!(err.kind, "usage");
         assert!(
             err.message
                 .contains("`--since` must be an RFC3339 timestamp")

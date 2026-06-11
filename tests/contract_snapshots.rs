@@ -93,7 +93,7 @@ async fn snapshot_ls_auth_error() {
         .expect("run ls");
 
     assert!(!output.status.success());
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");
@@ -173,7 +173,7 @@ async fn snapshot_get_not_found() {
         .expect("run get");
 
     assert!(!output.status.success());
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");
@@ -254,7 +254,7 @@ async fn snapshot_pull_not_found() {
         .expect("run pull");
 
     assert!(!output.status.success());
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");
@@ -425,7 +425,7 @@ async fn snapshot_push_conflict() {
         .expect("run push");
 
     assert_eq!(push_output.status.code(), Some(12));
-    let json = parse_json(&push_output.stdout);
+    let json = parse_json(&push_output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");
@@ -510,7 +510,7 @@ async fn snapshot_status_no_repo() {
         .expect("run status");
 
     assert_eq!(output.status.code(), Some(3));
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");
@@ -594,7 +594,7 @@ async fn snapshot_diff_not_found() {
 
     // diff returns exit 11 (not found) for missing files
     assert!(!output.status.success());
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[MESSAGE]");
@@ -703,7 +703,7 @@ async fn snapshot_activate_not_found() {
         .expect("run activate");
 
     assert!(!output.status.success());
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");
@@ -829,7 +829,7 @@ async fn snapshot_deactivate_not_found() {
         .expect("run deactivate");
 
     assert!(!output.status.success());
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");
@@ -911,7 +911,7 @@ async fn snapshot_archive_no_session() {
         .expect("run archive");
 
     assert!(!output.status.success());
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");
@@ -992,7 +992,7 @@ async fn snapshot_unarchive_not_found() {
         .expect("run unarchive");
 
     assert!(!output.status.success());
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");
@@ -1068,7 +1068,7 @@ async fn snapshot_trigger_not_found() {
         .expect("run trigger");
 
     assert_eq!(output.status.code(), Some(6));
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");
@@ -1166,7 +1166,7 @@ async fn snapshot_runs_ls_auth_error() {
         .expect("run runs ls");
 
     assert!(!output.status.success());
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");
@@ -1252,7 +1252,7 @@ async fn snapshot_runs_get_not_found() {
         .expect("run runs get");
 
     assert_eq!(output.status.code(), Some(11));
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");
@@ -1320,7 +1320,7 @@ async fn snapshot_workflow_new_duplicate() {
 
     // Should fail because file already exists
     assert!(!output.status.success());
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");
@@ -1397,7 +1397,7 @@ async fn snapshot_workflow_show_not_found() {
         .expect("run workflow show");
 
     assert!(!output.status.success());
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");
@@ -1454,7 +1454,7 @@ async fn snapshot_fmt_check_failure() {
         .expect("run fmt --check");
 
     assert!(!output.status.success());
-    let json = parse_json(&output.stdout);
+    let json = parse_json(&output.stderr);
 
     let mut settings = snapshot_settings();
     settings.add_redaction(".error.message", "[ERROR_MSG]");

@@ -261,12 +261,9 @@ async fn ls_json_honors_limit_across_pages() {
     let envelope = parse_json(&output.stdout);
     assert_eq!(envelope["ok"], true);
     assert_eq!(envelope["command"], "ls");
-    assert_eq!(envelope["data"]["count"], 3);
-    assert_eq!(
-        envelope["data"]["workflows"].as_array().map(Vec::len),
-        Some(3)
-    );
-    assert_eq!(envelope["data"]["workflows"][2]["id"], "wf-3");
+    assert_eq!(envelope["data"]["total"], 3);
+    assert_eq!(envelope["data"]["items"].as_array().map(Vec::len), Some(3));
+    assert_eq!(envelope["data"]["items"][2]["id"], "wf-3");
 }
 
 #[tokio::test]
@@ -331,12 +328,12 @@ async fn runs_ls_json_resolves_workflow_name() {
     let envelope = parse_json(&output.stdout);
     assert_eq!(envelope["ok"], true);
     assert_eq!(envelope["command"], "runs");
-    assert_eq!(envelope["data"]["count"], 2);
+    assert_eq!(envelope["data"]["total"], 2);
     assert_eq!(
-        envelope["data"]["executions"][0]["workflow_name"],
+        envelope["data"]["items"][0]["workflow_name"],
         "Alpha Workflow"
     );
-    assert_eq!(envelope["data"]["executions"][0]["duration_ms"], 250);
+    assert_eq!(envelope["data"]["items"][0]["duration_ms"], 250);
 }
 
 #[tokio::test]
@@ -409,10 +406,10 @@ async fn runs_ls_json_since_filters_across_pages() {
     assert!(output.status.success());
     let envelope = parse_json(&output.stdout);
     assert_eq!(envelope["ok"], true);
-    assert_eq!(envelope["data"]["count"], 3);
-    assert_eq!(envelope["data"]["executions"][0]["id"], "102");
-    assert_eq!(envelope["data"]["executions"][1]["id"], "101");
-    assert_eq!(envelope["data"]["executions"][2]["id"], "100");
+    assert_eq!(envelope["data"]["total"], 3);
+    assert_eq!(envelope["data"]["items"][0]["id"], "102");
+    assert_eq!(envelope["data"]["items"][1]["id"], "101");
+    assert_eq!(envelope["data"]["items"][2]["id"], "100");
 }
 
 #[tokio::test]
@@ -480,7 +477,7 @@ async fn doctor_json_fails_for_missing_execute_backend_program() {
 
     assert_eq!(output.status.code(), Some(13));
     let envelope = parse_json(&output.stdout);
-    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["ok"], true);
     assert_eq!(envelope["command"], "doctor");
     assert!(
         envelope["data"]["checks"]
@@ -734,10 +731,8 @@ async fn runs_get_json_not_found_emits_error_envelope() {
         .expect("run missing runs get");
 
     assert_eq!(output.status.code(), Some(11));
-    let envelope = parse_json(&output.stdout);
-    assert_eq!(envelope["ok"], false);
-    assert_eq!(envelope["command"], "runs");
-    assert_eq!(envelope["error"]["code"], "resource.not_found");
+    let envelope = parse_json(&output.stderr);
+    assert_eq!(envelope["error"]["kind"], "not_found");
     assert!(
         envelope["error"]["message"]
             .as_str()
@@ -1086,10 +1081,8 @@ async fn runs_ls_json_rejects_invalid_last_window() {
         .expect("run runs ls invalid last");
 
     assert_eq!(output.status.code(), Some(2));
-    let envelope = parse_json(&output.stdout);
-    assert_eq!(envelope["ok"], false);
-    assert_eq!(envelope["command"], "runs");
-    assert_eq!(envelope["error"]["code"], "usage.invalid");
+    let envelope = parse_json(&output.stderr);
+    assert_eq!(envelope["error"]["kind"], "usage");
     assert!(
         envelope["error"]["message"]
             .as_str()
@@ -1119,12 +1112,14 @@ async fn doctor_json_reports_failure_with_attached_data() {
 
     assert_eq!(output.status.code(), Some(13));
     let envelope = parse_json(&output.stdout);
-    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["ok"], true);
     assert_eq!(envelope["command"], "doctor");
-    assert_eq!(envelope["error"]["code"], "doctor.failed");
     assert_eq!(envelope["data"]["selected_instance"], alias);
     assert_eq!(envelope["data"]["summary"]["fail"], 1);
     assert_eq!(envelope["data"]["summary"]["skip"], 2);
+
+    let error_envelope = parse_json(&output.stderr);
+    assert_eq!(error_envelope["error"]["kind"], "doctor.failed");
 
     let checks = envelope["data"]["checks"].as_array().expect("check list");
     let token_check = checks
@@ -1180,8 +1175,9 @@ async fn doctor_json_fails_for_sensitive_workflow_literals() {
 
     assert_eq!(output.status.code(), Some(13));
     let envelope = parse_json(&output.stdout);
-    assert_eq!(envelope["ok"], false);
-    assert_eq!(envelope["error"]["code"], "doctor.failed");
+    assert_eq!(envelope["ok"], true);
+    let error_envelope = parse_json(&output.stderr);
+    assert_eq!(error_envelope["error"]["kind"], "doctor.failed");
     let checks = envelope["data"]["checks"].as_array().expect("check list");
     let sensitive_check = checks
         .iter()
@@ -1597,12 +1593,10 @@ async fn workflow_execute_json_requires_configured_backend() {
         .expect("run workflow execute without backend");
 
     assert_eq!(output.status.code(), Some(3));
-    let envelope = parse_json(&output.stdout);
-    assert_eq!(envelope["ok"], false);
-    assert_eq!(envelope["command"], "workflow");
-    assert_eq!(envelope["error"]["code"], "config.invalid");
+    let envelope = parse_json(&output.stderr);
+    assert_eq!(envelope["error"]["kind"], "config");
     assert!(
-        envelope["error"]["suggestion"]
+        envelope["error"]["hint"]
             .as_str()
             .unwrap_or_default()
             .contains("[instances.mock.execute]")
@@ -2024,9 +2018,7 @@ async fn push_json_rejects_unsupported_top_level_changes() {
         .expect("run push unsupported field");
 
     assert_eq!(push_output.status.code(), Some(10));
-    let envelope = parse_json(&push_output.stdout);
-    assert_eq!(envelope["ok"], false);
-    assert_eq!(envelope["command"], "push");
+    let envelope = parse_json(&push_output.stderr);
     assert!(
         envelope["error"]["message"]
             .as_str()
@@ -2735,14 +2727,11 @@ async fn credential_ls_json_forced_public_reports_inventory_unavailable() {
         .expect("run credential ls");
 
     assert!(!output.status.success());
-    let envelope = parse_json(&output.stdout);
-    assert_eq!(envelope["ok"], false);
-    assert_eq!(
-        envelope["error"]["code"],
-        "credential.inventory_unavailable"
-    );
+    assert!(output.stdout.is_empty(), "errors go to stderr, not stdout");
+    let envelope = parse_json(&output.stderr);
+    assert_eq!(envelope["error"]["kind"], "api");
     assert!(
-        envelope["error"]["suggestion"]
+        envelope["error"]["hint"]
             .as_str()
             .unwrap_or_default()
             .contains("--source auto")
@@ -3058,10 +3047,8 @@ async fn trigger_json_404_includes_webhook_guidance() {
         .expect("run trigger");
 
     assert_eq!(output.status.code(), Some(6));
-    let envelope = parse_json(&output.stdout);
-    assert_eq!(envelope["ok"], false);
-    assert_eq!(envelope["command"], "trigger");
-    assert_eq!(envelope["error"]["code"], "trigger.http_404");
+    let envelope = parse_json(&output.stderr);
+    assert_eq!(envelope["error"]["kind"], "api");
     assert!(
         envelope["error"]["message"]
             .as_str()
@@ -3075,7 +3062,7 @@ async fn trigger_json_404_includes_webhook_guidance() {
             .contains("Webhook not registered")
     );
     assert!(
-        envelope["error"]["suggestion"]
+        envelope["error"]["hint"]
             .as_str()
             .unwrap_or_default()
             .contains("workflow show")
@@ -3160,7 +3147,7 @@ async fn runs_ls_json_reports_note_when_successful_executions_are_not_saved() {
     assert!(output.status.success());
     let envelope = parse_json(&output.stdout);
     assert_eq!(envelope["ok"], true);
-    assert_eq!(envelope["data"]["count"], 0);
+    assert_eq!(envelope["data"]["total"], 0);
     assert!(
         envelope["data"]["note"]
             .as_str()
@@ -3196,6 +3183,7 @@ async fn workflow_rm_by_id_deletes_remote_and_local_artifacts() {
         .arg("workflow")
         .arg("rm")
         .arg("wf-1")
+        .arg("--yes")
         .output()
         .expect("run workflow rm by id");
 
@@ -3240,6 +3228,7 @@ async fn workflow_rm_local_draft_removes_file_without_remote_delete() {
         .arg("workflow")
         .arg("rm")
         .arg("workflows/draft-only.workflow.json")
+        .arg("--yes")
         .output()
         .expect("run workflow rm local draft");
 
@@ -3417,7 +3406,7 @@ async fn pull_all_json_reports_partial_failure() {
 
     assert_eq!(output.status.code(), Some(6));
     let envelope = parse_json(&output.stdout);
-    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["ok"], true);
     assert_eq!(envelope["data"]["pulled"], 1);
     assert_eq!(envelope["data"]["failed"], 1);
 
@@ -3427,7 +3416,7 @@ async fn pull_all_json_reports_partial_failure() {
         .find(|r| r["status"] == "failed")
         .expect("failed result");
     assert_eq!(failed["workflow_id"], "wf-2");
-    assert!(failed["error"].as_str().unwrap_or_default().len() > 0);
+    assert!(!failed["error"].as_str().unwrap_or_default().is_empty());
 }
 
 #[tokio::test]
@@ -3482,9 +3471,8 @@ async fn pull_without_identifier_or_all_returns_usage_error() {
         .expect("pull without args");
 
     assert_eq!(output.status.code(), Some(2));
-    let envelope = parse_json(&output.stdout);
-    assert_eq!(envelope["ok"], false);
-    assert_eq!(envelope["error"]["code"], "usage.invalid");
+    let envelope = parse_json(&output.stderr);
+    assert_eq!(envelope["error"]["kind"], "usage");
 }
 
 #[tokio::test]
@@ -3708,9 +3696,8 @@ async fn auth_test_json_fails_when_api_returns_unauthorized() {
         .expect("run auth test unauthorized");
 
     assert!(!output.status.success());
-    let envelope = parse_json(&output.stdout);
-    assert_eq!(envelope["ok"], false);
-    assert_eq!(envelope["command"], "auth");
+    let envelope = parse_json(&output.stderr);
+    assert!(envelope["error"]["kind"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -3779,9 +3766,8 @@ async fn auth_session_test_json_fails_without_session_credentials() {
         .expect("run auth session test without creds");
 
     assert!(!output.status.success());
-    let envelope = parse_json(&output.stdout);
-    assert_eq!(envelope["ok"], false);
-    assert_eq!(envelope["command"], "auth");
+    let envelope = parse_json(&output.stderr);
+    assert!(envelope["error"]["kind"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -4013,8 +3999,8 @@ async fn fmt_check_returns_nonzero_when_formatting_needed() {
         !output.status.success(),
         "fmt --check should fail when files need formatting"
     );
-    let envelope = parse_json(&output.stdout);
-    assert_eq!(envelope["ok"], false);
+    let envelope = parse_json(&output.stderr);
+    assert!(envelope["error"]["kind"].as_str().is_some());
 
     // The file must be unchanged — --check must not modify files.
     let content_after = fs::read_to_string(&workflow_path).expect("read file after check");
@@ -4140,8 +4126,7 @@ async fn archive_requires_session_auth() {
         .expect("run archive");
 
     assert!(!output.status.success());
-    let json = parse_json(&output.stdout);
-    assert_eq!(json["ok"], false);
+    let json = parse_json(&output.stderr);
     assert!(
         json["error"]["message"]
             .as_str()
@@ -4181,8 +4166,9 @@ async fn archive_not_found() {
         .expect("run archive");
 
     assert!(!output.status.success());
-    let json = parse_json(&output.stdout);
-    assert_eq!(json["ok"], false);
+    assert!(output.stdout.is_empty(), "errors go to stderr, not stdout");
+    let json = parse_json(&output.stderr);
+    assert!(json["error"]["kind"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -4523,9 +4509,8 @@ fn search_no_matches_exit_11() {
         .expect("run search");
 
     assert_eq!(output.status.code(), Some(11));
-    let json = parse_json(output.stdout.as_slice());
-    assert_eq!(json["ok"], false);
-    assert_eq!(json["error"]["code"], "resource.not_found");
+    let json = parse_json(output.stderr.as_slice());
+    assert_eq!(json["error"]["kind"], "not_found");
 }
 
 #[test]
@@ -4539,9 +4524,8 @@ fn search_no_query_or_filters_exit_2() {
         .expect("run search");
 
     assert_eq!(output.status.code(), Some(2));
-    let json = parse_json(output.stdout.as_slice());
-    assert_eq!(json["ok"], false);
-    assert_eq!(json["error"]["code"], "usage.invalid");
+    let json = parse_json(output.stderr.as_slice());
+    assert_eq!(json["error"]["kind"], "usage");
 }
 
 #[test]
@@ -4934,7 +4918,7 @@ no-disabled-nodes = "error"
 
     assert!(!output.status.success());
     let envelope = parse_json(&output.stdout);
-    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["ok"], true);
     assert_eq!(envelope["data"]["error_count"], 1);
 }
 
@@ -5041,10 +5025,8 @@ fn schema_command_outputs_valid_json() {
     assert!(output.status.success());
     let schema: Value = serde_json::from_slice(&output.stdout).expect("valid JSON from schema");
     assert_eq!(schema["name"], "n8nc");
-    assert!(schema["contract_version"].as_u64().unwrap() >= 1);
-    let commands = schema["commands"]
-        .as_object()
-        .expect("commands is an object");
+    assert_eq!(schema["clispec"], "0.2");
+    let commands = schema["commands"].as_array().expect("commands is an array");
     assert!(
         commands.len() > 20,
         "expected >20 leaf commands, got {}",

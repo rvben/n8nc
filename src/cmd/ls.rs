@@ -36,8 +36,14 @@ pub(crate) async fn cmd_ls(context: &Context, args: ListArgs) -> Result<(), AppE
         })
         .await?;
 
-    let rows: Vec<WorkflowListRow> = workflows
+    let total = workflows.len();
+    let offset = args.offset as usize;
+
+    // Apply offset in-band (the API returns from the start; we slice here).
+    let paginated: Vec<WorkflowListRow> = workflows
         .into_iter()
+        .skip(offset)
+        .take(args.limit as usize)
         .map(|workflow| WorkflowListRow {
             id: workflow_id(&workflow).unwrap_or_default(),
             name: workflow_name(&workflow).unwrap_or_else(|| "<unnamed>".to_string()),
@@ -46,8 +52,48 @@ pub(crate) async fn cmd_ls(context: &Context, args: ListArgs) -> Result<(), AppE
         })
         .collect();
 
+    // Apply --fields filter if requested.
+    let selected_fields: Option<Vec<String>> = args.fields.as_ref().map(|f| {
+        f.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+
     if context.json {
-        emit_json("ls", &json!({ "count": rows.len(), "workflows": rows }))
+        let items: Vec<serde_json::Value> = paginated
+            .iter()
+            .map(|row| {
+                let full = json!({
+                    "id": row.id,
+                    "name": row.name,
+                    "active": row.active,
+                    "updated_at": row.updated_at,
+                });
+                if let Some(fields) = &selected_fields {
+                    let obj = full.as_object().unwrap();
+                    let filtered: serde_json::Map<String, serde_json::Value> = fields
+                        .iter()
+                        .filter_map(|f| obj.get_key_value(f.as_str()))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    serde_json::Value::Object(filtered)
+                } else {
+                    full
+                }
+            })
+            .collect();
+
+        emit_json(
+            "ls",
+            &json!({
+                "items": items,
+                "total": total,
+                "limit": args.limit,
+                "offset": offset,
+                "truncated": (offset + paginated.len()) < total,
+            }),
+        )
     } else {
         let color = use_color();
         if color {
@@ -61,7 +107,7 @@ pub(crate) async fn cmd_ls(context: &Context, args: ListArgs) -> Result<(), AppE
         } else {
             println!("{:<20} {:<8} {:<24} NAME", "ID", "ACTIVE", "UPDATED");
         }
-        for row in rows {
+        for row in &paginated {
             let id = truncate(&row.id, 20);
             let active_label = row
                 .active
@@ -90,6 +136,14 @@ pub(crate) async fn cmd_ls(context: &Context, args: ListArgs) -> Result<(), AppE
                     id, active_label, updated, row.name
                 );
             }
+        }
+        if offset > 0 || (offset + paginated.len()) < total {
+            eprintln!(
+                "Showing {}-{} of {} results. Use --offset and --limit to paginate.",
+                offset,
+                offset + paginated.len(),
+                total
+            );
         }
         Ok(())
     }

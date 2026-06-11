@@ -63,11 +63,13 @@ pub(crate) async fn cmd_lint(context: &Context, args: LintArgs) -> Result<(), Ap
 
     if context.json {
         if error_count > 0 {
+            // Emit the full lint report to stdout so agents can see which rules failed,
+            // then return the error which will be emitted to stderr.
+            emit_json("lint", &summary).ok();
             return Err(AppError::validation(
                 "lint",
                 format!("Lint failed with {error_count} error(s)."),
-            )
-            .with_json_data(summary));
+            ));
         }
         emit_json("lint", &summary)?;
     } else {

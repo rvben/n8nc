@@ -65,7 +65,11 @@ pub(crate) async fn cmd_doctor(context: &Context, args: DoctorArgs) -> Result<()
             Ok(())
         }
     } else {
-        if !context.json {
+        if context.json {
+            // Emit the full report to stdout so agents can see which checks failed,
+            // then return the error which will be emitted to stderr.
+            emit_json("doctor", &report).ok();
+        } else {
             print_doctor_report(context, &report);
         }
         Err(doctor_failed_error(&report)?)

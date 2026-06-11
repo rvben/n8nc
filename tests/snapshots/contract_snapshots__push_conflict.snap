@@ -3,13 +3,9 @@ source: tests/contract_snapshots.rs
 expression: json
 ---
 {
-  "ok": false,
-  "command": "push",
-  "version": "[VERSION]",
-  "contract_version": 1,
   "error": {
-    "code": "conflict.remote_changed",
+    "kind": "conflict",
     "message": "[ERROR_MSG]",
-    "suggestion": "Run `n8nc pull <id>` again before pushing."
+    "hint": "Run `n8nc pull <id>` again before pushing."
   }
 }

@@ -40,14 +40,16 @@ fn enrich_trigger_error(mut err: AppError, base_url: &str, target: &str) -> AppE
 
     let resolved_path = resolve_trigger_path(base_url, target);
     if let Some(path) = &resolved_path {
-        if path.starts_with("/webhook-test/") {
-            err.suggestion = Some(
-                "Test webhook URLs only work while the workflow is listening in test mode in n8n. Use the editor test listener or call the production `/webhook/...` URL for active workflows.".to_string(),
-            );
+        let hint = if path.starts_with("/webhook-test/") {
+            Some("Test webhook URLs only work while the workflow is listening in test mode in n8n. Use the editor test listener or call the production `/webhook/...` URL for active workflows.".to_string())
         } else if path.starts_with("/webhook/") {
-            err.suggestion = Some(
-                "Production webhook 404s usually mean the path is wrong, the workflow is inactive, or n8n has not registered the webhook yet. Check `n8nc workflow show <file>` for the expected URL and re-activate the workflow if needed.".to_string(),
-            );
+            Some("Production webhook 404s usually mean the path is wrong, the workflow is inactive, or n8n has not registered the webhook yet. Check `n8nc workflow show <file>` for the expected URL and re-activate the workflow if needed.".to_string())
+        } else {
+            None
+        };
+        if let Some(h) = hint {
+            err.hint = Some(h.clone());
+            err.suggestion = Some(h);
         }
     }
     err
