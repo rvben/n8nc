@@ -12,6 +12,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.4.6](https://github.com/rvben/n8nc/compare/v0.4.5...v0.4.6) - 2026-06-20
+
+### Added
+
+- **schema**: fill missing output_fields for 32 commands ([eae1aae](https://github.com/rvben/n8nc/commit/eae1aae7d7522f041b5985c7f722465113b351a8))
+
 ## [0.4.5](https://github.com/rvben/n8nc/compare/v0.4.4...v0.4.5) - 2026-06-20
 
 ### Added
