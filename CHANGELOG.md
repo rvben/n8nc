@@ -11,6 +11,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.4.5](https://github.com/rvben/n8nc/compare/v0.4.4...v0.4.5) - 2026-06-20
+
+### Added
+
+- **schema**: declare exit-code outcomes in the contract ([be3e79a](https://github.com/rvben/n8nc/commit/be3e79af0abad27d717f1d9b84d43611689cf2cd))
+
 ## [0.4.4](https://github.com/rvben/n8nc/compare/v0.4.3...v0.4.4) - 2026-06-11
 
 ### Added
