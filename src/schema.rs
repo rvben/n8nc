@@ -315,6 +315,14 @@ pub fn generate(cmd: &clap::Command) -> Value {
                 "retryable": false,
                 "description": "Conflict: remote workflow changed since last pull"
             }
+        ],
+        "outcomes": [
+            {
+                "kind": "doctor_failed",
+                "exit_code": 13,
+                "retryable": false,
+                "description": "Doctor checks ran but one or more checks failed; see the report for details"
+            }
         ]
     })
 }
