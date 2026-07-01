@@ -882,7 +882,7 @@ fn classify_orphaned_meta_status(meta_path: &Path) -> LocalStatusEntry {
     }
 }
 
-pub(crate) fn diff_sections(base: &Value, local: &Value) -> Vec<String> {
+fn diff_sections(base: &Value, local: &Value) -> Vec<String> {
     const CANDIDATE_SECTIONS: &[&str] =
         &["name", "active", "tags", "settings", "nodes", "connections"];
     CANDIDATE_SECTIONS

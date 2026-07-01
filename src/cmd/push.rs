@@ -9,8 +9,8 @@ use crate::{
     config::{LoadedRepo, resolve_instance_alias},
     error::AppError,
     repo::{
-        LocalWorkflowState, StoredWorkflow, diff_sections, load_meta, load_workflow_file,
-        scan_local_status, sidecar_path_for, store_workflow, workflow_id,
+        LocalWorkflowState, StoredWorkflow, load_meta, load_workflow_file, scan_local_status,
+        sidecar_path_for, store_workflow, workflow_id,
     },
     validate::sensitive_data_diagnostics,
 };
@@ -176,13 +176,13 @@ pub(crate) async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), Ap
     let warnings = sensitive_data_diagnostics(&stored.workflow_path)?;
     let warning_count = warnings.len();
 
-    // `--verify`: compare what we intended to push against what the server
+    // `--verify`: compare what push actually sent against what the server
     // stored, reporting any canonical section the server changed (drift).
     let verify_drift = args
         .verify
         .then(|| canonicalize_workflow(&updated))
         .transpose()?
-        .map(|stored_canonical| diff_sections(&canonical, &stored_canonical));
+        .map(|stored_canonical| pushed_drift_sections(&payload, &stored_canonical));
 
     if context.json {
         let mut data = serde_json::Map::new();
@@ -530,4 +530,87 @@ async fn push_one_workflow(
     .await?;
     let stored = store_workflow(repo, &alias, &updated)?;
     Ok(PushOneResult::Pushed(Box::new(stored), stripped_settings))
+}
+
+/// Canonical sections where the server's stored workflow differs from what push
+/// sent. Compares against the update payload (the fields push actually sends),
+/// not the full local workflow: settings are checked only over the keys that
+/// were sent, because the API retains editor-only settings that push strips
+/// (e.g. `binaryMode`), and those retained keys are not drift.
+fn pushed_drift_sections(payload: &Value, stored: &Value) -> Vec<String> {
+    let mut drift = Vec::new();
+    for key in ["name", "nodes", "connections"] {
+        if let Some(sent) = payload.get(key)
+            && stored.get(key) != Some(sent)
+        {
+            drift.push(key.to_string());
+        }
+    }
+    if let Some(sent_settings) = payload.get("settings").and_then(Value::as_object) {
+        let stored_settings = stored.get("settings").and_then(Value::as_object);
+        let differs = sent_settings.iter().any(|(key, value)| {
+            stored_settings.and_then(|settings| settings.get(key)) != Some(value)
+        });
+        if differs {
+            drift.push("settings".to_string());
+        }
+    }
+    drift
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pushed_drift_sections;
+    use serde_json::json;
+
+    #[test]
+    fn no_drift_when_server_echoes_the_payload() {
+        let payload = json!({
+            "name": "WF", "nodes": [{"id": "a"}], "connections": {},
+            "settings": {"executionOrder": "v1"}
+        });
+        let stored = json!({
+            "id": "wf", "name": "WF", "active": false, "tags": [],
+            "settings": {"executionOrder": "v1"}, "nodes": [{"id": "a"}], "connections": {}
+        });
+        assert!(pushed_drift_sections(&payload, &stored).is_empty());
+    }
+
+    #[test]
+    fn server_retained_settings_are_not_drift() {
+        // push strips `binaryMode` from the payload; the server keeps its stored
+        // value. That retained key must not be reported as drift.
+        let payload = json!({
+            "name": "WF", "nodes": [], "connections": {},
+            "settings": {"executionOrder": "v1"}
+        });
+        let stored = json!({
+            "name": "WF", "nodes": [], "connections": {},
+            "settings": {"executionOrder": "v1", "binaryMode": "separate"}
+        });
+        assert!(
+            pushed_drift_sections(&payload, &stored).is_empty(),
+            "server-retained settings are not drift"
+        );
+    }
+
+    #[test]
+    fn changed_nodes_report_drift() {
+        let payload = json!({"name": "WF", "nodes": [{"id": "a"}], "connections": {}});
+        let stored = json!({"name": "WF", "nodes": [{"id": "b"}], "connections": {}});
+        assert_eq!(
+            pushed_drift_sections(&payload, &stored),
+            vec!["nodes".to_string()]
+        );
+    }
+
+    #[test]
+    fn changed_sent_setting_reports_drift() {
+        let payload = json!({"settings": {"executionOrder": "v1"}});
+        let stored = json!({"settings": {"executionOrder": "v0"}});
+        assert_eq!(
+            pushed_drift_sections(&payload, &stored),
+            vec!["settings".to_string()]
+        );
+    }
 }
