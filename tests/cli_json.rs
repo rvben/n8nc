@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 use wiremock::{
     Match, Mock, MockServer, Request, Respond, ResponseTemplate,
-    matchers::{header, method, path, query_param},
+    matchers::{body_json, header, method, path, query_param},
 };
 
 #[derive(Debug)]
@@ -5097,9 +5097,17 @@ async fn secret_extract_creates_credential_and_rewrites_node() {
         .mount(&server)
         .await;
 
+    // Assert the exact payload sent to n8n so the production contract (the
+    // credential shape n8n validates) is locked, including the default
+    // credential name "<node> <header>".
     Mock::given(method("POST"))
         .and(path("/api/v1/credentials"))
         .and(header("x-n8n-api-key", "test-token"))
+        .and(body_json(json!({
+            "name": "Fetch Authorization",
+            "type": "httpHeaderAuth",
+            "data": { "name": "Authorization", "value": "Bearer secret-token-123" }
+        })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": { "id": "cred-xyz", "name": "Fetch Authorization", "type": "httpHeaderAuth" }
         })))
@@ -5153,6 +5161,158 @@ async fn secret_extract_creates_credential_and_rewrites_node() {
         node["parameters"].get("headerParameters").is_none(),
         "the inline Authorization header should be removed"
     );
+}
+
+fn mount_secret_workflow_get(server_uri: &str) -> Value {
+    json!({
+        "data": {
+            "id": "wf-secret",
+            "name": "Secret WF",
+            "active": false,
+            "tags": [],
+            "nodes": [{
+                "id": "fetch",
+                "name": "Fetch",
+                "type": "n8n-nodes-base.httpRequest",
+                "typeVersion": 4.2,
+                "position": [0, 0],
+                "parameters": {
+                    "url": server_uri,
+                    "sendHeaders": true,
+                    "headerParameters": {
+                        "parameters": [
+                            { "name": "Authorization", "value": "Bearer secret-token-123" }
+                        ]
+                    }
+                }
+            }],
+            "connections": {},
+            "settings": {}
+        }
+    })
+}
+
+#[tokio::test]
+async fn secret_extract_fails_without_credential_id_and_keeps_inline_header() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-secret"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(mount_secret_workflow_get("https://api.example.com")),
+        )
+        .mount(&server)
+        .await;
+
+    // The server response omits the credential id.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/credentials"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {} })))
+        .mount(&server)
+        .await;
+
+    let pull = base_command(repo.path())
+        .arg("pull")
+        .arg("wf-secret")
+        .output()
+        .expect("run pull");
+    assert!(pull.status.success());
+    let workflow_path = parse_json(&pull.stdout)["data"]["workflow_path"]
+        .as_str()
+        .expect("workflow path")
+        .to_string();
+
+    let output = base_command(repo.path())
+        .arg("secret")
+        .arg("extract")
+        .arg("wf-secret")
+        .arg("Fetch")
+        .output()
+        .expect("run secret extract");
+    assert!(
+        !output.status.success(),
+        "secret extract should fail when the credential id is missing"
+    );
+
+    // The local workflow must be untouched: the inline header stays and no
+    // credential is attached when creation did not yield an id.
+    let workflow = read_json_file(Path::new(&workflow_path));
+    let node = &workflow["nodes"][0];
+    assert_eq!(
+        node["parameters"]["headerParameters"]["parameters"][0]["name"],
+        "Authorization"
+    );
+    assert!(
+        node.get("credentials").is_none(),
+        "no credential should be attached on failure"
+    );
+}
+
+#[tokio::test]
+async fn secret_extract_uses_custom_credential_name() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-secret"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(mount_secret_workflow_get("https://api.example.com")),
+        )
+        .mount(&server)
+        .await;
+
+    // The custom --name must flow into the credential payload.
+    Mock::given(method("POST"))
+        .and(path("/api/v1/credentials"))
+        .and(body_json(json!({
+            "name": "eBoekhouden token",
+            "type": "httpHeaderAuth",
+            "data": { "name": "Authorization", "value": "Bearer secret-token-123" }
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "data": { "id": "cred-abc" } })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let pull = base_command(repo.path())
+        .arg("pull")
+        .arg("wf-secret")
+        .output()
+        .expect("run pull");
+    assert!(pull.status.success());
+    let workflow_path = parse_json(&pull.stdout)["data"]["workflow_path"]
+        .as_str()
+        .expect("workflow path")
+        .to_string();
+
+    let output = base_command(repo.path())
+        .arg("secret")
+        .arg("extract")
+        .arg("wf-secret")
+        .arg("Fetch")
+        .arg("--name")
+        .arg("eBoekhouden token")
+        .output()
+        .expect("run secret extract");
+    assert!(
+        output.status.success(),
+        "secret extract failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let workflow = read_json_file(Path::new(&workflow_path));
+    let credential = &workflow["nodes"][0]["credentials"]["httpHeaderAuth"];
+    assert_eq!(credential["id"], "cred-abc");
+    assert_eq!(credential["name"], "eBoekhouden token");
 }
 
 #[tokio::test]

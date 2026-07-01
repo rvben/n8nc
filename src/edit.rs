@@ -1314,6 +1314,42 @@ mod tests {
     }
 
     #[test]
+    fn read_inline_header_value_errors_for_unknown_node() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("example.workflow.json");
+        http_node_with_auth_header(&path);
+
+        let err = super::read_inline_header_value(&path, "Missing", "Authorization")
+            .expect_err("unknown node");
+        assert_eq!(err.kind, "not_found");
+        let hint = format!(
+            "{} {}",
+            err.message,
+            err.suggestion.clone().unwrap_or_default()
+        );
+        assert!(
+            hint.contains("Fetch"),
+            "error should list known nodes: {hint}"
+        );
+    }
+
+    #[test]
+    fn read_inline_header_value_errors_when_header_absent() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("example.workflow.json");
+        http_node_with_auth_header(&path);
+
+        let err = super::read_inline_header_value(&path, "Fetch", "X-Api-Key")
+            .expect_err("absent header");
+        assert_eq!(err.kind, "not_found");
+        assert!(
+            err.message.contains("X-Api-Key"),
+            "error should name the missing header: {}",
+            err.message
+        );
+    }
+
+    #[test]
     fn attach_header_credential_moves_auth_into_credential() {
         let temp = tempdir().expect("tempdir");
         let path = temp.path().join("example.workflow.json");
