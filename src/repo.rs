@@ -796,8 +796,15 @@ fn classify_workflow_status(workflow_path: &Path) -> Result<LocalStatusEntry, Ap
         });
     }
 
+    // Only error-severity diagnostics make a workflow `invalid`. Warnings (e.g.
+    // an inline secret literal) are advisory: they must not block the workflow
+    // or read as "do not push", so they are surfaced in `detail` while the
+    // state is still decided by the local-vs-recorded hash comparison.
     let diagnostics = crate::validate::validate_workflow_path(workflow_path)?;
-    if let Some(diagnostic) = diagnostics.first() {
+    if let Some(error) = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.severity == crate::validate::Severity::Error)
+    {
         return Ok(LocalStatusEntry {
             state: LocalWorkflowState::Invalid,
             file: workflow_path.to_path_buf(),
@@ -807,7 +814,7 @@ fn classify_workflow_status(workflow_path: &Path) -> Result<LocalStatusEntry, Ap
             instance: Some(meta.instance),
             local_hash: Some(local_hash),
             recorded_hash: Some(meta.remote_hash),
-            detail: Some(diagnostic.message.clone()),
+            detail: Some(error.message.clone()),
             sync_state: None,
             remote_hash: None,
             remote_updated_at: None,
@@ -830,7 +837,9 @@ fn classify_workflow_status(workflow_path: &Path) -> Result<LocalStatusEntry, Ap
         instance: Some(meta.instance),
         local_hash: Some(local_hash),
         recorded_hash: Some(meta.remote_hash),
-        detail: None,
+        detail: diagnostics
+            .first()
+            .map(|diagnostic| diagnostic.message.clone()),
         sync_state: None,
         remote_hash: None,
         remote_updated_at: None,
@@ -1004,6 +1013,59 @@ mod tests {
             |status| status.workflow_id.as_deref() == Some("wf-orphaned")
                 && status.state == LocalWorkflowState::OrphanedMeta
         ));
+    }
+
+    #[test]
+    fn inline_secret_warning_does_not_mark_workflow_invalid() {
+        let temp = tempdir().expect("tempdir");
+        let repo = fixture_repo(temp.path());
+
+        store_workflow(
+            &repo,
+            "prod",
+            &json!({
+                "id": "wf-secret",
+                "name": "Secret Workflow",
+                "active": false,
+                "nodes": [{
+                    "id": "http",
+                    "name": "HTTP Request",
+                    "type": "n8n-nodes-base.httpRequest",
+                    "typeVersion": 4.2,
+                    "position": [0, 0],
+                    "parameters": {
+                        "sendHeaders": true,
+                        "headerParameters": {
+                            "parameters": [{
+                                "name": "Authorization",
+                                "value": "Bearer kFIB4WvNmlJ_UjaTwGtw2WnLHQmfGbBws36njSYEsBA"
+                            }]
+                        }
+                    }
+                }],
+                "connections": {}
+            }),
+        )
+        .expect("store workflow with inline secret");
+
+        let statuses = scan_local_status(&repo, &[]).expect("scan statuses");
+        let entry = statuses
+            .iter()
+            .find(|status| status.workflow_id.as_deref() == Some("wf-secret"))
+            .expect("secret workflow present");
+
+        // A sensitive-data *warning* must not flip an otherwise clean workflow
+        // to `invalid` (which reads as "do not push this").
+        assert_eq!(entry.state, LocalWorkflowState::Clean);
+        // The warning is still surfaced so it is not silently swallowed.
+        assert!(
+            entry
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("secret")),
+            "expected the sensitive-data warning in detail, got {:?}",
+            entry.detail
+        );
     }
 
     #[test]
