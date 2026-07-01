@@ -609,6 +609,27 @@ mod tests {
     }
 
     #[test]
+    fn node_set_args_document_every_argument() {
+        let schema = generate(&test_cmd());
+        let command = schema["commands"]
+            .as_array()
+            .expect("commands array")
+            .iter()
+            .find(|cmd| cmd["name"] == json!("node set"))
+            .expect("`node set` command present in schema");
+        let args = command["args"].as_array().expect("`node set` args array");
+        assert!(!args.is_empty(), "`node set` should declare arguments");
+        for arg in args {
+            let name = arg["name"].as_str().unwrap_or("<unknown>");
+            let description = arg.get("description").and_then(Value::as_str).unwrap_or("");
+            assert!(
+                !description.trim().is_empty(),
+                "arg `{name}` of `node set` must carry a schema description"
+            );
+        }
+    }
+
+    #[test]
     fn schema_all_commands_have_mutating() {
         let schema = generate(&test_cmd());
         let commands = schema["commands"].as_array().unwrap();

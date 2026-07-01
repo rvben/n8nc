@@ -497,31 +497,45 @@ pub enum NodeCommand {
 
 #[derive(Debug, Args)]
 pub struct NodeListArgs {
+    /// Path to the local workflow file to inspect (`*.workflow.json`).
     pub file: PathBuf,
 }
 
 #[derive(Debug, Args)]
 pub struct NodeAddArgs {
+    /// Path to the local workflow file to edit (`*.workflow.json`).
     pub file: PathBuf,
+    /// Display name for the new node (must be unique within the workflow).
     #[arg(long)]
     pub name: String,
+    /// Node type identifier (e.g. `n8n-nodes-base.httpRequest`).
     #[arg(long = "type")]
     pub node_type: String,
+    /// Node type version; defaults to the type's known default when omitted.
     #[arg(long)]
     pub type_version: Option<f64>,
+    /// Canvas x position.
     #[arg(long, default_value_t = 0)]
     pub x: i64,
+    /// Canvas y position.
     #[arg(long, default_value_t = 0)]
     pub y: i64,
+    /// Add the node in a disabled state.
     #[arg(long)]
     pub disabled: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct NodeSetArgs {
+    /// Path to the local workflow file to edit (`*.workflow.json`).
     pub file: PathBuf,
+    /// Target node, matched by its display name first, then by its `id`.
     pub node: String,
+    /// Field to set: a `parameters` dotted/bracket path (e.g. `options.timeout`,
+    /// `headerParameters.parameters[0].value`) or a node-level property such as
+    /// `retryOnFail`, `maxTries`, or `waitBetweenTries`.
     pub path: String,
+    /// Value to assign; treated as a string unless a typing flag is given.
     #[arg(required_unless_present = "null")]
     pub value: Option<String>,
     #[command(flatten)]
@@ -530,25 +544,34 @@ pub struct NodeSetArgs {
 
 #[derive(Debug, Args)]
 pub struct NodeRenameArgs {
+    /// Path to the local workflow file to edit (`*.workflow.json`).
     pub file: PathBuf,
+    /// Existing node to rename, matched by display name first, then by `id`.
     pub current_name: String,
+    /// New display name; outbound and inbound connections are rewritten to match.
     pub new_name: String,
 }
 
 #[derive(Debug, Args)]
 pub struct NodeRemoveArgs {
+    /// Path to the local workflow file to edit (`*.workflow.json`).
     pub file: PathBuf,
+    /// Node to remove, matched by display name first, then by `id`.
     pub node: String,
 }
 
 #[derive(Debug, Args)]
 pub struct ValueModeArgs {
+    /// Parse VALUE as raw JSON (object, array, or any JSON literal).
     #[arg(long = "json-value", conflicts_with_all = ["number", "bool_value", "null"])]
     pub json_value: bool,
+    /// Parse VALUE as a JSON number; integral inputs stay integers (`3`, not `3.0`).
     #[arg(long, conflicts_with_all = ["json_value", "bool_value", "null"])]
     pub number: bool,
+    /// Parse VALUE as a boolean (accepts true/false, 1/0, yes/no).
     #[arg(long = "bool", conflicts_with_all = ["json_value", "number", "null"])]
     pub bool_value: bool,
+    /// Set the field to JSON null; no VALUE argument is required.
     #[arg(long, conflicts_with_all = ["json_value", "number", "bool_value"])]
     pub null: bool,
 }
