@@ -5034,6 +5034,31 @@ fn schema_command_outputs_valid_json() {
     );
 }
 
+#[test]
+fn push_all_with_verify_is_rejected() {
+    let dir = tempdir().unwrap();
+    let output = Command::cargo_bin("n8nc")
+        .expect("n8nc binary")
+        .current_dir(dir.path())
+        .args(["--output", "json", "push", "--all", "--verify"])
+        .output()
+        .expect("run push --all --verify");
+
+    assert!(
+        !output.status.success(),
+        "push --all --verify should be rejected"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("not supported with --all"),
+        "expected a verify/--all guard error, got: {combined}"
+    );
+}
+
 #[tokio::test]
 async fn auto_json_when_piped() {
     // assert_cmd captures stdout, so it's not a TTY — auto-JSON should activate.

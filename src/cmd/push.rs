@@ -9,8 +9,8 @@ use crate::{
     config::{LoadedRepo, resolve_instance_alias},
     error::AppError,
     repo::{
-        LocalWorkflowState, StoredWorkflow, load_meta, load_workflow_file, scan_local_status,
-        sidecar_path_for, store_workflow, workflow_id,
+        LocalWorkflowState, StoredWorkflow, diff_sections, load_meta, load_workflow_file,
+        scan_local_status, sidecar_path_for, store_workflow, workflow_id,
     },
     validate::sensitive_data_diagnostics,
 };
@@ -49,6 +49,12 @@ enum PushOneResult {
 
 pub(crate) async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), AppError> {
     if args.all {
+        if args.verify {
+            return Err(AppError::usage(
+                "push",
+                "`--verify` verifies one workflow at a time and is not supported with --all.",
+            ));
+        }
         return cmd_push_all(context, args).await;
     }
     let file = args.file.ok_or_else(|| {
@@ -170,6 +176,14 @@ pub(crate) async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), Ap
     let warnings = sensitive_data_diagnostics(&stored.workflow_path)?;
     let warning_count = warnings.len();
 
+    // `--verify`: compare what we intended to push against what the server
+    // stored, reporting any canonical section the server changed (drift).
+    let verify_drift = args
+        .verify
+        .then(|| canonicalize_workflow(&updated))
+        .transpose()?
+        .map(|stored_canonical| diff_sections(&canonical, &stored_canonical));
+
     if context.json {
         let mut data = serde_json::Map::new();
         data.insert("workflow_id".to_string(), json!(meta.workflow_id));
@@ -183,6 +197,12 @@ pub(crate) async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), Ap
         if !stripped_settings.is_empty() {
             data.insert("stripped_settings".to_string(), json!(stripped_settings));
         }
+        if let Some(drift) = &verify_drift {
+            data.insert("verified".to_string(), json!(drift.is_empty()));
+            if !drift.is_empty() {
+                data.insert("verify_drift".to_string(), json!(drift));
+            }
+        }
         emit_json("push", &Value::Object(data))
     } else {
         print_message(context, &format!("Pushed {}.", meta.workflow_id));
@@ -191,6 +211,19 @@ pub(crate) async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), Ap
             &format!("Updated local file: {}", stored.workflow_path.display()),
         );
         print_stripped_settings_note(context, &stripped_settings);
+        if let Some(drift) = &verify_drift {
+            if drift.is_empty() {
+                print_message(context, "Verified: server matches the pushed workflow.");
+            } else {
+                print_message(
+                    context,
+                    &format!(
+                        "Verify: server differs in section(s): {}.",
+                        drift.join(", ")
+                    ),
+                );
+            }
+        }
         print_sensitive_warning_summary(&stored.workflow_path, warning_count);
         Ok(())
     }

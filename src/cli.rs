@@ -380,6 +380,10 @@ pub struct PushArgs {
     /// Push all modified tracked workflows
     #[arg(long)]
     pub all: bool,
+    /// After pushing, re-fetch the workflow and report any sections the server
+    /// changed from what was sent. Verifies one workflow; not usable with --all.
+    #[arg(long)]
+    pub verify: bool,
 }
 
 #[derive(Debug, Args)]
@@ -717,8 +721,9 @@ pub struct DiffArgs {
     /// Workflow file, id, or slug to diff
     #[arg(value_name = "FILE_OR_ID")]
     pub file: PathBuf,
-    /// Compare the local workflow against the current remote workflow
-    #[arg(long)]
+    /// Compare the local workflow against the live remote workflow (fetches it
+    /// from n8n). Also available as `--remote`.
+    #[arg(long, visible_alias = "remote")]
     pub refresh: bool,
 }
 
@@ -788,4 +793,30 @@ pub struct SearchArgs {
     /// Use case-sensitive matching
     #[arg(long)]
     pub case_sensitive: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Command};
+    use clap::Parser;
+
+    #[test]
+    fn diff_accepts_remote_as_alias_for_refresh() {
+        let cli = Cli::try_parse_from(["n8nc", "diff", "wf", "--remote"])
+            .expect("`--remote` should be accepted as an alias for `--refresh`");
+        match cli.command {
+            Command::Diff(args) => assert!(args.refresh, "`--remote` should set refresh"),
+            _ => panic!("expected the diff command"),
+        }
+    }
+
+    #[test]
+    fn push_accepts_verify_flag() {
+        let cli = Cli::try_parse_from(["n8nc", "push", "wf", "--verify"])
+            .expect("`--verify` should be accepted by push");
+        match cli.command {
+            Command::Push(args) => assert!(args.verify, "`--verify` should set verify"),
+            _ => panic!("expected the push command"),
+        }
+    }
 }
