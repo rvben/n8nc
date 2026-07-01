@@ -13,6 +13,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.4.7](https://github.com/rvben/n8nc/compare/v0.4.6...v0.4.7) - 2026-07-01
+
+### Fixed
+
+- **push,diff**: accept workflow id/slug and strip API-incompatible settings ([5140b9f](https://github.com/rvben/n8nc/commit/5140b9fc6d5c2b500a83f98f3d1402803afc01e3))
+
 ## [0.4.6](https://github.com/rvben/n8nc/compare/v0.4.5...v0.4.6) - 2026-06-20
 
 ### Added
