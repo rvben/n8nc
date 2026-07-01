@@ -27,6 +27,7 @@ pub async fn run(cli: Cli, json: bool) -> Result<(), AppError> {
         Command::Conn(args) => crate::cmd::edit::cmd_conn(&context, args).await,
         Command::Expr(args) => crate::cmd::edit::cmd_expr(&context, args).await,
         Command::Credential(args) => crate::cmd::credential::cmd_credential(&context, args).await,
+        Command::Secret(args) => crate::cmd::secret::cmd_secret(&context, args).await,
         Command::Status(args) => crate::cmd::status::cmd_status(&context, args).await,
         Command::Diff(args) => crate::cmd::status::cmd_diff(&context, args).await,
         Command::Activate(args) => crate::cmd::activate::cmd_activation(&context, args, true).await,

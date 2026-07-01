@@ -88,6 +88,8 @@ pub enum Command {
     /// Set a credential reference on a node
     #[command(alias = "cred")]
     Credential(CredentialArgs),
+    /// Move an inline node secret into an n8n credential
+    Secret(SecretArgs),
     /// Show local workflow sync state
     Status(StatusArgs),
     /// Show local changes for one tracked workflow
@@ -662,6 +664,39 @@ pub enum CredentialCommand {
     Schema(CredentialSchemaArgs),
     /// Set a credential reference on a node using an existing n8n credential ID
     Set(CredentialSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SecretArgs {
+    #[command(subcommand)]
+    pub command: SecretCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SecretCommand {
+    /// Move an inline request-header secret into a new n8n credential and
+    /// rewrite the node to use it (run `push` afterwards to apply on the remote)
+    Extract(SecretExtractArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SecretExtractArgs {
+    #[command(flatten)]
+    pub remote: RemoteArgs,
+    /// Workflow file, id, or slug containing the node
+    #[arg(value_name = "FILE_OR_ID")]
+    pub file: PathBuf,
+    /// Node holding the inline header, matched by display name first, then id
+    pub node: String,
+    /// Request header to extract (default: Authorization)
+    #[arg(long)]
+    pub header: Option<String>,
+    /// Credential type to create (default: httpHeaderAuth)
+    #[arg(long = "type")]
+    pub credential_type: Option<String>,
+    /// Display name for the new credential (default: "<node> <header>")
+    #[arg(long)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

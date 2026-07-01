@@ -72,6 +72,7 @@ fn is_mutating(path: &str) -> bool {
             | "conn rm"
             | "expr set"
             | "credential set"
+            | "secret extract"
             | "workflow new"
             | "workflow create"
             | "workflow execute"

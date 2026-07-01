@@ -289,6 +289,25 @@ impl ApiClient {
         Ok(extract_data(response))
     }
 
+    /// Create a credential on the instance and return the created record
+    /// (including its assigned `id`).
+    pub async fn create_credential(
+        &self,
+        name: &str,
+        credential_type: &str,
+        data: &Value,
+    ) -> Result<Value, AppError> {
+        let payload = serde_json::json!({
+            "name": name,
+            "type": credential_type,
+            "data": data,
+        });
+        let response = self
+            .request_json(Method::POST, "credentials", &[], Some(&payload))
+            .await?;
+        Ok(extract_data(response))
+    }
+
     pub async fn activate_workflow(&self, workflow_id: &str) -> Result<(), AppError> {
         self.request_json(
             Method::POST,

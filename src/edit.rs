@@ -171,6 +171,121 @@ pub fn set_credential_reference(
     })
 }
 
+/// Read the value of an inline request header on a node.
+///
+/// Navigates `parameters.headerParameters.parameters[]` for the entry whose
+/// `name` matches `header_name` and returns its `value`. The node is matched by
+/// display name first, then by id.
+pub fn read_inline_header_value(
+    path: &Path,
+    node_target: &str,
+    header_name: &str,
+) -> Result<String, AppError> {
+    let workflow = load_workflow_file(path, "secret")?;
+    let nodes = workflow
+        .get("nodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| AppError::validation("secret", "Workflow has no `nodes` array."))?;
+    let node = nodes
+        .iter()
+        .find(|node| node_name(node) == Some(node_target))
+        .or_else(|| nodes.iter().find(|node| node_id(node) == Some(node_target)))
+        .ok_or_else(|| unknown_node_error("secret", node_target, nodes.as_slice()))?;
+
+    node.get("parameters")
+        .and_then(|params| params.get("headerParameters"))
+        .and_then(|headers| headers.get("parameters"))
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.get("name").and_then(Value::as_str) == Some(header_name))
+        })
+        .and_then(|entry| entry.get("value"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            AppError::not_found(
+                "secret",
+                format!("Node `{node_target}` has no inline `{header_name}` header to extract."),
+            )
+        })
+}
+
+/// Rewrite a node to authenticate via a credential instead of an inline header.
+///
+/// Sets `authentication`/`genericAuthType`, attaches the credential reference,
+/// and drops the now-redundant inline header (the credential injects it). If
+/// removing the header leaves no headers, header sending is turned off.
+pub fn attach_header_credential(
+    path: &Path,
+    node_target: &str,
+    header_name: &str,
+    credential_type: &str,
+    credential_id: &str,
+    credential_name: Option<&str>,
+) -> Result<EditResult, AppError> {
+    mutate_workflow(path, "secret", move |workflow| {
+        let node = find_node_mut(workflow, node_target, "secret")?;
+        let node_object = node.as_object_mut().ok_or_else(|| {
+            AppError::validation("secret", "Workflow node entry must be a JSON object.")
+        })?;
+
+        let parameters = node_object
+            .entry("parameters".to_string())
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| {
+                AppError::validation("secret", "Node `parameters` must be an object.")
+            })?;
+        parameters.insert(
+            "authentication".to_string(),
+            Value::String("genericCredentialType".to_string()),
+        );
+        parameters.insert(
+            "genericAuthType".to_string(),
+            Value::String(credential_type.to_string()),
+        );
+        remove_inline_header(parameters, header_name);
+
+        let credentials = node_object
+            .entry("credentials".to_string())
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| {
+                AppError::validation("secret", "Node `credentials` must be an object.")
+            })?;
+        let mut credential = Map::new();
+        credential.insert("id".to_string(), Value::String(credential_id.to_string()));
+        if let Some(name) = credential_name {
+            credential.insert("name".to_string(), Value::String(name.to_string()));
+        }
+        credentials.insert(credential_type.to_string(), Value::Object(credential));
+        Ok(())
+    })
+}
+
+/// Remove a single inline request header by name. If no headers remain, drop the
+/// empty `headerParameters` block and disable header sending.
+fn remove_inline_header(parameters: &mut Map<String, Value>, header_name: &str) {
+    let emptied = {
+        let Some(entries) = parameters
+            .get_mut("headerParameters")
+            .and_then(Value::as_object_mut)
+            .and_then(|headers| headers.get_mut("parameters"))
+            .and_then(Value::as_array_mut)
+        else {
+            return;
+        };
+        entries.retain(|entry| entry.get("name").and_then(Value::as_str) != Some(header_name));
+        entries.is_empty()
+    };
+    if emptied {
+        parameters.remove("headerParameters");
+        parameters.insert("sendHeaders".to_string(), Value::Bool(false));
+    }
+}
+
 pub fn add_connection(
     path: &Path,
     from: &str,
@@ -1155,6 +1270,140 @@ mod tests {
         assert!(
             hint.contains("Fetch All Offertes"),
             "error should name known nodes: {hint}"
+        );
+    }
+
+    fn http_node_with_auth_header(path: &std::path::Path) {
+        let workflow = json!({
+            "name": "Example",
+            "nodes": [{
+                "id": "fetch",
+                "name": "Fetch",
+                "type": "n8n-nodes-base.httpRequest",
+                "typeVersion": 4.2,
+                "position": [0, 0],
+                "parameters": {
+                    "url": "https://api.example.com",
+                    "sendHeaders": true,
+                    "headerParameters": {
+                        "parameters": [
+                            { "name": "Authorization", "value": "Bearer secret-token-123" }
+                        ]
+                    }
+                }
+            }],
+            "connections": {},
+            "settings": {}
+        });
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&workflow).expect("serialize"),
+        )
+        .expect("write workflow");
+    }
+
+    #[test]
+    fn read_inline_header_value_returns_the_token() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("example.workflow.json");
+        http_node_with_auth_header(&path);
+
+        let value = super::read_inline_header_value(&path, "Fetch", "Authorization")
+            .expect("read header value");
+        assert_eq!(value, "Bearer secret-token-123");
+    }
+
+    #[test]
+    fn attach_header_credential_moves_auth_into_credential() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("example.workflow.json");
+        http_node_with_auth_header(&path);
+
+        super::attach_header_credential(
+            &path,
+            "fetch", // by id, to exercise name-or-id resolution
+            "Authorization",
+            "httpHeaderAuth",
+            "cred-1",
+            Some("Example Auth"),
+        )
+        .expect("attach credential");
+
+        let workflow = load_workflow_file(&path, "test").expect("load workflow");
+        let node = &workflow["nodes"][0];
+        assert_eq!(
+            node["parameters"]["authentication"],
+            json!("genericCredentialType")
+        );
+        assert_eq!(
+            node["parameters"]["genericAuthType"],
+            json!("httpHeaderAuth")
+        );
+        assert_eq!(
+            node["credentials"]["httpHeaderAuth"],
+            json!({ "id": "cred-1", "name": "Example Auth" })
+        );
+        // The inline secret is gone; it was the only header, so header sending is off.
+        assert!(node["parameters"].get("headerParameters").is_none());
+        assert_eq!(node["parameters"]["sendHeaders"], json!(false));
+    }
+
+    #[test]
+    fn attach_header_credential_keeps_other_headers() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("example.workflow.json");
+        let workflow = json!({
+            "name": "Example",
+            "nodes": [{
+                "id": "fetch",
+                "name": "Fetch",
+                "type": "n8n-nodes-base.httpRequest",
+                "typeVersion": 4.2,
+                "position": [0, 0],
+                "parameters": {
+                    "sendHeaders": true,
+                    "headerParameters": {
+                        "parameters": [
+                            { "name": "Authorization", "value": "Bearer secret" },
+                            { "name": "X-Trace", "value": "on" }
+                        ]
+                    }
+                }
+            }],
+            "connections": {},
+            "settings": {}
+        });
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&workflow).expect("serialize"),
+        )
+        .expect("write workflow");
+
+        super::attach_header_credential(
+            &path,
+            "Fetch",
+            "Authorization",
+            "httpHeaderAuth",
+            "cred-2",
+            None,
+        )
+        .expect("attach credential");
+
+        let workflow = load_workflow_file(&path, "test").expect("load workflow");
+        let headers = workflow["nodes"][0]["parameters"]["headerParameters"]["parameters"]
+            .as_array()
+            .expect("remaining headers");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0]["name"], json!("X-Trace"));
+        // Other headers remain, so header sending stays enabled.
+        assert_eq!(
+            workflow["nodes"][0]["parameters"]["sendHeaders"],
+            json!(true)
+        );
+        // Credential reference has no explicit name when none is given.
+        assert_eq!(
+            workflow["nodes"][0]["credentials"]["httpHeaderAuth"],
+            json!({ "id": "cred-2" })
         );
     }
 

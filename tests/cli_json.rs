@@ -5060,6 +5060,102 @@ fn push_all_with_verify_is_rejected() {
 }
 
 #[tokio::test]
+async fn secret_extract_creates_credential_and_rewrites_node() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-secret"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "wf-secret",
+                "name": "Secret WF",
+                "active": false,
+                "tags": [],
+                "nodes": [{
+                    "id": "fetch",
+                    "name": "Fetch",
+                    "type": "n8n-nodes-base.httpRequest",
+                    "typeVersion": 4.2,
+                    "position": [0, 0],
+                    "parameters": {
+                        "url": "https://api.example.com",
+                        "sendHeaders": true,
+                        "headerParameters": {
+                            "parameters": [
+                                { "name": "Authorization", "value": "Bearer secret-token-123" }
+                            ]
+                        }
+                    }
+                }],
+                "connections": {},
+                "settings": {}
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/credentials"))
+        .and(header("x-n8n-api-key", "test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "id": "cred-xyz", "name": "Fetch Authorization", "type": "httpHeaderAuth" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let pull = base_command(repo.path())
+        .arg("pull")
+        .arg("wf-secret")
+        .output()
+        .expect("run pull");
+    assert!(
+        pull.status.success(),
+        "pull failed: {}",
+        String::from_utf8_lossy(&pull.stderr)
+    );
+    let workflow_path = parse_json(&pull.stdout)["data"]["workflow_path"]
+        .as_str()
+        .expect("workflow path")
+        .to_string();
+
+    let output = base_command(repo.path())
+        .arg("secret")
+        .arg("extract")
+        .arg("wf-secret")
+        .arg("Fetch")
+        .output()
+        .expect("run secret extract");
+    assert!(
+        output.status.success(),
+        "secret extract failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["credential"]["id"], "cred-xyz");
+    assert_eq!(envelope["data"]["credential"]["type"], "httpHeaderAuth");
+
+    // The local workflow now authenticates via the credential and the inline
+    // Bearer token is gone.
+    let workflow = read_json_file(Path::new(&workflow_path));
+    let node = &workflow["nodes"][0];
+    assert_eq!(
+        node["parameters"]["authentication"],
+        "genericCredentialType"
+    );
+    assert_eq!(node["parameters"]["genericAuthType"], "httpHeaderAuth");
+    assert_eq!(node["credentials"]["httpHeaderAuth"]["id"], "cred-xyz");
+    assert!(
+        node["parameters"].get("headerParameters").is_none(),
+        "the inline Authorization header should be removed"
+    );
+}
+
+#[tokio::test]
 async fn auto_json_when_piped() {
     // assert_cmd captures stdout, so it's not a TTY — auto-JSON should activate.
     // Use `ls` (a real command with data output) rather than `schema` (always JSON).

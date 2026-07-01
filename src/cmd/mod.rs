@@ -12,6 +12,7 @@ pub mod pull;
 pub mod push;
 pub mod runs;
 pub mod search;
+pub mod secret;
 pub mod status;
 pub mod trigger;
 pub mod validate_cmd;
