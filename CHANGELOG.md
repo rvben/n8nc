@@ -14,6 +14,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.5.0](https://github.com/rvben/n8nc/compare/v0.4.7...v0.5.0) - 2026-07-01
+
+### Added
+
+- **secret**: add `secret extract` to move inline header tokens to credentials ([1d27ace](https://github.com/rvben/n8nc/commit/1d27ace4fcd85b6c064ce1c71550d4a262d6afb8))
+- **cli**: add `diff --remote` alias and `push --verify` drift check ([f068e2d](https://github.com/rvben/n8nc/commit/f068e2dc8890203dae49cb70c67b3cfa2fd13061))
+
+### Fixed
+
+- **push**: verify drift against the pushed payload, not the full workflow ([6e8aae0](https://github.com/rvben/n8nc/commit/6e8aae0ec20830857276368b039fac13fc74a913))
+- **status**: treat sensitive-data warnings as advisory, not invalid ([33fd3df](https://github.com/rvben/n8nc/commit/33fd3df4ce1a8f035ac6ec59a43e8ce65c28a94e))
+- **node**: resolve nodes by id as well as display name ([3b39bbd](https://github.com/rvben/n8nc/commit/3b39bbdb681ebaa5d9a7e208c168e8ecaeb5c16c))
+- **node**: preserve integer values for `node set --number` ([df02428](https://github.com/rvben/n8nc/commit/df02428a4d20fc8933ddaed605c9192cae33de77))
+
 ## [0.4.7](https://github.com/rvben/n8nc/compare/v0.4.6...v0.4.7) - 2026-07-01
 
 ### Fixed
