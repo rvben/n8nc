@@ -775,6 +775,32 @@ pub(crate) fn parse_pairs(
         .collect()
 }
 
+/// Parse a `--number` argument into a JSON number, preserving integer-ness.
+///
+/// n8n rejects float literals (`3.0`) for integer node fields such as
+/// `maxTries`/`waitBetweenTries`, so integral inputs (`3`, `5000`, `5000.0`)
+/// produce integer JSON numbers while genuine fractions stay floats.
+fn parse_number_arg(command: &'static str, raw: &str) -> Result<serde_json::Number, AppError> {
+    let trimmed = raw.trim();
+    if let Ok(int) = trimmed.parse::<i64>() {
+        return Ok(serde_json::Number::from(int));
+    }
+    if let Ok(uint) = trimmed.parse::<u64>() {
+        return Ok(serde_json::Number::from(uint));
+    }
+    let float = trimmed.parse::<f64>().map_err(|err| {
+        AppError::usage(command, format!("`--number` value must be numeric: {err}"))
+    })?;
+    if !float.is_finite() {
+        return Err(AppError::usage(command, "`--number` value must be finite."));
+    }
+    if float.fract() == 0.0 && (i64::MIN as f64..=i64::MAX as f64).contains(&float) {
+        return Ok(serde_json::Number::from(float as i64));
+    }
+    serde_json::Number::from_f64(float)
+        .ok_or_else(|| AppError::usage(command, "`--number` value must be finite."))
+}
+
 pub(crate) fn parse_node_value(
     command: &'static str,
     mode: &ValueModeArgs,
@@ -798,11 +824,7 @@ pub(crate) fn parse_node_value(
     }
 
     if mode.number {
-        let number = serde_json::Number::from_f64(value.parse::<f64>().map_err(|err| {
-            AppError::usage(command, format!("`--number` value must be numeric: {err}"))
-        })?)
-        .ok_or_else(|| AppError::usage(command, "`--number` value must be finite."))?;
-        return Ok(Value::Number(number));
+        return Ok(Value::Number(parse_number_arg(command, value)?));
     }
 
     if mode.bool_value {
@@ -1071,6 +1093,41 @@ mod tests {
         });
 
         assert_eq!(unsupported_push_fields(&local, &remote), vec!["active"]);
+    }
+
+    fn number_mode() -> crate::cli::ValueModeArgs {
+        crate::cli::ValueModeArgs {
+            json_value: false,
+            number: true,
+            bool_value: false,
+            null: false,
+        }
+    }
+
+    #[test]
+    fn parse_node_value_number_keeps_plain_integers_as_integers() {
+        let value = super::parse_node_value("node", &number_mode(), Some("3")).expect("parse 3");
+        // n8n rejects float literals for integer node fields like `maxTries`, so a
+        // plain integer must serialize as `3`, not `3.0`.
+        assert!(
+            value.is_i64() || value.is_u64(),
+            "expected an integer JSON number, got {value}"
+        );
+        assert_eq!(value.to_string(), "3");
+    }
+
+    #[test]
+    fn parse_node_value_number_coerces_integral_floats_to_integers() {
+        let value =
+            super::parse_node_value("node", &number_mode(), Some("5000.0")).expect("parse 5000.0");
+        assert_eq!(value.to_string(), "5000");
+    }
+
+    #[test]
+    fn parse_node_value_number_preserves_fractions() {
+        let value =
+            super::parse_node_value("node", &number_mode(), Some("2.5")).expect("parse 2.5");
+        assert_eq!(value.to_string(), "2.5");
     }
 
     #[test]
