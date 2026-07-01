@@ -272,23 +272,24 @@ pub fn rename_node(
     })
 }
 
-pub fn remove_node(path: &Path, target_name: &str) -> Result<EditResult, AppError> {
+pub fn remove_node(path: &Path, target: &str) -> Result<EditResult, AppError> {
     mutate_workflow(path, "node", move |workflow| {
+        let canonical = {
+            let nodes = workflow_nodes_mut(workflow, "node")?;
+            match resolve_node_name(nodes.as_slice(), target) {
+                Some(name) => name,
+                None => return Err(unknown_node_error("node", target, nodes.as_slice())),
+            }
+        };
+
         {
             let nodes = workflow_nodes_mut(workflow, "node")?;
-            let original_len = nodes.len();
-            nodes.retain(|node| node_name(node) != Some(target_name));
-            if nodes.len() == original_len {
-                return Err(AppError::not_found(
-                    "node",
-                    format!("Node `{target_name}` was not found."),
-                ));
-            }
+            nodes.retain(|node| node_name(node) != Some(canonical.as_str()));
         }
 
         let connections = workflow_connections_mut(workflow, "node")?;
-        connections.remove(target_name);
-        remove_connection_targets(connections, target_name, None, None, None, None);
+        connections.remove(&canonical);
+        remove_connection_targets(connections, &canonical, None, None, None, None);
         Ok(())
     })
 }
@@ -494,13 +495,19 @@ fn workflow_connections_mut<'a>(
 
 fn find_node_mut<'a>(
     workflow: &'a mut Value,
-    target_name: &str,
+    target: &str,
     command: &'static str,
 ) -> Result<&'a mut Value, AppError> {
-    workflow_nodes_mut(workflow, command)?
-        .iter_mut()
-        .find(|node| node_name(node).is_some_and(|name| name == target_name))
-        .ok_or_else(|| AppError::not_found(command, format!("Node `{target_name}` was not found.")))
+    let nodes = workflow_nodes_mut(workflow, command)?;
+    // Prefer an exact display-name match, then fall back to the node id.
+    let index = nodes
+        .iter()
+        .position(|node| node_name(node) == Some(target))
+        .or_else(|| nodes.iter().position(|node| node_id(node) == Some(target)));
+    match index {
+        Some(index) => Ok(&mut nodes[index]),
+        None => Err(unknown_node_error(command, target, nodes.as_slice())),
+    }
 }
 
 fn ensure_node_exists(
@@ -619,6 +626,45 @@ fn connection_entry_matches(
 
 fn node_name(node: &Value) -> Option<&str> {
     node.get("name").and_then(Value::as_str)
+}
+
+fn node_id(node: &Value) -> Option<&str> {
+    node.get("id").and_then(Value::as_str)
+}
+
+/// Resolve a name-or-id target to the node's canonical display name.
+///
+/// An exact display-name match wins; otherwise the node whose `id` matches is
+/// used. n8n keys connections by node name, so callers that rewrite
+/// connections must operate on this canonical name, not the raw target.
+fn resolve_node_name(nodes: &[Value], target: &str) -> Option<String> {
+    if nodes.iter().any(|node| node_name(node) == Some(target)) {
+        return Some(target.to_string());
+    }
+    nodes
+        .iter()
+        .find(|node| node_id(node) == Some(target))
+        .and_then(node_name)
+        .map(str::to_string)
+}
+
+fn known_node_labels(nodes: &[Value]) -> String {
+    nodes
+        .iter()
+        .filter_map(|node| node_name(node).or_else(|| node_id(node)))
+        .map(|label| format!("`{label}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn unknown_node_error(command: &'static str, target: &str, nodes: &[Value]) -> AppError {
+    let error = AppError::not_found(command, format!("Node `{target}` was not found."));
+    let known = known_node_labels(nodes);
+    if known.is_empty() {
+        error
+    } else {
+        error.with_suggestion(format!("Known nodes: {known}."))
+    }
 }
 
 fn generated_local_id(prefix: &str) -> String {
@@ -1046,6 +1092,69 @@ mod tests {
                 .and_then(|value| value.get("timeout"))
                 .and_then(Value::as_i64),
             Some(30)
+        );
+    }
+
+    #[test]
+    fn set_node_value_resolves_node_by_id() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("example.workflow.json");
+        let workflow = json!({
+            "name": "Example",
+            "nodes": [{
+                "id": "fetch-offertes",
+                "name": "Fetch All Offertes",
+                "type": "n8n-nodes-base.httpRequest",
+                "typeVersion": 4.2,
+                "position": [0, 0],
+                "parameters": {}
+            }],
+            "connections": {},
+            "settings": {}
+        });
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&workflow).expect("serialize"),
+        )
+        .expect("write workflow");
+
+        // A node's `id` must resolve, not only its display `name`.
+        set_node_value(&path, "fetch-offertes", "options.timeout", json!(30)).expect("set by id");
+
+        let workflow = load_workflow_file(&path, "test").expect("load workflow");
+        assert_eq!(
+            workflow["nodes"][0]["parameters"]["options"]["timeout"],
+            json!(30)
+        );
+    }
+
+    #[test]
+    fn set_node_value_unknown_node_lists_available_nodes() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("example.workflow.json");
+        create_workflow(&path, "Example", Some("wf-1"), false).expect("create");
+        add_node(
+            &path,
+            "Fetch All Offertes",
+            "n8n-nodes-base.httpRequest",
+            Some(4.2),
+            0,
+            0,
+            false,
+        )
+        .expect("add node");
+
+        let err = set_node_value(&path, "does-not-exist", "options.timeout", json!(1))
+            .expect_err("unknown node");
+        let hint = format!(
+            "{} {} {}",
+            err.message,
+            err.hint.clone().unwrap_or_default(),
+            err.suggestion.clone().unwrap_or_default()
+        );
+        assert!(
+            hint.contains("Fetch All Offertes"),
+            "error should name known nodes: {hint}"
         );
     }
 
