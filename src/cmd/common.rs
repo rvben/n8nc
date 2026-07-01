@@ -21,7 +21,10 @@ use crate::{
     config::{LoadedRepo, load_repo, resolve_instance_alias, workflow_dir},
     edit::{EditResult, default_workflow_file_name, default_workflow_settings},
     error::AppError,
-    repo::{load_workflow_file, workflow_active},
+    repo::{
+        find_tracked_workflows_by_id, find_tracked_workflows_by_slug, load_workflow_file,
+        workflow_active,
+    },
     validate::{Severity, sensitive_data_diagnostics, validate_workflow_path},
 };
 
@@ -62,6 +65,26 @@ pub(crate) fn is_zero(value: &usize) -> bool {
 
 pub(crate) const WORKFLOW_UPDATE_MUTABLE_FIELDS: &[&str] =
     &["name", "nodes", "connections", "settings"];
+
+/// Workflow `settings` keys that the n8n public API rejects on create/update.
+///
+/// The public API validates the request body's `settings` object with
+/// `additionalProperties: false`, so any key it does not know about fails the
+/// whole request with HTTP 400 `settings must NOT have additional properties`.
+/// These keys are set through the n8n editor UI (they round-trip via `pull`)
+/// but are not part of the public API schema, which turns an otherwise valid
+/// `pull` -> edit -> `push` into a hard failure.
+///
+/// Omitting a settings key on update does not clear it: the server keeps the
+/// stored value for any key absent from the payload. Stripping these before a
+/// push is therefore lossless, and we report which keys were dropped.
+///
+/// This is deliberately a denylist of known-incompatible keys rather than an
+/// allowlist of accepted ones, because n8n Cloud accepts several keys that are
+/// absent from the published schema (for example `callerPolicy` and
+/// `availableInMCP`); an allowlist would silently drop those.
+pub(crate) const PUSH_INCOMPATIBLE_SETTINGS: &[&str] = &["binaryMode", "timeSavedMode"];
+
 pub(crate) const ACTIVATION_POLL_ATTEMPTS: usize = 8;
 pub(crate) const ACTIVATION_POLL_INTERVAL_MS: u64 = 250;
 pub(crate) const WEBHOOK_NODE_TYPE: &str = "n8n-nodes-base.webhook";
@@ -241,6 +264,110 @@ pub(crate) fn resolve_existing_workflow_path(context: &Context, target: &str) ->
     }
 }
 
+pub(crate) fn is_workflow_json_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| name.ends_with(".workflow.json"))
+        .unwrap_or(false)
+}
+
+/// Resolve a `push`/`diff` target into the tracked `.workflow.json` file it
+/// refers to. The target may be given as any of:
+///
+/// 1. a path to an existing `.workflow.json` file (absolute or repo-relative),
+/// 2. a tracked workflow id (matched against `<slug>--<id>.workflow.json`), or
+/// 3. a tracked workflow slug (the `<slug>` portion of the file name).
+///
+/// `pull` and `runs get` already accept a bare id; `push` and `diff` used to
+/// require a file path, which surfaced as a confusing "No such file" error when
+/// an id was passed. This resolver closes that gap.
+pub(crate) fn resolve_tracked_workflow_file(
+    repo: &LoadedRepo,
+    command: &'static str,
+    target: &Path,
+) -> Result<PathBuf, AppError> {
+    // 1. An existing path wins, and must be a `.workflow.json` file.
+    let absolute = absolutize(&repo.root, target);
+    if absolute.is_file() {
+        if is_workflow_json_path(&absolute) {
+            return Ok(absolute);
+        }
+        return Err(AppError::usage(
+            command,
+            format!("`{}` is not a `.workflow.json` file.", absolute.display()),
+        ));
+    }
+
+    let raw = target
+        .to_str()
+        .ok_or_else(|| AppError::usage(command, "Workflow target must be valid UTF-8."))?;
+
+    // A target that looks like a path (has a separator) or a workflow file name
+    // but does not exist is a missing file, not an id/slug. Avoid silently
+    // reinterpreting a mistyped path as a lookup key.
+    if raw.contains('/')
+        || raw.contains(std::path::MAIN_SEPARATOR)
+        || raw.ends_with(".workflow.json")
+    {
+        return Err(AppError::not_found(
+            command,
+            format!("Workflow file not found: {}", absolute.display()),
+        ));
+    }
+
+    // 2/3. Match a tracked workflow by id or slug. Both lookups are pooled (and
+    //    each gathers every tracked match, not just the first walk hit) so that
+    //    an untracked copy cannot shadow the real workflow and an id/slug
+    //    namespace collision is reported as ambiguous rather than silently
+    //    resolving to one interpretation.
+    let mut candidates = find_tracked_workflows_by_id(repo, raw);
+    for path in find_tracked_workflows_by_slug(repo, raw) {
+        if !candidates.contains(&path) {
+            candidates.push(path);
+        }
+    }
+
+    match pick_unique_tracked(command, raw, candidates)? {
+        Some(path) => Ok(path),
+        None => Err(AppError::not_found(
+            command,
+            format!("No tracked workflow matches `{raw}`."),
+        )
+        .with_suggestion(
+            "Pass a `.workflow.json` path, or a tracked workflow id or slug (see `n8nc status`).",
+        )),
+    }
+}
+
+/// Collapse the tracked candidates into a single result: `None` when there is no
+/// match, `Some(path)` for exactly one, and an ambiguity error for more than one.
+fn pick_unique_tracked(
+    command: &'static str,
+    raw: &str,
+    mut candidates: Vec<PathBuf>,
+) -> Result<Option<PathBuf>, AppError> {
+    candidates.sort();
+    candidates.dedup();
+    match candidates.len() {
+        0 => Ok(None),
+        1 => Ok(Some(candidates.remove(0))),
+        _ => {
+            let names: Vec<String> = candidates
+                .iter()
+                .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+                .map(ToOwned::to_owned)
+                .collect();
+            Err(AppError::usage(
+                command,
+                format!(
+                    "`{raw}` matches multiple tracked workflows: {}. Use the workflow id or file path.",
+                    names.join(", ")
+                ),
+            ))
+        }
+    }
+}
+
 pub(crate) fn resolve_new_workflow_path(
     context: &Context,
     explicit: Option<&Path>,
@@ -361,7 +488,7 @@ pub(crate) async fn wait_for_workflow_active_state(
 // Workflow payload builders
 // ---------------------------------------------------------------------------
 
-pub(crate) fn workflow_create_payload(path: &Path) -> Result<Value, AppError> {
+pub(crate) fn workflow_create_payload(path: &Path) -> Result<(Value, Vec<String>), AppError> {
     let diagnostics = validate_workflow_path(path)?;
     let error_count = diagnostics
         .iter()
@@ -394,6 +521,7 @@ pub(crate) fn workflow_create_payload(path: &Path) -> Result<Value, AppError> {
     object.remove("id");
     object.remove("active");
     apply_default_workflow_settings(object)?;
+    let stripped = strip_push_incompatible_settings(object);
 
     let has_name = object
         .get("name")
@@ -419,10 +547,70 @@ pub(crate) fn workflow_create_payload(path: &Path) -> Result<Value, AppError> {
     }
 
     normalize_remote_create_payload(&mut payload)?;
-    canonicalize_workflow(&payload)
+    Ok((canonicalize_workflow(&payload)?, stripped))
 }
 
-pub(crate) fn workflow_update_payload(workflow: &Value) -> Result<Value, AppError> {
+/// Remove workflow `settings` keys the n8n public API rejects (see
+/// [`PUSH_INCOMPATIBLE_SETTINGS`]). Returns the removed keys, sorted, so callers
+/// can report what was omitted. The server retains stored values for omitted
+/// keys, so this is lossless.
+pub(crate) fn strip_push_incompatible_settings(
+    object: &mut serde_json::Map<String, Value>,
+) -> Vec<String> {
+    let Some(settings) = object.get_mut("settings").and_then(Value::as_object_mut) else {
+        return Vec::new();
+    };
+    let mut stripped = Vec::new();
+    for key in PUSH_INCOMPATIBLE_SETTINGS {
+        if settings.remove(*key).is_some() {
+            stripped.push((*key).to_string());
+        }
+    }
+    stripped.sort();
+    stripped
+}
+
+/// Incompatible settings keys (see [`PUSH_INCOMPATIBLE_SETTINGS`]) whose local
+/// value differs from the remote value. Because these keys are dropped from the
+/// update payload, a local change to one of them cannot be applied by push;
+/// callers reject such a change instead of silently discarding it.
+pub(crate) fn changed_incompatible_settings(local: &Value, remote: &Value) -> Vec<String> {
+    let local_settings = local.get("settings");
+    let remote_settings = remote.get("settings");
+    PUSH_INCOMPATIBLE_SETTINGS
+        .iter()
+        .filter(|key| {
+            local_settings.and_then(|settings| settings.get(**key))
+                != remote_settings.and_then(|settings| settings.get(**key))
+        })
+        .map(|key| (*key).to_string())
+        .collect()
+}
+
+/// Human-readable note describing settings omitted from a create/push because
+/// the n8n public API rejects them. `retained_by_server` is true for updates
+/// (the server keeps the stored value for omitted keys) and false for creates
+/// (the new workflow simply will not have the key). Returns `None` when nothing
+/// was stripped.
+pub(crate) fn stripped_settings_note(
+    stripped: &[String],
+    retained_by_server: bool,
+) -> Option<String> {
+    if stripped.is_empty() {
+        return None;
+    }
+    let tail = if retained_by_server {
+        "the server keeps its stored values"
+    } else {
+        "the created workflow will not have them"
+    };
+    Some(format!(
+        "Note: omitted API-incompatible setting(s): {} ({tail}).",
+        stripped.join(", ")
+    ))
+}
+
+pub(crate) fn workflow_update_payload(workflow: &Value) -> Result<(Value, Vec<String>), AppError> {
     let mut payload = canonicalize_workflow(workflow)?;
     let object = payload
         .as_object_mut()
@@ -463,7 +651,8 @@ pub(crate) fn workflow_update_payload(workflow: &Value) -> Result<Value, AppErro
         }
     }
 
-    canonicalize_workflow(&Value::Object(out))
+    let stripped = strip_push_incompatible_settings(&mut out);
+    Ok((canonicalize_workflow(&Value::Object(out))?, stripped))
 }
 
 pub(crate) fn unsupported_push_fields(local: &Value, remote: &Value) -> Vec<String> {
@@ -725,13 +914,58 @@ pub(crate) fn value_string(value: &Value, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use std::{collections::BTreeMap, fs, path::Path};
 
-    use super::{unsupported_push_fields, workflow_update_payload};
+    use serde_json::{Value, json};
+    use tempfile::tempdir;
+
+    use crate::config::{InstanceConfig, LoadedRepo, RepoConfig};
+
+    use super::{
+        changed_incompatible_settings, resolve_tracked_workflow_file, unsupported_push_fields,
+        workflow_update_payload,
+    };
+
+    fn fixture_repo(root: &Path) -> LoadedRepo {
+        fs::create_dir_all(root.join("workflows")).expect("workflow dir");
+        let mut instances = BTreeMap::new();
+        instances.insert(
+            "prod".to_string(),
+            InstanceConfig {
+                base_url: "https://example.n8n.cloud".to_string(),
+                api_version: "v1".to_string(),
+                execute: None,
+            },
+        );
+        LoadedRepo {
+            root: root.to_path_buf(),
+            config: RepoConfig {
+                schema_version: 1,
+                default_instance: "prod".to_string(),
+                workflow_dir: "workflows".into(),
+                instances,
+                lint: None,
+            },
+        }
+    }
+
+    fn write_untracked_workflow_file(repo: &LoadedRepo, file_name: &str) -> std::path::PathBuf {
+        let path = repo.root.join("workflows").join(file_name);
+        fs::write(&path, "{}").expect("write workflow file");
+        path
+    }
+
+    /// A tracked workflow has both the `.workflow.json` file and its `.meta.json`
+    /// sidecar on disk.
+    fn write_tracked_workflow_file(repo: &LoadedRepo, file_name: &str) -> std::path::PathBuf {
+        let path = write_untracked_workflow_file(repo, file_name);
+        fs::write(crate::repo::sidecar_path_for(&path), "{}").expect("write sidecar");
+        path
+    }
 
     #[test]
     fn workflow_update_payload_only_keeps_mutable_fields() {
-        let payload = workflow_update_payload(&json!({
+        let (payload, stripped) = workflow_update_payload(&json!({
             "id": "wf-1",
             "name": "Example",
             "active": true,
@@ -744,6 +978,7 @@ mod tests {
         }))
         .expect("update payload");
 
+        assert!(stripped.is_empty());
         assert_eq!(
             payload,
             json!({
@@ -759,6 +994,61 @@ mod tests {
                 "connections": {}
             })
         );
+    }
+
+    #[test]
+    fn workflow_update_payload_strips_api_incompatible_settings() {
+        let (payload, stripped) = workflow_update_payload(&json!({
+            "id": "wf-1",
+            "name": "Example",
+            "nodes": [],
+            "connections": {},
+            "settings": {
+                "executionOrder": "v1",
+                "callerPolicy": "workflowsFromSameOwner",
+                "binaryMode": "separate",
+                "timeSavedMode": "fixed"
+            }
+        }))
+        .expect("update payload");
+
+        assert_eq!(
+            stripped,
+            vec!["binaryMode".to_string(), "timeSavedMode".to_string()]
+        );
+        let settings = payload
+            .get("settings")
+            .and_then(Value::as_object)
+            .expect("settings object");
+        assert!(!settings.contains_key("binaryMode"));
+        assert!(!settings.contains_key("timeSavedMode"));
+        // Keys the public API accepts must be preserved.
+        assert_eq!(
+            settings.get("callerPolicy").and_then(Value::as_str),
+            Some("workflowsFromSameOwner")
+        );
+        assert_eq!(
+            settings.get("executionOrder").and_then(Value::as_str),
+            Some("v1")
+        );
+    }
+
+    #[test]
+    fn changed_incompatible_settings_flags_only_changed_keys() {
+        let remote = json!({
+            "settings": { "binaryMode": "separate", "timeSavedMode": "fixed", "executionOrder": "v1" }
+        });
+        let local = json!({
+            "settings": { "binaryMode": "default", "timeSavedMode": "fixed", "executionOrder": "v1" }
+        });
+
+        // Only the changed incompatible key is reported.
+        assert_eq!(
+            changed_incompatible_settings(&local, &remote),
+            vec!["binaryMode".to_string()]
+        );
+        // An unchanged round-trip reports nothing.
+        assert!(changed_incompatible_settings(&remote, &remote).is_empty());
     }
 
     #[test]
@@ -781,5 +1071,100 @@ mod tests {
         });
 
         assert_eq!(unsupported_push_fields(&local, &remote), vec!["active"]);
+    }
+
+    #[test]
+    fn resolve_tracked_workflow_file_matches_id_slug_and_path() {
+        let temp = tempdir().expect("tempdir");
+        let repo = fixture_repo(temp.path());
+        let path = write_tracked_workflow_file(&repo, "offerte--WoupM9pnmtSDPnBC.workflow.json");
+
+        assert_eq!(
+            resolve_tracked_workflow_file(&repo, "push", Path::new("WoupM9pnmtSDPnBC"))
+                .expect("resolve by id"),
+            path
+        );
+        assert_eq!(
+            resolve_tracked_workflow_file(&repo, "push", Path::new("offerte"))
+                .expect("resolve by slug"),
+            path
+        );
+        assert_eq!(
+            resolve_tracked_workflow_file(
+                &repo,
+                "push",
+                Path::new("workflows/offerte--WoupM9pnmtSDPnBC.workflow.json"),
+            )
+            .expect("resolve by path"),
+            path
+        );
+    }
+
+    #[test]
+    fn resolve_tracked_workflow_file_ignores_untracked_slug_and_id_matches() {
+        let temp = tempdir().expect("tempdir");
+        let repo = fixture_repo(temp.path());
+        let tracked = write_tracked_workflow_file(&repo, "offerte--WoupM9pnmtSDPnBC.workflow.json");
+        // An untracked draft sharing the slug must not shadow the tracked file.
+        write_untracked_workflow_file(&repo, "offerte--draft-1-2.workflow.json");
+
+        assert_eq!(
+            resolve_tracked_workflow_file(&repo, "push", Path::new("offerte"))
+                .expect("slug resolves to the tracked workflow"),
+            tracked
+        );
+
+        // A bare id that only matches an untracked file is treated as unknown.
+        let err = resolve_tracked_workflow_file(&repo, "push", Path::new("draft-1-2"))
+            .expect_err("untracked id is not resolvable");
+        assert!(err.message.contains("No tracked workflow matches"));
+    }
+
+    #[test]
+    fn resolve_tracked_workflow_file_prefers_tracked_over_untracked_duplicate_id() {
+        let temp = tempdir().expect("tempdir");
+        let repo = fixture_repo(temp.path());
+        let tracked = write_tracked_workflow_file(&repo, "offerte--WoupM9pnmtSDPnBC.workflow.json");
+        // An untracked copy carrying the same id must not shadow or hide the
+        // tracked file regardless of directory-walk order.
+        write_untracked_workflow_file(&repo, "copy-offerte--WoupM9pnmtSDPnBC.workflow.json");
+
+        assert_eq!(
+            resolve_tracked_workflow_file(&repo, "push", Path::new("WoupM9pnmtSDPnBC"))
+                .expect("id resolves to the tracked workflow despite an untracked duplicate"),
+            tracked
+        );
+    }
+
+    #[test]
+    fn resolve_tracked_workflow_file_reports_unknown_target() {
+        let temp = tempdir().expect("tempdir");
+        let repo = fixture_repo(temp.path());
+        let err = resolve_tracked_workflow_file(&repo, "push", Path::new("no-such-workflow"))
+            .expect_err("unknown target");
+        assert!(err.message.contains("No tracked workflow matches"));
+    }
+
+    #[test]
+    fn resolve_tracked_workflow_file_flags_ambiguous_slug() {
+        let temp = tempdir().expect("tempdir");
+        let repo = fixture_repo(temp.path());
+        write_tracked_workflow_file(&repo, "offerte--aaaaaaaaaaaaaaaa.workflow.json");
+        write_tracked_workflow_file(&repo, "offerte--bbbbbbbbbbbbbbbb.workflow.json");
+        let err = resolve_tracked_workflow_file(&repo, "push", Path::new("offerte"))
+            .expect_err("ambiguous slug");
+        assert!(err.message.contains("matches multiple"));
+    }
+
+    #[test]
+    fn resolve_tracked_workflow_file_flags_id_slug_collision() {
+        let temp = tempdir().expect("tempdir");
+        let repo = fixture_repo(temp.path());
+        // `collide` is the id of one workflow and the slug of another.
+        write_tracked_workflow_file(&repo, "alpha--collide.workflow.json");
+        write_tracked_workflow_file(&repo, "collide--zzzzzzzzzzzzzzzz.workflow.json");
+        let err = resolve_tracked_workflow_file(&repo, "push", Path::new("collide"))
+            .expect_err("id/slug collision");
+        assert!(err.message.contains("matches multiple"));
     }
 }

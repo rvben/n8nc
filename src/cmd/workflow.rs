@@ -33,8 +33,9 @@ use super::common::{
     finalize_created_workflow_source, load_loaded_repo, normalize_webhook_path,
     parse_workflow_execute_input, print_message, print_response_body,
     print_sensitive_warning_summary, read_request_body, remote_client,
-    resolve_existing_workflow_path, resolve_local_file_path, resolve_new_workflow_path, truncate,
-    value_string, wait_for_workflow_active_state, workflow_create_payload,
+    resolve_existing_workflow_path, resolve_local_file_path, resolve_new_workflow_path,
+    stripped_settings_note, truncate, value_string, wait_for_workflow_active_state,
+    workflow_create_payload,
 };
 
 // ---------------------------------------------------------------------------
@@ -198,7 +199,7 @@ async fn cmd_workflow_create(context: &Context, args: WorkflowCreateArgs) -> Res
         ));
     }
 
-    let payload = workflow_create_payload(&source_path)?;
+    let (payload, stripped_settings) = workflow_create_payload(&source_path)?;
     let (client, _, base_url) = remote_client(&repo, Some(&alias), "workflow")?;
     let created = client.create_workflow(&payload).await?;
     let created_id = workflow_id(&created).ok_or_else(|| {
@@ -246,6 +247,9 @@ async fn cmd_workflow_create(context: &Context, args: WorkflowCreateArgs) -> Res
         if let Some(cleanup_warning) = cleanup_warning {
             data.insert("cleanup_warning".to_string(), json!(cleanup_warning));
         }
+        if !stripped_settings.is_empty() {
+            data.insert("stripped_settings".to_string(), json!(stripped_settings));
+        }
         emit_json("workflow", &Value::Object(data))
     } else {
         print_message(
@@ -273,6 +277,9 @@ async fn cmd_workflow_create(context: &Context, args: WorkflowCreateArgs) -> Res
         }
         if let Some(cleanup_warning) = cleanup_warning {
             print_message(context, &cleanup_warning);
+        }
+        if let Some(note) = stripped_settings_note(&stripped_settings, false) {
+            print_message(context, &note);
         }
         print_workflow_webhooks(&webhooks);
         print_sensitive_warning_summary(&stored.workflow_path, warning_count);

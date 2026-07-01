@@ -17,8 +17,8 @@ use crate::{
 use owo_colors::OwoColorize;
 
 use super::common::{
-    Context, absolutize, client_for_instance, emit_json, load_loaded_repo, print_message, truncate,
-    use_color,
+    Context, client_for_instance, emit_json, load_loaded_repo, print_message,
+    resolve_tracked_workflow_file, truncate, use_color,
 };
 
 // ---------------------------------------------------------------------------
@@ -215,24 +215,7 @@ pub(crate) async fn cmd_status(context: &Context, args: StatusArgs) -> Result<()
 
 pub(crate) async fn cmd_diff(context: &Context, args: DiffArgs) -> Result<(), AppError> {
     let repo = load_loaded_repo(context)?;
-    let file = absolutize(&repo.root, &args.file);
-    let is_workflow_file = file
-        .file_name()
-        .and_then(|value| value.to_str())
-        .map(|name| name.ends_with(".workflow.json"))
-        .unwrap_or(false);
-    if !is_workflow_file {
-        return Err(AppError::usage(
-            "diff",
-            "Diff expects a `.workflow.json` file path.",
-        ));
-    }
-    if !file.exists() {
-        return Err(AppError::not_found(
-            "diff",
-            format!("File not found: {}", file.display()),
-        ));
-    }
+    let file = resolve_tracked_workflow_file(&repo, "diff", &args.file)?;
     let diff = if args.refresh {
         let local = build_local_diff(&repo, &file)?;
         if !is_refreshable_remote_status(&local.status) {

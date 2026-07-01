@@ -276,6 +276,47 @@ pub fn find_existing_workflow_path(repo: &LoadedRepo, workflow_id: &str) -> Opti
         })
 }
 
+/// Find tracked workflow files whose slug (the `<slug>` in
+/// `<slug>--<id>.workflow.json`) equals `slug`. Returns every match so callers
+/// can detect and report ambiguity.
+///
+/// Only files that carry a metadata sidecar count as tracked, so an untracked
+/// draft that happens to share a slug does not shadow a real workflow.
+pub fn find_tracked_workflows_by_slug(repo: &LoadedRepo, slug: &str) -> Vec<PathBuf> {
+    let prefix = format!("{slug}--");
+    find_tracked_workflows(repo, |name| {
+        name.starts_with(&prefix) && name.ends_with(".workflow.json")
+    })
+}
+
+/// Find tracked workflow files whose id (the `<id>` in
+/// `<slug>--<id>.workflow.json`) equals `workflow_id`. Returns every match so
+/// callers can detect ambiguity and are not dependent on directory-walk order.
+///
+/// Only files that carry a metadata sidecar count as tracked, so an untracked
+/// copy sharing the id does not shadow the real workflow.
+pub fn find_tracked_workflows_by_id(repo: &LoadedRepo, workflow_id: &str) -> Vec<PathBuf> {
+    let suffix = format!("--{workflow_id}.workflow.json");
+    find_tracked_workflows(repo, |name| name.ends_with(&suffix))
+}
+
+fn find_tracked_workflows(repo: &LoadedRepo, matches: impl Fn(&str) -> bool) -> Vec<PathBuf> {
+    let workflow_dir = workflow_dir(&repo.root, &repo.config);
+    WalkDir::new(workflow_dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            if matches(name) && sidecar_path_for(path).is_file() {
+                Some(path.to_path_buf())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 pub fn store_workflow(
     repo: &LoadedRepo,
     instance: &str,

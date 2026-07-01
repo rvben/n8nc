@@ -374,7 +374,8 @@ pub struct PullArgs {
 pub struct PushArgs {
     #[command(flatten)]
     pub remote: RemoteArgs,
-    /// Workflow file to push (required unless --all is set)
+    /// Workflow file, id, or slug to push (required unless --all is set)
+    #[arg(value_name = "FILE_OR_ID")]
     pub file: Option<PathBuf>,
     /// Push all modified tracked workflows
     #[arg(long)]
@@ -690,7 +691,8 @@ pub struct StatusArgs {
 
 #[derive(Debug, Args)]
 pub struct DiffArgs {
-    #[arg(value_name = "PATH")]
+    /// Workflow file, id, or slug to diff
+    #[arg(value_name = "FILE_OR_ID")]
     pub file: PathBuf,
     /// Compare the local workflow against the current remote workflow
     #[arg(long)]

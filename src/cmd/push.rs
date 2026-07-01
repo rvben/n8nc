@@ -16,8 +16,9 @@ use crate::{
 };
 
 use super::common::{
-    Context, absolutize, emit_json, fetch_workflow_required, is_zero, load_loaded_repo,
-    print_message, print_sensitive_warning_summary, remote_client, unsupported_push_fields,
+    Context, changed_incompatible_settings, emit_json, fetch_workflow_required, is_zero,
+    load_loaded_repo, print_message, print_sensitive_warning_summary, remote_client,
+    resolve_tracked_workflow_file, stripped_settings_note, unsupported_push_fields,
     workflow_update_payload,
 };
 
@@ -32,6 +33,8 @@ struct BatchPushResult {
     meta_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "is_zero")]
     warning_count: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    stripped_settings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostics: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -40,7 +43,7 @@ struct BatchPushResult {
 
 #[derive(Debug)]
 enum PushOneResult {
-    Pushed(Box<StoredWorkflow>),
+    Pushed(Box<StoredWorkflow>, Vec<String>),
     Unchanged,
 }
 
@@ -48,12 +51,15 @@ pub(crate) async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), Ap
     if args.all {
         return cmd_push_all(context, args).await;
     }
-    let file = args
-        .file
-        .ok_or_else(|| AppError::usage("push", "Provide a workflow file or use --all."))?;
+    let file = args.file.ok_or_else(|| {
+        AppError::usage(
+            "push",
+            "Provide a workflow file, id, or slug, or use --all.",
+        )
+    })?;
 
     let repo = load_loaded_repo(context)?;
-    let workflow_path = absolutize(&repo.root, &file);
+    let workflow_path = resolve_tracked_workflow_file(&repo, "push", &file)?;
     let meta_path = sidecar_path_for(&workflow_path);
     let workflow = load_workflow_file(&workflow_path, "push")?;
     let canonical = canonicalize_workflow(&workflow)?;
@@ -139,7 +145,19 @@ pub(crate) async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), Ap
         ));
     }
 
-    let payload = workflow_update_payload(&workflow)?;
+    let changed_incompatible = changed_incompatible_settings(&canonical, &remote_canonical);
+    if !changed_incompatible.is_empty() {
+        return Err(AppError::validation(
+            "push",
+            format!(
+                "The n8n public API cannot change these editor-only setting(s): {}.",
+                changed_incompatible.join(", ")
+            ),
+        )
+        .with_suggestion("Change them in the n8n editor, or revert them locally before pushing."));
+    }
+
+    let (payload, stripped_settings) = workflow_update_payload(&workflow)?;
     client.update_workflow(&meta.workflow_id, &payload).await?;
     let updated = fetch_workflow_required(
         &client,
@@ -162,6 +180,9 @@ pub(crate) async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), Ap
         if warning_count > 0 {
             data.insert("diagnostics".to_string(), json!(warnings));
         }
+        if !stripped_settings.is_empty() {
+            data.insert("stripped_settings".to_string(), json!(stripped_settings));
+        }
         emit_json("push", &Value::Object(data))
     } else {
         print_message(context, &format!("Pushed {}.", meta.workflow_id));
@@ -169,8 +190,17 @@ pub(crate) async fn cmd_push(context: &Context, args: PushArgs) -> Result<(), Ap
             context,
             &format!("Updated local file: {}", stored.workflow_path.display()),
         );
+        print_stripped_settings_note(context, &stripped_settings);
         print_sensitive_warning_summary(&stored.workflow_path, warning_count);
         Ok(())
+    }
+}
+
+/// Report settings keys omitted from a push because the n8n public API rejects
+/// them. The server keeps its stored values, so this is informational only.
+fn print_stripped_settings_note(context: &Context, stripped_settings: &[String]) {
+    if let Some(note) = stripped_settings_note(stripped_settings, true) {
+        print_message(context, &note);
     }
 }
 
@@ -206,6 +236,7 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
                     workflow_path: Some(entry.file.clone()),
                     meta_path: entry.sidecar.clone(),
                     warning_count: 0,
+                    stripped_settings: Vec::new(),
                     diagnostics: None,
                     error: None,
                 });
@@ -230,6 +261,7 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
                     workflow_path: Some(entry.file.clone()),
                     meta_path: None,
                     warning_count: 0,
+                    stripped_settings: Vec::new(),
                     diagnostics: None,
                     error: Some(format!("Workflow is {reason}")),
                 });
@@ -249,6 +281,7 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
                     workflow_path: Some(entry.file.clone()),
                     meta_path: None,
                     warning_count: 0,
+                    stripped_settings: Vec::new(),
                     diagnostics: None,
                     error: Some("Missing sidecar metadata".to_string()),
                 });
@@ -265,7 +298,7 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
         )
         .await
         {
-            Ok(PushOneResult::Pushed(stored)) => {
+            Ok(PushOneResult::Pushed(stored, stripped_settings)) => {
                 let warnings =
                     sensitive_data_diagnostics(&stored.workflow_path).unwrap_or_default();
                 let wc = warnings.len();
@@ -275,6 +308,7 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
                     context,
                     &format!("Pushed {} -> {}", wf_id, stored.workflow_path.display()),
                 );
+                print_stripped_settings_note(context, &stripped_settings);
                 print_sensitive_warning_summary(&stored.workflow_path, wc);
 
                 results.push(BatchPushResult {
@@ -284,6 +318,7 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
                     workflow_path: Some(stored.workflow_path),
                     meta_path: Some(stored.meta_path),
                     warning_count: wc,
+                    stripped_settings,
                     diagnostics: if wc > 0 { Some(json!(warnings)) } else { None },
                     error: None,
                 });
@@ -301,6 +336,7 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
                     workflow_path: Some(entry.file.clone()),
                     meta_path: entry.sidecar.clone(),
                     warning_count: 0,
+                    stripped_settings: Vec::new(),
                     diagnostics: None,
                     error: None,
                 });
@@ -315,6 +351,7 @@ async fn cmd_push_all(context: &Context, args: PushArgs) -> Result<(), AppError>
                     workflow_path: Some(entry.file.clone()),
                     meta_path: entry.sidecar.clone(),
                     warning_count: 0,
+                    stripped_settings: Vec::new(),
                     diagnostics: None,
                     error: Some(err.message),
                 });
@@ -437,7 +474,19 @@ async fn push_one_workflow(
         ));
     }
 
-    let payload = workflow_update_payload(&workflow)?;
+    let changed_incompatible = changed_incompatible_settings(&canonical, &remote_canonical);
+    if !changed_incompatible.is_empty() {
+        return Err(AppError::validation(
+            "push",
+            format!(
+                "The n8n public API cannot change these editor-only setting(s): {}.",
+                changed_incompatible.join(", ")
+            ),
+        )
+        .with_suggestion("Change them in the n8n editor, or revert them locally before pushing."));
+    }
+
+    let (payload, stripped_settings) = workflow_update_payload(&workflow)?;
     client.update_workflow(&meta.workflow_id, &payload).await?;
     let updated = fetch_workflow_required(
         &client,
@@ -447,5 +496,5 @@ async fn push_one_workflow(
     )
     .await?;
     let stored = store_workflow(repo, &alias, &updated)?;
-    Ok(PushOneResult::Pushed(Box::new(stored)))
+    Ok(PushOneResult::Pushed(Box::new(stored), stripped_settings))
 }
