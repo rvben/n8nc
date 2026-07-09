@@ -77,7 +77,7 @@ async fn cmd_auth_test(context: &Context, args: AuthAliasArgs) -> Result<(), App
     let (client, token_source, base_url) = remote_client(&repo, Some(&alias), "auth")?;
     let workflows = client
         .list_workflows(&ListOptions {
-            limit: 1,
+            max_results: Some(1),
             active: None,
             name_filter: None,
         })
@@ -88,7 +88,7 @@ async fn cmd_auth_test(context: &Context, args: AuthAliasArgs) -> Result<(), App
         "base_url": base_url,
         "token_source": token_source,
         "reachable": true,
-        "sample_count": workflows.len(),
+        "sample_count": workflows.items.len(),
     });
     if context.json {
         emit_json("auth", &data)

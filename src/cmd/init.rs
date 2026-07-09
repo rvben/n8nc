@@ -183,7 +183,7 @@ async fn validate_credentials(base_url: &str, token: &str) -> Result<(), AppErro
     let client = ApiClient::new("init", &instance, token.to_string())?;
     let result = client
         .list_workflows(&ListOptions {
-            limit: 1,
+            max_results: Some(1),
             active: None,
             name_filter: None,
         })
@@ -195,7 +195,7 @@ async fn validate_credentials(base_url: &str, token: &str) -> Result<(), AppErro
                 eprintln!(
                     " {} Connected ({} workflow(s) accessible)",
                     sym_ok(),
-                    workflows.len()
+                    workflows.items.len()
                 );
             }
             Ok(())

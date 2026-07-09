@@ -23,19 +23,48 @@ pub struct TriggerResponse {
     pub body: Value,
 }
 
+/// Largest page the n8n public API accepts. Asking for more is a 400, on both
+/// `/workflows` and `/executions`. This is the page size, never the number of
+/// results a caller may ask for: more than one page is fetched via `nextCursor`.
+pub const MAX_PAGE_SIZE: u16 = 250;
+
 #[derive(Debug, Clone)]
 pub struct ListOptions {
-    pub limit: u16,
+    /// How many results the caller wants. `None` means every match.
+    pub max_results: Option<usize>,
     pub active: Option<bool>,
     pub name_filter: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExecutionListOptions {
-    pub limit: u16,
+    /// How many results the caller wants. `None` means every match.
+    pub max_results: Option<usize>,
     pub workflow_id: Option<String>,
     pub status: Option<String>,
     pub since: Option<DateTime<Utc>>,
+}
+
+/// A completed list fetch. `truncated` is true only when `max_results` stopped
+/// the walk while the API still had more rows, so a short list is never
+/// mistaken for a complete one.
+#[derive(Debug, Clone)]
+pub struct ListPage {
+    pub items: Vec<Value>,
+    pub truncated: bool,
+}
+
+/// Page size for every request in a walk: never above the API cap, and never
+/// larger than the caller could possibly need. Held constant across pages
+/// rather than shrinking to what remains, because server-side filters can drop
+/// rows and a shrinking page would degrade into one round trip per row.
+fn page_size(max_results: Option<usize>) -> u16 {
+    match max_results {
+        Some(max) => u16::try_from(max)
+            .unwrap_or(MAX_PAGE_SIZE)
+            .clamp(1, MAX_PAGE_SIZE),
+        None => MAX_PAGE_SIZE,
+    }
 }
 
 impl ApiClient {
@@ -78,17 +107,26 @@ impl ApiClient {
         })
     }
 
-    pub async fn list_workflows(&self, options: &ListOptions) -> Result<Vec<Value>, AppError> {
-        let mut query = vec![("limit".to_string(), options.limit.to_string())];
-        if let Some(active) = options.active {
-            query.push(("active".to_string(), active.to_string()));
+    pub async fn list_workflows(&self, options: &ListOptions) -> Result<ListPage, AppError> {
+        if options.max_results == Some(0) {
+            return Ok(ListPage {
+                items: Vec::new(),
+                truncated: false,
+            });
         }
 
         let mut next_cursor: Option<String> = None;
         let mut results = Vec::new();
+        let mut truncated = false;
 
         loop {
-            let mut page_query = query.clone();
+            let mut page_query = vec![(
+                "limit".to_string(),
+                page_size(options.max_results).to_string(),
+            )];
+            if let Some(active) = options.active {
+                page_query.push(("active".to_string(), active.to_string()));
+            }
             if let Some(cursor) = &next_cursor {
                 page_query.push(("cursor".to_string(), cursor.clone()));
             }
@@ -110,43 +148,54 @@ impl ApiClient {
                     )
                 })?;
 
-            if append_matching_workflows(&mut results, &page_data, options) {
-                break;
-            }
-
             next_cursor = page
                 .get("nextCursor")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
+
+            if let Some(more_in_page) = append_matching_workflows(&mut results, &page_data, options)
+            {
+                truncated = more_in_page || next_cursor.is_some();
+                break;
+            }
+
             if next_cursor.is_none() {
                 break;
             }
         }
 
-        Ok(results)
+        Ok(ListPage {
+            items: results,
+            truncated,
+        })
     }
 
     pub async fn list_executions(
         &self,
         options: &ExecutionListOptions,
-    ) -> Result<Vec<Value>, AppError> {
-        if options.limit == 0 {
-            return Ok(Vec::new());
-        }
-
-        let mut query = vec![("limit".to_string(), options.limit.to_string())];
-        if let Some(workflow_id) = &options.workflow_id {
-            query.push(("workflowId".to_string(), workflow_id.clone()));
-        }
-        if let Some(status) = &options.status {
-            query.push(("status".to_string(), status.clone()));
+    ) -> Result<ListPage, AppError> {
+        if options.max_results == Some(0) {
+            return Ok(ListPage {
+                items: Vec::new(),
+                truncated: false,
+            });
         }
 
         let mut next_cursor: Option<String> = None;
         let mut results = Vec::new();
+        let mut truncated = false;
 
         loop {
-            let mut page_query = query.clone();
+            let mut page_query = vec![(
+                "limit".to_string(),
+                page_size(options.max_results).to_string(),
+            )];
+            if let Some(workflow_id) = &options.workflow_id {
+                page_query.push(("workflowId".to_string(), workflow_id.clone()));
+            }
+            if let Some(status) = &options.status {
+                page_query.push(("status".to_string(), status.clone()));
+            }
             if let Some(cursor) = &next_cursor {
                 page_query.push(("cursor".to_string(), cursor.clone()));
             }
@@ -172,23 +221,31 @@ impl ApiClient {
                 .as_ref()
                 .is_some_and(|since| page_crosses_since_cutoff(&page_data, since));
 
-            if append_matching_executions(&mut results, &page_data, options) {
-                break;
-            }
-            if page_crossed_since_cutoff {
-                break;
-            }
-
             next_cursor = page
                 .get("nextCursor")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned);
+
+            if let Some(more_in_page) =
+                append_matching_executions(&mut results, &page_data, options)
+            {
+                truncated = more_in_page || next_cursor.is_some();
+                break;
+            }
+            // Everything older than the cutoff is on later pages: nothing is lost.
+            if page_crossed_since_cutoff {
+                break;
+            }
+
             if next_cursor.is_none() {
                 break;
             }
         }
 
-        Ok(results)
+        Ok(ListPage {
+            items: results,
+            truncated,
+        })
     }
 
     pub async fn get_workflow_by_id(&self, workflow_id: &str) -> Result<Option<Value>, AppError> {
@@ -221,13 +278,14 @@ impl ApiClient {
 
         let candidates = self
             .list_workflows(&ListOptions {
-                limit: 250,
+                max_results: None,
                 active: None,
                 name_filter: Some(identifier.to_string()),
             })
             .await?;
 
         let exact: Vec<Value> = candidates
+            .items
             .into_iter()
             .filter(|workflow| workflow.get("name").and_then(Value::as_str) == Some(identifier))
             .collect();
@@ -830,31 +888,48 @@ fn trigger_error_suggestion(status: StatusCode, path: &str) -> Option<&'static s
     None
 }
 
+/// Mirrors [`append_matching_executions`]: `None` when the page was consumed,
+/// `Some(more_in_page)` when `max_results` cut the walk short.
 fn append_matching_workflows(
     results: &mut Vec<Value>,
     page_data: &[Value],
     options: &ListOptions,
-) -> bool {
-    let limit = usize::from(options.limit);
-    for workflow in page_data {
-        if let Some(filter) = &options.name_filter {
-            let name = workflow
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if !name
-                .to_ascii_lowercase()
-                .contains(&filter.to_ascii_lowercase())
-            {
+) -> Option<bool> {
+    let Some(limit) = options.max_results else {
+        for workflow in page_data {
+            if !workflow_matches_name_filter(workflow, options.name_filter.as_deref()) {
                 continue;
             }
+            results.push(workflow.clone());
+        }
+        return None;
+    };
+
+    for (index, workflow) in page_data.iter().enumerate() {
+        if !workflow_matches_name_filter(workflow, options.name_filter.as_deref()) {
+            continue;
         }
         results.push(workflow.clone());
         if results.len() >= limit {
-            return true;
+            let more_in_page = page_data[index + 1..]
+                .iter()
+                .any(|rest| workflow_matches_name_filter(rest, options.name_filter.as_deref()));
+            return Some(more_in_page);
         }
     }
-    false
+    None
+}
+
+fn workflow_matches_name_filter(workflow: &Value, filter: Option<&str>) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    workflow
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .contains(&filter.to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -868,22 +943,37 @@ fn append_capped_values(results: &mut Vec<Value>, page_data: &[Value], limit: us
     false
 }
 
+/// Appends every matching row. Returns `None` when the page was consumed, or
+/// `Some(more_in_page)` when `max_results` was reached, where `more_in_page`
+/// reports whether further matches were left behind on that same page.
 fn append_matching_executions(
     results: &mut Vec<Value>,
     page_data: &[Value],
     options: &ExecutionListOptions,
-) -> bool {
-    let limit = usize::from(options.limit);
-    for execution in page_data {
+) -> Option<bool> {
+    let Some(limit) = options.max_results else {
+        for execution in page_data {
+            if !execution_matches_time_filter(execution, options.since.as_ref()) {
+                continue;
+            }
+            results.push(execution.clone());
+        }
+        return None;
+    };
+
+    for (index, execution) in page_data.iter().enumerate() {
         if !execution_matches_time_filter(execution, options.since.as_ref()) {
             continue;
         }
         results.push(execution.clone());
         if results.len() >= limit {
-            return true;
+            let more_in_page = page_data[index + 1..]
+                .iter()
+                .any(|rest| execution_matches_time_filter(rest, options.since.as_ref()));
+            return Some(more_in_page);
         }
     }
-    false
+    None
 }
 
 fn execution_matches_time_filter(execution: &Value, since: Option<&DateTime<Utc>>) -> bool {
@@ -958,12 +1048,13 @@ mod tests {
             &mut limited,
             &page,
             &ListOptions {
-                limit: 2,
+                max_results: Some(2),
                 active: None,
                 name_filter: None,
             },
         );
-        assert!(reached_limit);
+        // Filled at "b", and "c" was still waiting on the same page.
+        assert_eq!(reached_limit, Some(true));
         assert_eq!(limited.len(), 2);
         assert_eq!(limited[0]["id"], "a");
         assert_eq!(limited[1]["id"], "b");
@@ -973,15 +1064,46 @@ mod tests {
             &mut filtered,
             &page,
             &ListOptions {
-                limit: 5,
+                max_results: Some(5),
                 active: None,
                 name_filter: Some("alpha".to_string()),
             },
         );
-        assert!(!reached_limit);
+        assert_eq!(reached_limit, None);
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0]["id"], "a");
         assert_eq!(filtered[1]["id"], "c");
+    }
+
+    #[test]
+    fn append_matching_workflows_without_max_results_takes_everything() {
+        let page = vec![json!({"id":"a"}), json!({"id":"b"}), json!({"id":"c"})];
+        let mut all = Vec::new();
+
+        let reached_limit = append_matching_workflows(
+            &mut all,
+            &page,
+            &ListOptions {
+                max_results: None,
+                active: None,
+                name_filter: None,
+            },
+        );
+
+        assert_eq!(reached_limit, None);
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn page_size_never_exceeds_the_api_cap() {
+        // The API rejects any page above 250, whatever the caller asked for.
+        assert_eq!(super::page_size(None), super::MAX_PAGE_SIZE);
+        assert_eq!(super::page_size(Some(10_000)), super::MAX_PAGE_SIZE);
+        assert_eq!(super::page_size(Some(600)), super::MAX_PAGE_SIZE);
+        assert_eq!(super::page_size(Some(251)), super::MAX_PAGE_SIZE);
+        assert_eq!(super::page_size(Some(20)), 20);
+        // Never zero: a zero page size would be rejected too.
+        assert_eq!(super::page_size(Some(1)), 1);
     }
 
     #[test]
@@ -1014,14 +1136,16 @@ mod tests {
             &mut executions,
             &page,
             &ExecutionListOptions {
-                limit: 2,
+                max_results: Some(2),
                 workflow_id: None,
                 status: None,
                 since: Some(since),
             },
         );
 
-        assert!(reached_limit);
+        // Filled at "b"; "c" is older than the cutoff and "d" has no timestamp,
+        // so nothing matching was left behind on this page.
+        assert_eq!(reached_limit, Some(false));
         assert_eq!(executions.len(), 2);
         assert_eq!(executions[0]["id"], "a");
         assert_eq!(executions[1]["id"], "b");
@@ -1090,13 +1214,14 @@ mod tests {
 
         let executions = client
             .list_executions(&ExecutionListOptions {
-                limit: 3,
+                max_results: Some(3),
                 workflow_id: None,
                 status: Some("success".to_string()),
                 since: None,
             })
             .await
-            .expect("list executions");
+            .expect("list executions")
+            .items;
 
         assert_eq!(executions.len(), 3);
         assert_eq!(executions[0]["id"], "1");
@@ -1143,13 +1268,14 @@ mod tests {
 
         let executions = client
             .list_executions(&ExecutionListOptions {
-                limit: 3,
+                max_results: Some(3),
                 workflow_id: None,
                 status: None,
                 since: Some(since),
             })
             .await
-            .expect("list executions");
+            .expect("list executions")
+            .items;
 
         assert_eq!(executions.len(), 3);
         assert_eq!(executions[0]["id"], "1");
@@ -1182,13 +1308,14 @@ mod tests {
 
         let executions = client
             .list_executions(&ExecutionListOptions {
-                limit: 3,
+                max_results: Some(3),
                 workflow_id: None,
                 status: None,
                 since: Some(since),
             })
             .await
-            .expect("list executions");
+            .expect("list executions")
+            .items;
 
         assert_eq!(executions.len(), 1);
         assert_eq!(executions[0]["id"], "1");

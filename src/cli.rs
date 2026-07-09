@@ -76,7 +76,7 @@ pub enum Command {
     Pull(PullArgs),
     /// Push a tracked workflow back to n8n
     Push(PushArgs),
-    /// Create a new local workflow file
+    /// Manage workflows: new, create, execute, show, rm
     Workflow(WorkflowArgs),
     /// Add or edit nodes in a local workflow file
     Node(NodeArgs),

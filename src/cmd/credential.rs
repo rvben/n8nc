@@ -399,13 +399,13 @@ async fn load_workflows_for_credential_usage(
 
     let listed = client
         .list_workflows(&crate::api::ListOptions {
-            limit: 250,
+            max_results: None,
             active: None,
             name_filter: None,
         })
         .await?;
     let mut workflows = Vec::new();
-    for item in listed {
+    for item in listed.items {
         let Some(wf_id) = item.get("id").and_then(Value::as_str) else {
             continue;
         };

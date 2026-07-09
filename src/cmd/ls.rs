@@ -22,9 +22,14 @@ struct WorkflowListRow {
 pub(crate) async fn cmd_ls(context: &Context, args: ListArgs) -> Result<(), AppError> {
     let repo = load_loaded_repo(context)?;
     let (client, _, _) = remote_client(&repo, args.remote.instance.as_deref(), "ls")?;
-    let workflows = client
+    let offset = args.offset as usize;
+    // The offset is applied in-band, so the fetch must cover it as well as the
+    // page itself. Fetching only `limit` rows made every page after the first
+    // come back empty.
+    let wanted = offset.saturating_add(args.limit as usize);
+    let page = client
         .list_workflows(&ListOptions {
-            limit: args.limit.min(250),
+            max_results: Some(wanted),
             active: if args.active {
                 Some(true)
             } else if args.inactive {
@@ -36,8 +41,11 @@ pub(crate) async fn cmd_ls(context: &Context, args: ListArgs) -> Result<(), AppE
         })
         .await?;
 
+    // The API stopped us short of every match; the in-band slice below can hide
+    // rows too. Either way the caller must be told.
+    let more_beyond_limit = page.truncated;
+    let workflows = page.items;
     let total = workflows.len();
-    let offset = args.offset as usize;
 
     // Apply offset in-band (the API returns from the start; we slice here).
     let paginated: Vec<WorkflowListRow> = workflows
@@ -91,7 +99,7 @@ pub(crate) async fn cmd_ls(context: &Context, args: ListArgs) -> Result<(), AppE
                 "total": total,
                 "limit": args.limit,
                 "offset": offset,
-                "truncated": (offset + paginated.len()) < total,
+                "truncated": more_beyond_limit || (offset + paginated.len()) < total,
             }),
         )
     } else {

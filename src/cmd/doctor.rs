@@ -390,7 +390,7 @@ async fn build_doctor_report(
 
         let api_reachable = match client
             .list_workflows(&ListOptions {
-                limit: 1,
+                max_results: Some(1),
                 active: None,
                 name_filter: None,
             })
@@ -403,7 +403,7 @@ async fn build_doctor_report(
                     "instance",
                     Some(alias.clone()),
                     "api",
-                    format!("API reachable (sample_count={}).", workflows.len()),
+                    format!("API reachable (sample_count={}).", workflows.items.len()),
                     None,
                 );
                 true

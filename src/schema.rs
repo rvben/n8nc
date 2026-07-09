@@ -116,6 +116,7 @@ fn output_fields_for(path: &str) -> Vec<Value> {
             json!({"name": "mode", "type": "string | null"}),
             json!({"name": "started_at", "type": "string | null"}),
             json!({"name": "stopped_at", "type": "string | null"}),
+            json!({"name": "wait_till", "type": "string | null"}),
             json!({"name": "duration_ms", "type": "integer | null"}),
         ],
         "runs get" => vec![
@@ -125,13 +126,18 @@ fn output_fields_for(path: &str) -> Vec<Value> {
             json!({"name": "started_at", "type": "string | null"}),
             json!({"name": "stopped_at", "type": "string | null"}),
             json!({"name": "duration_ms", "type": "integer | null"}),
+            json!({"name": "node_executions", "type": "array (--details only)"}),
+            json!({"name": "run_data", "type": "object (--details only)"}),
         ],
         "runs stats" => vec![
+            json!({"name": "period", "type": "string"}),
             json!({"name": "total", "type": "integer"}),
-            json!({"name": "success", "type": "integer"}),
-            json!({"name": "error", "type": "integer"}),
+            json!({"name": "succeeded", "type": "integer"}),
+            json!({"name": "failed", "type": "integer"}),
+            json!({"name": "running", "type": "integer"}),
+            json!({"name": "waiting", "type": "integer"}),
             json!({"name": "success_rate", "type": "number"}),
-            json!({"name": "avg_duration_ms", "type": "number | null"}),
+            json!({"name": "duration_ms", "type": "object | null"}),
         ],
         "auth list" => vec![
             json!({"name": "alias", "type": "string"}),
@@ -678,6 +684,41 @@ mod tests {
             "missing 'confirmation_required' error kind"
         );
         assert!(kinds.contains(&"conflict"), "missing 'conflict' error kind");
+    }
+
+    #[test]
+    fn schema_runs_stats_output_fields_match_the_emitted_struct() {
+        // StatsOutput is what `runs stats` actually serializes. The schema is the
+        // contract agents read, so a name that exists in one and not the other is
+        // a lie either way. `success`/`error`/`avg_duration_ms` were exactly that.
+        let emitted = [
+            "period",
+            "total",
+            "succeeded",
+            "failed",
+            "running",
+            "waiting",
+            "success_rate",
+            "duration_ms",
+        ];
+        let declared: Vec<String> = output_fields_for("runs stats")
+            .iter()
+            .filter_map(|field| field.get("name").and_then(Value::as_str))
+            .map(ToOwned::to_owned)
+            .collect();
+
+        for name in emitted {
+            assert!(
+                declared.iter().any(|d| d == name),
+                "schema omits `{name}`, which runs stats emits"
+            );
+        }
+        for name in &declared {
+            assert!(
+                emitted.contains(&name.as_str()),
+                "schema declares `{name}`, which runs stats never emits"
+            );
+        }
     }
 
     #[test]

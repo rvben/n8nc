@@ -5370,3 +5370,293 @@ async fn quiet_suppresses_stderr() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Pagination: page size is not the result count
+//
+// n8n caps `limit` (the page size) at 250 on both /executions and /workflows,
+// returning 400 above it. These mocks enforce that cap, so any regression that
+// sends an illegal page size fails here instead of at a user's terminal.
+// ---------------------------------------------------------------------------
+
+const API_PAGE_CAP: usize = 250;
+
+#[derive(Debug)]
+struct PaginatedList {
+    total: usize,
+    executions: bool,
+}
+
+impl Respond for PaginatedList {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let mut limit = 100usize;
+        let mut offset = 0usize;
+        for (key, value) in request.url.query_pairs() {
+            match key.as_ref() {
+                "limit" => limit = value.parse().unwrap_or(0),
+                "cursor" => offset = value.parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+
+        if limit > API_PAGE_CAP {
+            return ResponseTemplate::new(400).set_body_json(json!({
+                "message": "request/query/limit must be <= 250"
+            }));
+        }
+
+        let end = (offset + limit).min(self.total);
+        let items: Vec<Value> = (offset..end)
+            .map(|index| {
+                if self.executions {
+                    json!({
+                        "id": index.to_string(),
+                        "workflowId": "wf-1",
+                        "status": if index % 5 == 0 { "error" } else { "success" },
+                        "mode": "trigger",
+                        "startedAt": "2026-07-09T12:00:00.000Z",
+                        "stoppedAt": "2026-07-09T12:00:01.000Z"
+                    })
+                } else {
+                    json!({
+                        "id": format!("wf-{index}"),
+                        "name": format!("Workflow {index}"),
+                        "active": true
+                    })
+                }
+            })
+            .collect();
+
+        let mut body = json!({ "data": items });
+        if end < self.total {
+            body["nextCursor"] = json!(end.to_string());
+        }
+        ResponseTemplate::new(200).set_body_json(body)
+    }
+}
+
+async fn mount_execution_pages(server: &MockServer, total: usize) {
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .respond_with(PaginatedList {
+            total,
+            executions: true,
+        })
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workflow_fixture("wf-1", "Alpha", true)),
+        )
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn runs_ls_paginates_past_the_api_page_cap() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_execution_pages(&server, 600).await;
+
+    let output = base_command(repo.path())
+        .args(["runs", "ls", "--instance", "mock", "--limit", "600"])
+        .output()
+        .expect("run runs ls");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(
+        envelope["data"]["items"].as_array().expect("items").len(),
+        600,
+        "must follow nextCursor past one 250-row page"
+    );
+    assert_eq!(envelope["data"]["truncated"], false);
+}
+
+#[tokio::test]
+async fn runs_ls_reports_truncation_when_more_results_exist() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_execution_pages(&server, 600).await;
+
+    let output = base_command(repo.path())
+        .args(["runs", "ls", "--instance", "mock", "--limit", "100"])
+        .output()
+        .expect("run runs ls");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(
+        envelope["data"]["items"].as_array().expect("items").len(),
+        100
+    );
+    assert_eq!(
+        envelope["data"]["truncated"], true,
+        "stopping at --limit while more rows exist must be reported, never silent"
+    );
+}
+
+#[tokio::test]
+async fn runs_stats_aggregates_every_execution_in_window() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_execution_pages(&server, 600).await;
+
+    let output = base_command(repo.path())
+        .args(["runs", "stats", "--instance", "mock", "--last", "7d"])
+        .output()
+        .expect("run runs stats");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["ok"], true);
+    assert_eq!(envelope["data"]["total"], 600);
+    // ids 0,5,10,... are errors -> 120 of 600
+    assert_eq!(envelope["data"]["failed"], 120);
+    assert_eq!(envelope["data"]["succeeded"], 480);
+}
+
+#[tokio::test]
+async fn ls_paginates_past_the_api_page_cap() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .respond_with(PaginatedList {
+            total: 300,
+            executions: false,
+        })
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args(["ls", "--instance", "mock", "--limit", "300"])
+        .output()
+        .expect("run ls");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(
+        envelope["data"]["items"].as_array().expect("items").len(),
+        300
+    );
+    assert_eq!(envelope["data"]["truncated"], false);
+}
+
+// ---------------------------------------------------------------------------
+// --offset must actually reach the next page. The CLI prints "Use --offset and
+// --limit to paginate", and page 2 used to come back empty with ok:true because
+// only `limit` rows were ever fetched before `offset` sliced them away.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn runs_ls_offset_reaches_the_second_page() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_execution_pages(&server, 30).await;
+
+    let output = base_command(repo.path())
+        .args([
+            "runs",
+            "ls",
+            "--instance",
+            "mock",
+            "--limit",
+            "10",
+            "--offset",
+            "10",
+        ])
+        .output()
+        .expect("run runs ls");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    let items = envelope["data"]["items"].as_array().expect("items");
+    assert_eq!(items.len(), 10, "second page must not be empty");
+    assert_eq!(items[0]["id"], "10", "second page starts after the first");
+    assert_eq!(envelope["data"]["truncated"], true, "30 exist, 20 seen");
+}
+
+#[tokio::test]
+async fn runs_ls_offset_past_the_end_is_empty_but_honest() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_execution_pages(&server, 5).await;
+
+    let output = base_command(repo.path())
+        .args([
+            "runs",
+            "ls",
+            "--instance",
+            "mock",
+            "--limit",
+            "10",
+            "--offset",
+            "10",
+        ])
+        .output()
+        .expect("run runs ls");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(
+        envelope["data"]["items"].as_array().expect("items").len(),
+        0
+    );
+    assert_eq!(envelope["data"]["truncated"], false, "nothing was withheld");
+}
+
+#[tokio::test]
+async fn ls_offset_reaches_the_second_page() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .respond_with(PaginatedList {
+            total: 12,
+            executions: false,
+        })
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args(["ls", "--instance", "mock", "--limit", "5", "--offset", "5"])
+        .output()
+        .expect("run ls");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    let items = envelope["data"]["items"].as_array().expect("items");
+    assert_eq!(items.len(), 5, "second page must not be empty");
+    assert_eq!(items[0]["id"], "wf-5");
+    assert_eq!(envelope["data"]["truncated"], true);
+}

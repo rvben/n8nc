@@ -113,11 +113,12 @@ async fn cmd_pull_all(context: &Context, args: PullArgs) -> Result<(), AppError>
 
     let workflows = client
         .list_workflows(&ListOptions {
-            limit: 250,
+            max_results: None,
             active: active_filter,
             name_filter: None,
         })
-        .await?;
+        .await?
+        .items;
 
     let mut results: Vec<BatchPullResult> = Vec::new();
     let mut pulled_count: usize = 0;

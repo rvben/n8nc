@@ -85,18 +85,22 @@ async fn cmd_runs_ls(context: &Context, args: RunsListArgs) -> Result<(), AppErr
     let workflow_id = resolve_execution_workflow_id(&client, args.workflow.as_deref()).await?;
     let time_filter = parse_runs_time_filter("runs", &args.time)?;
     let since = time_filter.effective_since();
-    let rows = fetch_execution_rows(
+    let offset = args.offset as usize;
+    let limit = args.limit as usize;
+    // The offset is applied in-band, so the fetch must cover it as well as the
+    // page itself. Fetching only `limit` rows made every page after the first
+    // come back empty, while still reporting success.
+    let wanted = offset.saturating_add(limit);
+    let (rows, more_beyond_limit) = fetch_execution_rows(
         &client,
         workflow_id.as_deref(),
         args.status.as_deref(),
         since,
-        args.limit,
+        wanted,
     )
     .await?;
     let note = execution_history_note(&client, workflow_id.as_deref(), &rows).await?;
 
-    let offset = args.offset as usize;
-    let limit = args.limit as usize;
     let total = rows.len();
 
     // Apply in-band offset/limit so callers can paginate the result set.
@@ -110,7 +114,7 @@ async fn cmd_runs_ls(context: &Context, args: RunsListArgs) -> Result<(), AppErr
         data.insert("offset".to_string(), json!(offset));
         data.insert(
             "truncated".to_string(),
-            json!((offset + page.len()) < total),
+            json!(more_beyond_limit || (offset + page.len()) < total),
         );
         if let Some(note) = note {
             data.insert("note".to_string(), json!(note));
@@ -138,6 +142,9 @@ async fn cmd_runs_ls(context: &Context, args: RunsListArgs) -> Result<(), AppErr
                 total
             );
         }
+        if more_beyond_limit {
+            eprintln!("More executions exist beyond --limit {limit}. Raise it to see them.");
+        }
         Ok(())
     }
 }
@@ -154,12 +161,12 @@ async fn cmd_runs_watch(context: &Context, args: RunsWatchArgs) -> Result<(), Ap
     loop {
         poll += 1;
         let since = time_filter.effective_since();
-        let rows = fetch_execution_rows(
+        let (rows, _) = fetch_execution_rows(
             &client,
             workflow_id.as_deref(),
             args.status.as_deref(),
             since,
-            args.limit,
+            args.limit as usize,
         )
         .await?;
         let new_rows = note_new_executions(&rows, &mut known_ids);
@@ -339,6 +346,8 @@ struct StatsOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     workflow_name: Option<String>,
     period: String,
+    /// Retained for the v1 contract. Always false: stats now walk every page in
+    /// the window, so the aggregate can no longer be computed from a sample.
     capped: bool,
     total: usize,
     succeeded: usize,
@@ -402,17 +411,17 @@ async fn cmd_runs_stats(context: &Context, args: RunsStatsArgs) -> Result<(), Ap
         (Some(since), "last 24h".to_string())
     };
 
-    // Fetch executions directly (not via fetch_execution_rows which clamps at 250)
+    // Every execution in the window: stats over a truncated sample would be a
+    // plausible-looking lie. Pagination keeps each request within the API cap.
     let executions = client
         .list_executions(&ExecutionListOptions {
-            limit: 1000,
+            max_results: None,
             workflow_id: workflow_id.clone(),
             status: None,
             since,
         })
-        .await?;
-
-    let capped = executions.len() == 1000;
+        .await?
+        .items;
 
     // Aggregate stats
     let mut succeeded = 0usize;
@@ -454,7 +463,7 @@ async fn cmd_runs_stats(context: &Context, args: RunsStatsArgs) -> Result<(), Ap
         workflow_id: workflow_id.clone(),
         workflow_name: wf_name.clone(),
         period: period_label.clone(),
-        capped,
+        capped: false,
         total,
         succeeded,
         failed,
@@ -474,9 +483,6 @@ async fn cmd_runs_stats(context: &Context, args: RunsStatsArgs) -> Result<(), Ap
             (None, None) => {}
         }
         println!("Period: {period_label}");
-        if capped {
-            print_message(context, "Note: results capped at 1000 executions");
-        }
         println!();
         println!("Total:      {total}");
         if total > 0 {
@@ -551,24 +557,28 @@ async fn resolve_execution_workflow_id(
     Ok(crate::repo::workflow_id(&workflow))
 }
 
+/// Fetches up to `max_results` executions, following `nextCursor` across pages.
+/// The bool reports whether the API still had rows when the cap stopped the walk.
 async fn fetch_execution_rows(
     client: &ApiClient,
     workflow_id: Option<&str>,
     status: Option<&str>,
     since: Option<DateTime<Utc>>,
-    limit: u16,
-) -> Result<Vec<ExecutionListRow>, AppError> {
-    let executions = client
+    max_results: usize,
+) -> Result<(Vec<ExecutionListRow>, bool), AppError> {
+    let page = client
         .list_executions(&ExecutionListOptions {
-            limit: limit.clamp(1, 250),
+            max_results: Some(max_results),
             workflow_id: workflow_id.map(ToOwned::to_owned),
             status: status.map(ToOwned::to_owned),
             since,
         })
         .await?;
+    let truncated = page.truncated;
+    let executions = page.items;
     let workflow_names = workflow_names_for_executions(client, &executions).await?;
 
-    Ok(executions
+    let rows = executions
         .into_iter()
         .map(|execution| {
             let wf_id = value_string(&execution, "workflowId");
@@ -586,7 +596,9 @@ async fn fetch_execution_rows(
                 duration_ms: execution_duration_ms(&execution),
             }
         })
-        .collect())
+        .collect();
+
+    Ok((rows, truncated))
 }
 
 async fn execution_history_note(
