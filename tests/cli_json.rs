@@ -5978,3 +5978,155 @@ async fn ls_offset_reaches_the_second_page() {
     assert_eq!(items[0]["id"], "wf-5");
     assert_eq!(envelope["data"]["truncated"], true);
 }
+
+// ---------------------------------------------------------------------------
+// Truncation must be precise, not merely conservative. A `nextCursor` proves the
+// source has more rows, not that more rows *match* the caller's filters.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn runs_ls_window_exhausted_is_not_truncated() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    // Two rows inside the window, one older, and a cursor pointing at more old
+    // rows. The two returned rows are the complete matching set.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "1", "workflowId": "wf-1", "status": "success", "startedAt": "2100-01-01T12:00:00.000Z"},
+                {"id": "2", "workflowId": "wf-1", "status": "success", "startedAt": "2100-01-01T11:59:00.000Z"},
+                {"id": "3", "workflowId": "wf-1", "status": "success", "startedAt": "1999-01-01T00:00:00.000Z"}
+            ],
+            "nextCursor": "more-old-rows"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workflow_fixture("wf-1", "Alpha", true)),
+        )
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "runs",
+            "ls",
+            "--instance",
+            "mock",
+            "--since",
+            "2000-01-01T00:00:00Z",
+            "--limit",
+            "2",
+        ])
+        .output()
+        .expect("run runs ls");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(
+        envelope["data"]["items"].as_array().expect("items").len(),
+        2
+    );
+    assert_eq!(
+        envelope["data"]["truncated"], false,
+        "the page already crossed the cutoff, so no further row can match"
+    );
+}
+
+#[tokio::test]
+async fn ls_name_filter_requests_full_pages() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    // A client-side name filter must not shrink the page to --limit, or the walk
+    // degrades into one request per candidate row.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(query_param("limit", "250"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "wf-a", "name": "Alpha", "active": true},
+                {"id": "wf-b", "name": "Unique", "active": true}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "ls",
+            "--instance",
+            "mock",
+            "--name",
+            "Unique",
+            "--limit",
+            "1",
+        ])
+        .output()
+        .expect("run ls");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(
+        envelope["data"]["items"].as_array().expect("items").len(),
+        1
+    );
+    assert_eq!(envelope["data"]["items"][0]["name"], "Unique");
+    assert_eq!(
+        envelope["data"]["truncated"], false,
+        "the page was exhausted and held no further match"
+    );
+}
+
+#[tokio::test]
+async fn ls_text_mode_warns_when_more_workflows_exist() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .respond_with(PaginatedList {
+            total: 30,
+            executions: false,
+        })
+        .mount(&server)
+        .await;
+
+    let output = Command::cargo_bin("n8nc")
+        .expect("n8nc binary")
+        .env("N8NC_TOKEN_MOCK", "test-token")
+        .args(["--repo-root"])
+        .arg(repo.path())
+        .args([
+            "--output",
+            "text",
+            "ls",
+            "--instance",
+            "mock",
+            "--limit",
+            "5",
+        ])
+        .output()
+        .expect("run ls");
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("More workflows exist"),
+        "text mode must not truncate silently; stderr was: {stderr}"
+    );
+}

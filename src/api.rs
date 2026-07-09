@@ -45,9 +45,14 @@ pub struct ExecutionListOptions {
     pub since: Option<DateTime<Utc>>,
 }
 
-/// A completed list fetch. `truncated` is true only when `max_results` stopped
-/// the walk while the API still had more rows, so a short list is never
-/// mistaken for a complete one.
+/// A completed list fetch.
+///
+/// `truncated` is true when `max_results` stopped the walk while rows remained.
+/// It errs toward true: a `nextCursor` proves the source has more rows, not that
+/// any of them still match a client-side filter. Where exhaustion can be proven
+/// it is, so a page that already crossed a `since` cutoff reports false. The
+/// error is therefore a needless "there may be more", never a silent "this is
+/// everything".
 #[derive(Debug, Clone)]
 pub struct ListPage {
     pub items: Vec<Value>,
@@ -56,10 +61,15 @@ pub struct ListPage {
 
 /// Page size for every request in a walk: never above the API cap, and never
 /// larger than the caller could possibly need. Held constant across pages
-/// rather than shrinking to what remains, because server-side filters can drop
-/// rows and a shrinking page would degrade into one round trip per row.
-fn page_size(max_results: Option<usize>) -> u16 {
+/// rather than shrinking to what remains, because a shrinking page would
+/// degrade into one round trip per row.
+///
+/// When a filter is applied client-side, matches are scattered through the
+/// source, so the page must stay full: sizing it to `--limit 1` would fetch a
+/// single row per request until a match turned up.
+fn page_size(max_results: Option<usize>, client_side_filter: bool) -> u16 {
     match max_results {
+        Some(_) if client_side_filter => MAX_PAGE_SIZE,
         Some(max) => u16::try_from(max)
             .unwrap_or(MAX_PAGE_SIZE)
             .clamp(1, MAX_PAGE_SIZE),
@@ -122,7 +132,7 @@ impl ApiClient {
         loop {
             let mut page_query = vec![(
                 "limit".to_string(),
-                page_size(options.max_results).to_string(),
+                page_size(options.max_results, options.name_filter.is_some()).to_string(),
             )];
             if let Some(active) = options.active {
                 page_query.push(("active".to_string(), active.to_string()));
@@ -186,9 +196,11 @@ impl ApiClient {
         let mut truncated = false;
 
         loop {
+            // Executions come back newest-first and `since` trims the tail, so
+            // matches cluster at the front and a `--limit`-sized page suffices.
             let mut page_query = vec![(
                 "limit".to_string(),
-                page_size(options.max_results).to_string(),
+                page_size(options.max_results, false).to_string(),
             )];
             if let Some(workflow_id) = &options.workflow_id {
                 page_query.push(("workflowId".to_string(), workflow_id.clone()));
@@ -229,7 +241,10 @@ impl ApiClient {
             if let Some(more_in_page) =
                 append_matching_executions(&mut results, &page_data, options)
             {
-                truncated = more_in_page || next_cursor.is_some();
+                // A cursor proves the source has more rows, not that any of them
+                // match. Once this page crossed the cutoff, every later row is
+                // older still, so the returned set is already complete.
+                truncated = more_in_page || (next_cursor.is_some() && !page_crossed_since_cutoff);
                 break;
             }
             // Everything older than the cutoff is on later pages: nothing is lost.
@@ -1097,13 +1112,22 @@ mod tests {
     #[test]
     fn page_size_never_exceeds_the_api_cap() {
         // The API rejects any page above 250, whatever the caller asked for.
-        assert_eq!(super::page_size(None), super::MAX_PAGE_SIZE);
-        assert_eq!(super::page_size(Some(10_000)), super::MAX_PAGE_SIZE);
-        assert_eq!(super::page_size(Some(600)), super::MAX_PAGE_SIZE);
-        assert_eq!(super::page_size(Some(251)), super::MAX_PAGE_SIZE);
-        assert_eq!(super::page_size(Some(20)), 20);
+        assert_eq!(super::page_size(None, false), super::MAX_PAGE_SIZE);
+        assert_eq!(super::page_size(Some(10_000), false), super::MAX_PAGE_SIZE);
+        assert_eq!(super::page_size(Some(600), false), super::MAX_PAGE_SIZE);
+        assert_eq!(super::page_size(Some(251), false), super::MAX_PAGE_SIZE);
+        assert_eq!(super::page_size(Some(20), false), 20);
         // Never zero: a zero page size would be rejected too.
-        assert_eq!(super::page_size(Some(1)), 1);
+        assert_eq!(super::page_size(Some(1), false), 1);
+    }
+
+    #[test]
+    fn page_size_stays_full_when_filtering_client_side() {
+        // Matches are scattered, so a `--limit 1` page would fetch one row per
+        // request until one matched.
+        assert_eq!(super::page_size(Some(1), true), super::MAX_PAGE_SIZE);
+        assert_eq!(super::page_size(Some(20), true), super::MAX_PAGE_SIZE);
+        assert_eq!(super::page_size(None, true), super::MAX_PAGE_SIZE);
     }
 
     #[test]

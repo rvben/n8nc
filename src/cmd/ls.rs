@@ -153,6 +153,12 @@ pub(crate) async fn cmd_ls(context: &Context, args: ListArgs) -> Result<(), AppE
                 total
             );
         }
+        if more_beyond_limit {
+            eprintln!(
+                "More workflows exist beyond --limit {}. Raise it to see them.",
+                args.limit
+            );
+        }
         Ok(())
     }
 }
