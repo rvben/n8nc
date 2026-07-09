@@ -90,7 +90,18 @@ async fn cmd_node_add(context: &Context, args: NodeAddArgs) -> Result<(), AppErr
 
 async fn cmd_node_set(context: &Context, args: NodeSetArgs) -> Result<(), AppError> {
     let file = resolve_local_file_path(context, &args.file)?;
-    let value = parse_node_value("node", &args.mode, args.value.as_deref())?;
+    // A file value is read verbatim: multiline `jsCode` bodies must survive.
+    let from_file = match args.value_file.as_deref() {
+        Some(path) => Some(std::fs::read_to_string(path).map_err(|err| {
+            AppError::config("node", format!("Cannot read {}: {err}", path.display()))
+        })?),
+        None => None,
+    };
+    let value = parse_node_value(
+        "node",
+        &args.mode,
+        from_file.as_deref().or(args.value.as_deref()),
+    )?;
     let result = set_node_value(&file, &args.node, &args.path, value)?;
     emit_edit_result(
         context,

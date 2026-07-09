@@ -5783,6 +5783,103 @@ async fn runs_ls_without_explain_makes_no_detail_requests() {
 }
 
 // ---------------------------------------------------------------------------
+// node set --value-file: multiline bodies (a `code` node's jsCode) are hostile
+// to argv quoting, since they carry backticks, ${} and newlines.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn node_set_reads_multiline_value_from_file() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    fs::write(
+        repo.path().join("workflows").join("code.workflow.json"),
+        serde_json::to_string_pretty(&workflow_fixture("wf-1", "Code", false)).expect("serialize"),
+    )
+    .expect("write workflow");
+
+    let add = base_command(repo.path())
+        .args([
+            "node",
+            "add",
+            "workflows/code.workflow.json",
+            "--name",
+            "Last 9",
+            "--type",
+            "n8n-nodes-base.code",
+            "--type-version",
+            "2",
+        ])
+        .output()
+        .expect("run node add");
+    assert!(
+        add.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let body = "const rows = $input.all();\nconst d = `${rows.length}`;\nreturn rows.slice(-9);\n";
+    let value_path = repo.path().join("body.js");
+    fs::write(&value_path, body).expect("write value file");
+
+    let set = base_command(repo.path())
+        .args([
+            "node",
+            "set",
+            "workflows/code.workflow.json",
+            "Last 9",
+            "jsCode",
+            "--value-file",
+        ])
+        .arg(&value_path)
+        .output()
+        .expect("run node set --value-file");
+
+    assert!(
+        set.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let workflow = read_json_file(&repo.path().join("workflows").join("code.workflow.json"));
+    let node = workflow["nodes"]
+        .as_array()
+        .and_then(|n| n.first())
+        .expect("node");
+    assert_eq!(node["parameters"]["jsCode"], body);
+}
+
+#[tokio::test]
+async fn node_set_rejects_value_and_value_file_together() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    fs::write(
+        repo.path().join("workflows").join("code.workflow.json"),
+        serde_json::to_string_pretty(&workflow_fixture("wf-1", "Code", false)).expect("serialize"),
+    )
+    .expect("write workflow");
+
+    let set = base_command(repo.path())
+        .args([
+            "node",
+            "set",
+            "workflows/code.workflow.json",
+            "Some Node",
+            "jsCode",
+            "inline",
+            "--value-file",
+            "body.js",
+        ])
+        .output()
+        .expect("run node set");
+
+    assert!(
+        !set.status.success(),
+        "value and --value-file must conflict"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // --offset must actually reach the next page. The CLI prints "Use --offset and
 // --limit to paginate", and page 2 used to come back empty with ok:true because
 // only `limit` rows were ever fetched before `offset` sliced them away.

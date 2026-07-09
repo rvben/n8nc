@@ -553,8 +553,12 @@ pub struct NodeSetArgs {
     /// `retryOnFail`, `maxTries`, or `waitBetweenTries`.
     pub path: String,
     /// Value to assign; treated as a string unless a typing flag is given.
-    #[arg(required_unless_present = "null")]
+    #[arg(required_unless_present_any = ["null", "value_file"])]
     pub value: Option<String>,
+    /// Read the value from a file instead of argv. Use this for multiline
+    /// bodies such as a `code` node's `jsCode`, which argv quoting mangles.
+    #[arg(long, value_name = "PATH", conflicts_with = "value")]
+    pub value_file: Option<PathBuf>,
     #[command(flatten)]
     pub mode: ValueModeArgs,
 }
