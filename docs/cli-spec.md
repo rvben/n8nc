@@ -757,6 +757,7 @@ The n8n public API caps a page at 250 rows on both `/workflows` and `/executions
 - Commands that need the whole set (`runs stats`, `pull --all`, the credential inventory) walk every page, so their aggregates are never computed from a truncated sample.
 - `truncated: true` appears in the JSON envelope only when `--limit` stopped the walk while the API still had rows. A short result is never silently presented as a complete one. In text mode the same condition prints a note on stderr.
 - `--offset` is applied in-band, after the fetch. Commands therefore fetch `offset + limit` results, so `--offset 20 --limit 20` returns the second page of twenty rather than nothing. Pages are contiguous and non-overlapping.
+- `runs ls --explain` issues one `GET /executions/<id>?includeData=true` per returned row. That response carries the whole run payload, so pair `--explain` with a small `--limit` and a `--status` filter.
 
 ## 17. Known Limits
 

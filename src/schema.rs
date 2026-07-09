@@ -118,6 +118,8 @@ fn output_fields_for(path: &str) -> Vec<Value> {
             json!({"name": "stopped_at", "type": "string | null"}),
             json!({"name": "wait_till", "type": "string | null"}),
             json!({"name": "duration_ms", "type": "integer | null"}),
+            json!({"name": "last_node", "type": "string | null (--explain only)"}),
+            json!({"name": "error", "type": "string | null (--explain only)"}),
         ],
         "runs get" => vec![
             json!({"name": "id", "type": "string"}),
@@ -126,8 +128,9 @@ fn output_fields_for(path: &str) -> Vec<Value> {
             json!({"name": "started_at", "type": "string | null"}),
             json!({"name": "stopped_at", "type": "string | null"}),
             json!({"name": "duration_ms", "type": "integer | null"}),
-            json!({"name": "node_executions", "type": "array (--details only)"}),
+            json!({"name": "node_executions", "type": "array (--details, --summary)"}),
             json!({"name": "run_data", "type": "object (--details only)"}),
+            json!({"name": "node", "type": "object (--node only)"}),
         ],
         "runs stats" => vec![
             json!({"name": "period", "type": "string"}),

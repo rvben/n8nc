@@ -5562,6 +5562,227 @@ async fn ls_paginates_past_the_api_page_cap() {
 }
 
 // ---------------------------------------------------------------------------
+// runs get: lean projections. `--details` on a 27-node run returns megabytes;
+// agents almost always want the per-node summary or one node's output.
+// ---------------------------------------------------------------------------
+
+fn detailed_execution_body() -> Value {
+    json!({
+        "id": "77",
+        "workflowId": "wf-1",
+        "status": "success",
+        // The whole workflow definition rides along with includeData=true.
+        "workflowData": {"id": "wf-1", "name": "Alpha", "nodes": [], "connections": {}},
+        "data": {
+            "resultData": {
+                "lastNodeExecuted": "Node B",
+                "runData": {
+                    "Node A": [{
+                        "executionStatus": "success",
+                        "executionTime": 42,
+                        "data": {"main": [[{"json": {"a": 1}}, {"json": {"a": 2}}]]}
+                    }],
+                    "Node B": [{
+                        "executionStatus": "success",
+                        "executionTime": 7,
+                        "data": {"main": [[{"json": {"b": true}}]]}
+                    }]
+                }
+            }
+        }
+    })
+}
+
+async fn mount_detailed_execution(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions/77"))
+        .and(query_param("includeData", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(detailed_execution_body()))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn runs_get_summary_returns_node_rows_without_run_data() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_detailed_execution(&server).await;
+
+    let output = base_command(repo.path())
+        .args(["runs", "get", "--instance", "mock", "77", "--summary"])
+        .output()
+        .expect("run runs get --summary");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["data"]["node_executions"][0]["name"], "Node A");
+    assert_eq!(envelope["data"]["node_executions"][0]["output_items"], 2);
+    assert!(
+        envelope["data"]["run_data"].is_null(),
+        "--summary must not carry run_data"
+    );
+    assert!(
+        envelope["data"]["execution"]["data"].is_null(),
+        "--summary must strip the heavy execution.data payload"
+    );
+    assert!(
+        envelope["data"]["execution"]["workflowData"].is_null(),
+        "--summary must strip the whole workflow definition too"
+    );
+    // The envelope that remains is small enough to read.
+    assert!(output.stdout.len() < 2_000, "summary should stay tiny");
+}
+
+#[tokio::test]
+async fn runs_get_node_returns_only_that_nodes_output() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_detailed_execution(&server).await;
+
+    let output = base_command(repo.path())
+        .args([
+            "runs",
+            "get",
+            "--instance",
+            "mock",
+            "77",
+            "--node",
+            "Node B",
+        ])
+        .output()
+        .expect("run runs get --node");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["data"]["node"]["name"], "Node B");
+    assert_eq!(envelope["data"]["node"]["output_items"], 1);
+    assert_eq!(envelope["data"]["node"]["items"][0]["json"]["b"], true);
+    assert!(envelope["data"]["run_data"].is_null());
+}
+
+#[tokio::test]
+async fn runs_get_unknown_node_is_not_found() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_detailed_execution(&server).await;
+
+    let output = base_command(repo.path())
+        .args(["runs", "get", "--instance", "mock", "77", "--node", "Nope"])
+        .output()
+        .expect("run runs get --node");
+
+    assert_eq!(output.status.code(), Some(11));
+    let envelope = parse_json(&output.stderr);
+    assert_eq!(envelope["error"]["kind"], "not_found");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Nope")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// runs ls --explain: turn "166 errors" into a cause, without 4 MB per run.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn runs_ls_explain_reports_the_failing_node_and_message() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{
+                "id": "9",
+                "workflowId": "wf-1",
+                "status": "error",
+                "mode": "trigger",
+                "startedAt": "2026-07-09T12:00:00.000Z",
+                "stoppedAt": "2026-07-09T12:00:01.000Z"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workflow_fixture("wf-1", "Alpha", true)),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions/9"))
+        .and(query_param("includeData", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "9",
+            "status": "error",
+            "data": {
+                "resultData": {
+                    "lastNodeExecuted": "Restart Container",
+                    "error": {"message": "connect ECONNREFUSED 10.0.0.5:2375"}
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "runs",
+            "ls",
+            "--instance",
+            "mock",
+            "--status",
+            "error",
+            "--explain",
+        ])
+        .output()
+        .expect("run runs ls --explain");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    let row = &envelope["data"]["items"][0];
+    assert_eq!(row["last_node"], "Restart Container");
+    assert_eq!(row["error"], "connect ECONNREFUSED 10.0.0.5:2375");
+}
+
+#[tokio::test]
+async fn runs_ls_without_explain_makes_no_detail_requests() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_execution_pages(&server, 3).await;
+
+    let output = base_command(repo.path())
+        .args(["runs", "ls", "--instance", "mock"])
+        .output()
+        .expect("run runs ls");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert!(envelope["data"]["items"][0]["error"].is_null());
+    // No /executions/<id> mock is mounted; a detail fetch would 404 and fail.
+}
+
+// ---------------------------------------------------------------------------
 // --offset must actually reach the next page. The CLI prints "Use --offset and
 // --limit to paginate", and page 2 used to come back empty with ok:true because
 // only `limit` rows were ever fetched before `offset` sliced them away.

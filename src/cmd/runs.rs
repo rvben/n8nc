@@ -47,6 +47,11 @@ struct ExecutionListRow {
     wait_till: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duration_ms: Option<i64>,
+    /// Populated only by `--explain`, which costs one detail request per row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_node: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -104,7 +109,10 @@ async fn cmd_runs_ls(context: &Context, args: RunsListArgs) -> Result<(), AppErr
     let total = rows.len();
 
     // Apply in-band offset/limit so callers can paginate the result set.
-    let page: Vec<_> = rows.iter().skip(offset).take(limit).cloned().collect();
+    let mut page: Vec<_> = rows.iter().skip(offset).take(limit).cloned().collect();
+    if args.explain {
+        explain_execution_rows(&client, &mut page).await?;
+    }
 
     if context.json {
         let mut data = serde_json::Map::new();
@@ -233,8 +241,12 @@ async fn cmd_runs_watch(context: &Context, args: RunsWatchArgs) -> Result<(), Ap
 async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppError> {
     let repo = load_loaded_repo(context)?;
     let (client, _, _) = remote_client(&repo, args.remote.instance.as_deref(), "runs")?;
-    let execution = client
-        .get_execution(&args.execution_id, args.details)
+
+    // `--summary` and `--node` need the run data fetched, but never emit it.
+    let node_filter = args.node.as_deref();
+    let want_data = args.details || args.summary || node_filter.is_some();
+    let mut execution = client
+        .get_execution(&args.execution_id, want_data)
         .await?
         .ok_or_else(|| {
             AppError::not_found(
@@ -242,8 +254,40 @@ async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppErr
                 format!("Execution `{}` was not found.", args.execution_id),
             )
         })?;
-    let node_executions = args.details.then(|| execution_node_rows(&execution));
+
+    if let Some(node) = node_filter {
+        let selected = execution_node_output(&execution, node).ok_or_else(|| {
+            AppError::not_found(
+                "runs",
+                format!(
+                    "Node `{node}` did not run in execution `{}`.",
+                    args.execution_id
+                ),
+            )
+        })?;
+        strip_execution_payload(&mut execution);
+        if context.json {
+            let mut data = serde_json::Map::new();
+            data.insert("execution".to_string(), execution);
+            data.insert("node".to_string(), selected);
+            return emit_json("runs", &Value::Object(data));
+        }
+        let rendered = serde_json::to_string_pretty(&selected).map_err(|err| {
+            AppError::api(
+                "runs",
+                "runs.render_failed",
+                format!("Failed to render node output: {err}"),
+            )
+        })?;
+        println!("{rendered}");
+        return Ok(());
+    }
+
+    let node_executions = (args.details || args.summary).then(|| execution_node_rows(&execution));
     let run_data = args.details.then(|| execution_run_data_value(&execution));
+    if args.summary {
+        strip_execution_payload(&mut execution);
+    }
 
     if context.json {
         let mut data = serde_json::Map::new();
@@ -293,7 +337,7 @@ async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppErr
             println!("Duration: {}", format_duration(Some(duration_ms)));
         }
 
-        if args.details {
+        if args.details || args.summary {
             let nodes = node_executions.unwrap_or_default();
             if !nodes.is_empty() {
                 println!();
@@ -594,6 +638,8 @@ async fn fetch_execution_rows(
                 stopped_at: value_string(&execution, "stoppedAt"),
                 wait_till: value_string(&execution, "waitTill"),
                 duration_ms: execution_duration_ms(&execution),
+                last_node: None,
+                error: None,
             }
         })
         .collect();
@@ -691,6 +737,35 @@ fn execution_run_data_object(execution: &Value) -> Option<&serde_json::Map<Strin
         .and_then(Value::as_object)
 }
 
+/// Fills in `last_node` and `error` for each row, one detail request per row.
+/// Only the failure cause is kept; the megabytes of run data are discarded.
+async fn explain_execution_rows(
+    client: &ApiClient,
+    rows: &mut [ExecutionListRow],
+) -> Result<(), AppError> {
+    for row in rows.iter_mut() {
+        let Some(execution) = client.get_execution(&row.id, true).await? else {
+            continue;
+        };
+        let result_data = execution
+            .get("data")
+            .and_then(|data| data.get("resultData"));
+        let Some(result_data) = result_data else {
+            continue;
+        };
+        row.last_node = result_data
+            .get("lastNodeExecuted")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        row.error = result_data
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+    }
+    Ok(())
+}
+
 fn execution_run_data_value(execution: &Value) -> Value {
     execution
         .get("data")
@@ -698,6 +773,64 @@ fn execution_run_data_value(execution: &Value) -> Value {
         .and_then(|result| result.get("runData"))
         .cloned()
         .unwrap_or(Value::Null)
+}
+
+/// Drops the two heavy blobs once whatever we needed has been projected out:
+/// `data` (every node's inputs and outputs) and `workflowData` (the whole
+/// workflow definition). Both are megabyte-scale on a real workflow and neither
+/// is what `--summary` or `--node` was asked for.
+fn strip_execution_payload(execution: &mut Value) {
+    if let Some(object) = execution.as_object_mut() {
+        object.remove("data");
+        object.remove("workflowData");
+    }
+}
+
+/// One node's output items plus its status, without the rest of the run.
+fn execution_node_output(execution: &Value, node: &str) -> Option<Value> {
+    let runs = execution
+        .get("data")?
+        .get("resultData")?
+        .get("runData")?
+        .get(node)?
+        .as_array()?;
+
+    let mut items: Vec<Value> = Vec::new();
+    let mut status: Option<String> = None;
+    let mut execution_time_ms: Option<i64> = None;
+
+    for run in runs {
+        if status.is_none() {
+            status = run
+                .get("executionStatus")
+                .or_else(|| run.get("status"))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+        }
+        if execution_time_ms.is_none() {
+            execution_time_ms = run.get("executionTime").and_then(Value::as_i64);
+        }
+        let Some(main) = run
+            .get("data")
+            .and_then(|data| data.get("main"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for branch in main {
+            if let Some(branch_items) = branch.as_array() {
+                items.extend(branch_items.iter().cloned());
+            }
+        }
+    }
+
+    Some(json!({
+        "name": node,
+        "status": status,
+        "execution_time_ms": execution_time_ms,
+        "output_items": items.len(),
+        "items": items,
+    }))
 }
 
 fn count_output_items(main: &Value) -> usize {
@@ -997,6 +1130,8 @@ mod tests {
                 stopped_at: Some("2026-03-26T12:00:00.100Z".to_string()),
                 wait_till: None,
                 duration_ms: Some(100),
+                last_node: None,
+                error: None,
             },
             ExecutionListRow {
                 id: "100".to_string(),
@@ -1008,6 +1143,8 @@ mod tests {
                 stopped_at: Some("2026-03-26T11:59:00.100Z".to_string()),
                 wait_till: None,
                 duration_ms: Some(100),
+                last_node: None,
+                error: None,
             },
         ];
         let mut known_ids = BTreeSet::from(["100".to_string()]);

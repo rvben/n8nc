@@ -308,6 +308,10 @@ pub struct RunsListArgs {
     /// Comma-separated list of fields to include in output
     #[arg(long, value_name = "FIELDS")]
     pub fields: Option<String>,
+    /// Add the failing node and error message to each row. Costs one extra API
+    /// request per returned execution, so pair it with `--status error`.
+    #[arg(long)]
+    pub explain: bool,
 }
 
 #[derive(Debug, Args)]
@@ -315,9 +319,16 @@ pub struct RunsGetArgs {
     #[command(flatten)]
     pub remote: RemoteArgs,
     pub execution_id: String,
-    /// Include detailed execution data and workflow metadata
-    #[arg(long)]
+    /// Include the full run payload and workflow metadata. This can reach
+    /// megabytes on a large workflow; prefer `--summary` or `--node`.
+    #[arg(long, conflicts_with_all = ["summary", "node"])]
     pub details: bool,
+    /// Per-node status, duration, and output counts, without the run payload
+    #[arg(long, conflicts_with = "node")]
+    pub summary: bool,
+    /// Output items produced by a single node, selected by its display name
+    #[arg(long, value_name = "NAME")]
+    pub node: Option<String>,
 }
 
 #[derive(Debug, Args)]
