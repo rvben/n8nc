@@ -218,7 +218,9 @@ The execution commands currently assume these endpoints exist and are reachable 
 - `GET /executions`
 - `GET /executions/{id}`
 
-`runs get --details` uses `includeData=true` when fetching a single execution.
+`runs get` uses `includeData=true` when fetching a single execution for `--details`, `--summary`, `--node` or `--raw`.
+
+`run_data` is the canonical location for the run payload. `--details` strips `execution.data`, which carried the same bytes: on a real 27-node execution that duplicate was 1.42 MB, and `--details` fell from 4.0 MB to 1.5 MB. The two fields that only lived there, `lastNodeExecuted` and the error message, are surfaced as `last_node_executed` and `error`. `--raw` returns the execution exactly as n8n sent it, including n8n's internal `executionData`, with no derived keys.
 
 `trigger` does not use the public API. It makes a direct HTTP request to a full URL or a path resolved against the configured instance base URL.
 

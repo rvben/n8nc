@@ -328,16 +328,19 @@ pub struct RunsGetArgs {
     #[command(flatten)]
     pub remote: RemoteArgs,
     pub execution_id: String,
-    /// Include the full run payload and workflow metadata. This can reach
-    /// megabytes on a large workflow; prefer `--summary` or `--node`.
-    #[arg(long, conflicts_with_all = ["summary", "node"])]
+    /// Include the run payload and workflow metadata. This can reach megabytes
+    /// on a large workflow; prefer `--summary` or `--node`.
+    #[arg(long, conflicts_with_all = ["summary", "node", "raw"])]
     pub details: bool,
     /// Per-node status, duration, and output counts, without the run payload
-    #[arg(long, conflicts_with = "node")]
+    #[arg(long, conflicts_with_all = ["node", "raw"])]
     pub summary: bool,
     /// Output items produced by a single node, selected by its display name
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", conflicts_with = "raw")]
     pub node: Option<String>,
+    /// The execution exactly as n8n returned it, with no derived keys
+    #[arg(long)]
+    pub raw: bool,
 }
 
 #[derive(Debug, Args)]

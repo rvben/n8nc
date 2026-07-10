@@ -633,9 +633,10 @@ async fn runs_get_json_details_returns_execution_payload() {
     );
     assert_eq!(envelope["data"]["run_data"]["Node A"], json!([]));
     assert_eq!(envelope["data"]["node_executions"], json!([]));
+    // `run_data` is canonical; `execution.data` no longer duplicates it.
     assert!(
-        envelope["data"]["execution"]["data"]["resultData"]["runData"].is_object(),
-        "expected detailed execution payload"
+        envelope["data"]["execution"]["data"].is_null(),
+        "execution.data should be stripped in favour of run_data"
     );
 }
 
@@ -7186,5 +7187,128 @@ async fn workflow_execute_without_a_manual_trigger_is_a_clear_error() {
             .unwrap_or_default()
             .contains("trigger"),
         "should point at `n8nc trigger` for webhook workflows"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// runs get --details used to emit the run payload twice: once inside
+// `execution.data.resultData.runData` and again as top-level `run_data`. On a
+// real 27-node execution that is 1.42 MB of duplicate. `run_data` is now the
+// canonical location, and `--raw` returns the untouched API response.
+// ---------------------------------------------------------------------------
+
+fn execution_with_result_data() -> Value {
+    json!({
+        "id": "88",
+        "workflowId": "wf-1",
+        "status": "error",
+        "workflowData": {"id": "wf-1", "name": "Alpha", "nodes": [], "connections": {}},
+        "data": {
+            "resultData": {
+                "lastNodeExecuted": "Query Container Restarts",
+                "error": {"message": "connect ECONNREFUSED"},
+                "runData": {"Node A": []}
+            },
+            "executionData": {"nodeExecutionStack": ["a lot of internal state"]}
+        }
+    })
+}
+
+async fn mount_execution_88(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions/88"))
+        .and(query_param("includeData", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(execution_with_result_data()))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn runs_get_details_no_longer_duplicates_the_run_payload() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_execution_88(&server).await;
+
+    let output = base_command(repo.path())
+        .args(["runs", "get", "--instance", "mock", "88", "--details"])
+        .output()
+        .expect("run runs get --details");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    let data = &envelope["data"];
+
+    // Canonical location kept.
+    assert_eq!(data["run_data"]["Node A"], json!([]));
+    assert!(data["node_executions"].is_array());
+    // The duplicate is gone.
+    assert!(
+        data["execution"]["data"].is_null(),
+        "execution.data duplicated run_data and is now stripped"
+    );
+    // Nothing that mattered was lost with it.
+    assert_eq!(data["last_node_executed"], "Query Container Restarts");
+    assert_eq!(data["error"], "connect ECONNREFUSED");
+    // The workflow definition still rides along under --details.
+    assert_eq!(data["execution"]["workflowData"]["name"], "Alpha");
+}
+
+#[tokio::test]
+async fn runs_get_raw_returns_the_untouched_api_response() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_execution_88(&server).await;
+
+    let output = base_command(repo.path())
+        .args(["runs", "get", "--instance", "mock", "88", "--raw"])
+        .output()
+        .expect("run runs get --raw");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = parse_json(&output.stdout)["data"].clone();
+    // Everything, exactly as n8n returned it, including n8n's internal state.
+    assert_eq!(
+        data["execution"]["data"]["resultData"]["runData"]["Node A"],
+        json!([])
+    );
+    assert!(data["execution"]["data"]["executionData"].is_object());
+    assert!(
+        data["run_data"].is_null(),
+        "--raw does not add derived keys"
+    );
+}
+
+#[tokio::test]
+async fn runs_get_raw_conflicts_with_the_other_projections() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    let output = base_command(repo.path())
+        .args([
+            "runs",
+            "get",
+            "--instance",
+            "mock",
+            "88",
+            "--raw",
+            "--summary",
+        ])
+        .output()
+        .expect("run runs get");
+
+    assert!(
+        !output.status.success(),
+        "--raw and --summary must conflict"
     );
 }

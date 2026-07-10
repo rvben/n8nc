@@ -12,29 +12,6 @@ expression: json
       "id": "42",
       "workflowId": "wf-1",
       "status": "success",
-      "data": {
-        "resultData": {
-          "runData": {
-            "Node A": [
-              {
-                "executionStatus": "success",
-                "executionTime": 42,
-                "data": {
-                  "main": [
-                    [
-                      {
-                        "json": {
-                          "ok": true
-                        }
-                      }
-                    ]
-                  ]
-                }
-              }
-            ]
-          }
-        }
-      },
       "workflowData": {
         "id": "wf-1",
         "name": "Alpha Workflow"

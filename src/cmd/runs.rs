@@ -244,7 +244,7 @@ async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppErr
 
     // `--summary` and `--node` need the run data fetched, but never emit it.
     let node_filter = args.node.as_deref();
-    let want_data = args.details || args.summary || node_filter.is_some();
+    let want_data = args.details || args.summary || args.raw || node_filter.is_some();
     let mut execution = client
         .get_execution(&args.execution_id, want_data)
         .await?
@@ -254,6 +254,23 @@ async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppErr
                 format!("Execution `{}` was not found.", args.execution_id),
             )
         })?;
+
+    // `--raw` is the escape hatch: exactly what n8n returned, no derived keys.
+    if args.raw {
+        return if context.json {
+            emit_json("runs", &json!({ "execution": execution }))
+        } else {
+            let rendered = serde_json::to_string_pretty(&execution).map_err(|err| {
+                AppError::api(
+                    "runs",
+                    "runs.render_failed",
+                    format!("Failed to render execution: {err}"),
+                )
+            })?;
+            println!("{rendered}");
+            Ok(())
+        };
+    }
 
     if let Some(node) = node_filter {
         let selected = execution_node_output(&execution, node).ok_or_else(|| {
@@ -285,8 +302,23 @@ async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppErr
 
     let node_executions = (args.details || args.summary).then(|| execution_node_rows(&execution));
     let run_data = args.details.then(|| execution_run_data_value(&execution));
+    // `run_data` is the canonical location. Carrying `execution.data` alongside
+    // it duplicated 1.42 MB on a real 27-node run, so it is stripped, and the
+    // two small things that only lived there are surfaced instead.
+    let last_node_executed = args
+        .details
+        .then(|| execution_result_data(&execution, "lastNodeExecuted"))
+        .flatten();
+    let error_message = args
+        .details
+        .then(|| execution_error_message(&execution))
+        .flatten();
     if args.summary {
         strip_execution_payload(&mut execution);
+    } else if args.details {
+        // `--details` keeps the workflow definition; only the duplicated run
+        // payload goes.
+        strip_execution_data(&mut execution);
     }
 
     if context.json {
@@ -297,6 +329,12 @@ async fn cmd_runs_get(context: &Context, args: RunsGetArgs) -> Result<(), AppErr
         }
         if let Some(node_executions) = node_executions {
             data.insert("node_executions".to_string(), json!(node_executions));
+        }
+        if let Some(last_node) = last_node_executed {
+            data.insert("last_node_executed".to_string(), json!(last_node));
+        }
+        if let Some(message) = error_message {
+            data.insert("error".to_string(), json!(message));
         }
         emit_json("runs", &Value::Object(data))
     } else {
@@ -948,15 +986,43 @@ fn execution_run_data_value(execution: &Value) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// Drops the run payload. `run_data` carries the same bytes, so keeping both
+/// doubled `--details` for nothing.
+fn strip_execution_data(execution: &mut Value) {
+    if let Some(object) = execution.as_object_mut() {
+        object.remove("data");
+    }
+}
+
 /// Drops the two heavy blobs once whatever we needed has been projected out:
 /// `data` (every node's inputs and outputs) and `workflowData` (the whole
 /// workflow definition). Both are megabyte-scale on a real workflow and neither
 /// is what `--summary` or `--node` was asked for.
 fn strip_execution_payload(execution: &mut Value) {
+    strip_execution_data(execution);
     if let Some(object) = execution.as_object_mut() {
-        object.remove("data");
         object.remove("workflowData");
     }
+}
+
+/// A string field under `data.resultData`, which `--details` no longer ships whole.
+fn execution_result_data(execution: &Value, key: &str) -> Option<String> {
+    execution
+        .get("data")?
+        .get("resultData")?
+        .get(key)?
+        .as_str()
+        .map(ToOwned::to_owned)
+}
+
+fn execution_error_message(execution: &Value) -> Option<String> {
+    execution
+        .get("data")?
+        .get("resultData")?
+        .get("error")?
+        .get("message")?
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 /// One node's output items plus its status, without the rest of the run.
