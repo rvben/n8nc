@@ -42,6 +42,31 @@ pub fn canonicalize_generic_json(input: &Value) -> Value {
     canonicalize_value(input)
 }
 
+/// Deep key sort that removes nothing.
+///
+/// `canonicalize_value` also drops `createdAt` and `updatedAt` at every depth,
+/// which is right for a tracked artifact and wrong for hashing a payload that
+/// must round-trip verbatim: a node parameter may legitimately be named
+/// `createdAt`. `serde_json` is built with `preserve_order`, so hashing an
+/// unsorted value would otherwise depend on the server's key order.
+pub fn sorted_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<_> = map.keys().cloned().collect();
+            keys.sort();
+            let mut out = Map::new();
+            for key in keys {
+                if let Some(value) = map.get(&key) {
+                    out.insert(key, sorted_json(value));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(sorted_json).collect()),
+        other => other.clone(),
+    }
+}
+
 fn canonicalize_value(value: &Value) -> Value {
     match value {
         Value::Object(map) => {

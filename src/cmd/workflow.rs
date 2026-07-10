@@ -145,8 +145,13 @@ pub(crate) async fn cmd_get(context: &Context, args: GetArgs) -> Result<(), AppE
 
     // Projections. A real workflow is tens of kilobytes, and the usual question
     // is about one node, so answer that without shipping the rest.
+    //
+    // These read the raw workflow, not the canonical one. Canonicalization
+    // strips `createdAt`/`updatedAt` at every depth, which is right for a
+    // tracked artifact and wrong for inspecting a live node: it would report a
+    // parameter as absent while the server still has it.
     if let Some(name) = args.node.as_deref() {
-        let node = find_workflow_node(&canonical, name).ok_or_else(|| {
+        let node = find_workflow_node(&workflow, name).ok_or_else(|| {
             AppError::not_found(
                 "get",
                 format!(
@@ -174,7 +179,7 @@ pub(crate) async fn cmd_get(context: &Context, args: GetArgs) -> Result<(), AppE
     }
 
     if args.connections {
-        let connections = canonical
+        let connections = workflow
             .get("connections")
             .cloned()
             .unwrap_or_else(|| json!({}));

@@ -1,4 +1,4 @@
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{
     cli::{
@@ -17,12 +17,12 @@ use crate::{
 use super::{
     common::{
         Context, emit_edit_result, emit_json, load_loaded_repo, parse_node_value, remote_client,
-        resolve_local_file_path, workflow_update_payload,
+        resolve_local_file_path,
     },
     workflow::{print_workflow_nodes, summarize_workflow_nodes},
 };
 
-use crate::canonical::{canonicalize_workflow, hash_value};
+use crate::canonical::{canonicalize_workflow, hash_value, sorted_json};
 use crate::repo::load_workflow_file;
 
 // ---------------------------------------------------------------------------
@@ -72,13 +72,15 @@ async fn cmd_node_set_remote(context: &Context, args: NodeSetRemoteArgs) -> Resu
     })?;
     let was_active = workflow_active(&before).unwrap_or(false);
 
-    // The lease: what we read is what we are allowed to overwrite.
-    let canonical_before = canonicalize_workflow(&before)?;
-    let lease = hash_value(&canonical_before)?;
+    // Edit the workflow exactly as the server sent it. Canonicalization strips
+    // `createdAt`/`updatedAt` at every depth, so mutating the canonical form and
+    // writing it back would silently delete a node parameter that happens to
+    // carry one of those names. Canonical order is used only for hashing.
+    let lease = hash_value(&sorted_json(&before))?;
 
-    let mut edited = canonical_before;
+    let mut edited = before.clone();
     apply_node_value(&mut edited, "node", &args.node, &args.path, value)?;
-    let changed = hash_value(&edited)? != lease;
+    let changed = hash_value(&sorted_json(&edited))? != lease;
 
     if !changed || args.dry_run {
         return emit_set_remote_result(
@@ -95,7 +97,7 @@ async fn cmd_node_set_remote(context: &Context, args: NodeSetRemoteArgs) -> Resu
     // Re-read right before writing. A concurrent editor is a conflict, not a
     // silent overwrite.
     let current = client.resolve_workflow(&workflow_id).await?;
-    if hash_value(&canonicalize_workflow(&current)?)? != lease {
+    if hash_value(&sorted_json(&current))? != lease {
         return Err(AppError::conflict(
             "node",
             format!("Workflow `{workflow_id}` changed on the remote since it was read."),
@@ -103,7 +105,7 @@ async fn cmd_node_set_remote(context: &Context, args: NodeSetRemoteArgs) -> Resu
         .with_suggestion("Re-run the command to edit the current version."));
     }
 
-    let (payload, _stripped) = workflow_update_payload(&edited)?;
+    let payload = remote_update_payload(&edited)?;
     let updated = client.update_workflow(&workflow_id, &payload).await?;
 
     // n8n's update endpoint can return the workflow with `active` cleared.
@@ -125,6 +127,42 @@ async fn cmd_node_set_remote(context: &Context, args: NodeSetRemoteArgs) -> Resu
         reactivated,
         false,
     )
+}
+
+/// The mutable fields of a remote workflow, taken verbatim.
+///
+/// Unlike `workflow_update_payload`, this neither canonicalizes nor injects
+/// default settings: the remote workflow is edited, not normalized, so a
+/// one-field change cannot rewrite anything the caller did not ask about.
+fn remote_update_payload(workflow: &Value) -> Result<Value, AppError> {
+    let object = workflow
+        .as_object()
+        .ok_or_else(|| AppError::validation("node", "Workflow payload must be a JSON object."))?;
+
+    let has_name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| !name.trim().is_empty());
+    if !has_name {
+        return Err(AppError::validation(
+            "node",
+            "Remote workflow has no `name`; refusing to write.",
+        ));
+    }
+    if !matches!(object.get("nodes"), Some(Value::Array(_))) {
+        return Err(AppError::validation(
+            "node",
+            "Remote workflow has no `nodes` array; refusing to write.",
+        ));
+    }
+
+    let mut payload = serde_json::Map::new();
+    for key in ["name", "nodes", "connections", "settings"] {
+        if let Some(value) = object.get(key) {
+            payload.insert(key.to_string(), value.clone());
+        }
+    }
+    Ok(Value::Object(payload))
 }
 
 fn emit_set_remote_result(

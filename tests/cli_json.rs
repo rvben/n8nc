@@ -7312,3 +7312,133 @@ async fn runs_get_raw_conflicts_with_the_other_projections() {
         "--raw and --summary must conflict"
     );
 }
+
+/// Captures the PUT body so the test can assert on what was actually sent.
+#[derive(Debug, Clone)]
+struct CapturedBody(Arc<std::sync::Mutex<Option<Value>>>);
+
+impl Match for CapturedBody {
+    fn matches(&self, request: &Request) -> bool {
+        if let Ok(body) = serde_json::from_slice::<Value>(&request.body) {
+            *self.0.lock().expect("lock") = Some(body);
+        }
+        true
+    }
+}
+
+#[tokio::test]
+async fn node_set_remote_preserves_node_parameters_named_created_at() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    // `createdAt` / `updatedAt` are stripped at any depth by canonicalization.
+    // A node parameter that happens to use those names is user data, and a
+    // one-field edit must not delete it.
+    let workflow = json!({
+        "id": "wf-1",
+        "name": "Alpha",
+        "active": false,
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "nodes": [{
+            "id": "n1", "name": "Last 9", "type": "n8n-nodes-base.code",
+            "typeVersion": 2, "position": [0, 0],
+            "parameters": {
+                "jsCode": "old();",
+                "body": {"createdAt": "keep-me", "updatedAt": "keep-me-too"}
+            }
+        }],
+        "connections": {},
+        "settings": {"executionOrder": "v1"}
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(workflow.clone()))
+        .mount(&server)
+        .await;
+
+    let captured = CapturedBody(Arc::new(std::sync::Mutex::new(None)));
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(captured.clone())
+        .respond_with(ResponseTemplate::new(200).set_body_json(workflow))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "node",
+            "set-remote",
+            "--instance",
+            "mock",
+            "wf-1",
+            "Last 9",
+            "jsCode",
+            "new();",
+        ])
+        .output()
+        .expect("run node set-remote");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let body = captured
+        .0
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("a PUT body");
+    let params = &body["nodes"][0]["parameters"];
+    assert_eq!(params["jsCode"], "new();", "the edit landed");
+    assert_eq!(
+        params["body"]["createdAt"], "keep-me",
+        "a node parameter named createdAt must survive the edit"
+    );
+    assert_eq!(params["body"]["updatedAt"], "keep-me-too");
+    // Top-level read-only fields are still not sent.
+    assert!(body.get("createdAt").is_none());
+    assert!(body.get("id").is_none());
+}
+
+#[tokio::test]
+async fn get_node_shows_the_node_as_the_server_has_it() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    // Canonicalization strips `createdAt`/`updatedAt` at every depth. That is
+    // right for a tracked artifact and wrong for inspecting a live node: it
+    // would report a parameter as absent while the server still has it.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "wf-1", "name": "Alpha", "active": false,
+            "nodes": [{
+                "id": "n1", "name": "Code", "type": "n8n-nodes-base.code",
+                "typeVersion": 2, "position": [0, 0],
+                "parameters": {"body": {"createdAt": "keep-me", "updatedAt": "keep-me-too"}}
+            }],
+            "connections": {}
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args(["get", "--instance", "mock", "wf-1", "--node", "Code"])
+        .output()
+        .expect("run get --node");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let node = parse_json(&output.stdout)["data"]["node"].clone();
+    assert_eq!(node["parameters"]["body"]["createdAt"], "keep-me");
+    assert_eq!(node["parameters"]["body"]["updatedAt"], "keep-me-too");
+}
