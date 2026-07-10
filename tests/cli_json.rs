@@ -6130,3 +6130,201 @@ async fn ls_text_mode_warns_when_more_workflows_exist() {
         "text mode must not truncate silently; stderr was: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Remote node introspection. `node ls` reads local files; `get <id>` returned
+// the entire workflow (34 KB for a real one), so inspecting one node's
+// parameters meant piping the whole thing through jq. These mirror the
+// projections already shipped for `runs get`.
+// ---------------------------------------------------------------------------
+
+fn workflow_with_nodes() -> Value {
+    json!({
+        "id": "wf-1",
+        "name": "Alpha",
+        "active": true,
+        "nodes": [
+            {
+                "name": "Scripture Found?",
+                "type": "n8n-nodes-base.if",
+                "typeVersion": 2,
+                "position": [400, 0],
+                "parameters": {"conditions": {"boolean": [{"value1": "={{ $json.ok }}"}]}}
+            },
+            {
+                "name": "Use OCR Result",
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "position": [600, 0],
+                "parameters": {"jsCode": "return items;"}
+            }
+        ],
+        "connections": {
+            "Scripture Found?": {"main": [
+                [{"node": "Use OCR Result", "type": "main", "index": 0}],
+                []
+            ]}
+        }
+    })
+}
+
+async fn mount_remote_workflow(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(workflow_with_nodes()))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn get_node_returns_one_nodes_parameters() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_remote_workflow(&server).await;
+
+    let output = base_command(repo.path())
+        .args([
+            "get",
+            "--instance",
+            "mock",
+            "wf-1",
+            "--node",
+            "Scripture Found?",
+        ])
+        .output()
+        .expect("run get --node");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    let node = &envelope["data"]["node"];
+    assert_eq!(node["name"], "Scripture Found?");
+    assert_eq!(node["typeVersion"], 2);
+    assert!(node["parameters"]["conditions"]["boolean"].is_array());
+    assert!(
+        envelope["data"]["workflow"].is_null(),
+        "--node must not carry the whole workflow"
+    );
+    assert!(output.stdout.len() < 1_000, "one node should be small");
+}
+
+#[tokio::test]
+async fn get_unknown_node_is_not_found() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_remote_workflow(&server).await;
+
+    let output = base_command(repo.path())
+        .args(["get", "--instance", "mock", "wf-1", "--node", "Nope"])
+        .output()
+        .expect("run get --node");
+
+    assert_eq!(output.status.code(), Some(11));
+    let envelope = parse_json(&output.stderr);
+    assert_eq!(envelope["error"]["kind"], "not_found");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Nope")
+    );
+}
+
+#[tokio::test]
+async fn get_nodes_lists_names_types_and_versions() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_remote_workflow(&server).await;
+
+    let output = base_command(repo.path())
+        .args(["get", "--instance", "mock", "wf-1", "--nodes"])
+        .output()
+        .expect("run get --nodes");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    let nodes = envelope["data"]["nodes"].as_array().expect("nodes");
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0]["name"], "Scripture Found?");
+    assert_eq!(nodes[0]["node_type"], "n8n-nodes-base.if");
+    assert_eq!(nodes[0]["type_version"], 2.0);
+    assert!(envelope["data"]["workflow"].is_null());
+}
+
+#[tokio::test]
+async fn get_connections_shows_the_wiring_per_branch() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_remote_workflow(&server).await;
+
+    let output = base_command(repo.path())
+        .args(["get", "--instance", "mock", "wf-1", "--connections"])
+        .output()
+        .expect("run get --connections");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    let conns = &envelope["data"]["connections"];
+    assert_eq!(
+        conns["Scripture Found?"]["main"][0][0]["node"],
+        "Use OCR Result"
+    );
+    assert!(envelope["data"]["workflow"].is_null());
+}
+
+#[tokio::test]
+async fn get_without_projection_still_returns_the_whole_workflow() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_remote_workflow(&server).await;
+
+    let output = base_command(repo.path())
+        .args(["get", "--instance", "mock", "wf-1"])
+        .output()
+        .expect("run get");
+
+    assert!(output.status.success());
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["data"]["workflow"]["name"], "Alpha");
+    assert!(envelope["data"]["node"].is_null());
+}
+
+#[tokio::test]
+async fn get_projections_are_mutually_exclusive() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    let output = base_command(repo.path())
+        .args([
+            "get",
+            "--instance",
+            "mock",
+            "wf-1",
+            "--nodes",
+            "--connections",
+        ])
+        .output()
+        .expect("run get");
+
+    assert!(
+        !output.status.success(),
+        "--nodes and --connections must conflict"
+    );
+}

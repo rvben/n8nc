@@ -139,12 +139,70 @@ pub(crate) async fn cmd_get(context: &Context, args: GetArgs) -> Result<(), AppE
     let workflow = client.resolve_workflow(&args.identifier).await?;
     let canonical = canonicalize_workflow(&workflow)?;
 
+    // Projections. A real workflow is tens of kilobytes, and the usual question
+    // is about one node, so answer that without shipping the rest.
+    if let Some(name) = args.node.as_deref() {
+        let node = find_workflow_node(&canonical, name).ok_or_else(|| {
+            AppError::not_found(
+                "get",
+                format!(
+                    "Node `{name}` was not found in workflow `{}`.",
+                    args.identifier
+                ),
+            )
+        })?;
+        return if context.json {
+            emit_json("get", &json!({ "node": node }))
+        } else {
+            print!("{}", pretty_json(&node)?);
+            Ok(())
+        };
+    }
+
+    if args.nodes {
+        let rows = summarize_workflow_nodes(&canonical);
+        return if context.json {
+            emit_json("get", &json!({ "nodes": rows }))
+        } else {
+            print_workflow_nodes(&rows);
+            Ok(())
+        };
+    }
+
+    if args.connections {
+        let connections = canonical
+            .get("connections")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        return if context.json {
+            emit_json("get", &json!({ "connections": connections }))
+        } else {
+            print!("{}", pretty_json(&connections)?);
+            Ok(())
+        };
+    }
+
     if context.json {
         emit_json("get", &json!({ "workflow": canonical }))
     } else {
         print!("{}", pretty_json(&canonical)?);
         Ok(())
     }
+}
+
+/// Finds a node by display name, then by `id`, matching how the edit commands
+/// resolve a node so `get --node X` and `node set ... X` agree on what `X` is.
+fn find_workflow_node(workflow: &Value, name: &str) -> Option<Value> {
+    let nodes = workflow.get("nodes").and_then(Value::as_array)?;
+    nodes
+        .iter()
+        .find(|node| node.get("name").and_then(Value::as_str) == Some(name))
+        .or_else(|| {
+            nodes
+                .iter()
+                .find(|node| node.get("id").and_then(Value::as_str) == Some(name))
+        })
+        .cloned()
 }
 
 pub(crate) async fn cmd_workflow(context: &Context, args: WorkflowArgs) -> Result<(), AppError> {

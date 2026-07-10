@@ -490,6 +490,18 @@ The scanner intentionally ignores obvious placeholders and common n8n dynamic re
 
 Warnings do not fail `validate`, but they are returned in human output, JSON output, and the post-write summaries from `pull` and successful `push`.
 
+## 11a. Remote Inspection
+
+`get <id-or-name>` prints the canonical workflow JSON. A real workflow is tens of kilobytes, and the usual question is about one node, so three projections answer it directly without shipping the rest:
+
+- `get <id> --node "<NAME>"` — one node's definition, matched by display name then by `id`, the same resolution `node set` uses. An unknown name is a `not_found` error (exit `11`), never an empty result.
+- `get <id> --nodes` — a summary row per node: name, type, `typeVersion`, disabled.
+- `get <id> --connections` — the wiring, so `main[0]` (true) and `main[1]` (false) branches are readable directly.
+
+The three are mutually exclusive. On a 52 KB production workflow, `--node` returns 662 bytes.
+
+These mirror `runs get --summary` / `--node`, which do the same for executions.
+
 ## 12a. Lint Rules
 
 `lint` checks tracked workflow files against configurable rules. Severities are `off`, `warn`, or `error`, set per rule in `n8n.toml`. Any diagnostic at `error` fails the command.

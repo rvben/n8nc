@@ -256,6 +256,15 @@ pub struct GetArgs {
     #[command(flatten)]
     pub remote: RemoteArgs,
     pub identifier: String,
+    /// Print one node's definition, selected by its display name
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["nodes", "connections"])]
+    pub node: Option<String>,
+    /// Print a summary row per node: name, type, typeVersion, disabled
+    #[arg(long, conflicts_with = "connections")]
+    pub nodes: bool,
+    /// Print the workflow's connections, showing what each branch feeds
+    #[arg(long)]
+    pub connections: bool,
 }
 
 #[derive(Debug, Args)]
