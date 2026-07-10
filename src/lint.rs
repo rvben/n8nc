@@ -60,6 +60,11 @@ const RULES: &[RuleDefinition] = &[
         default: LintSeverity::Warn,
         check: check_no_empty_expressions,
     },
+    RuleDefinition {
+        id: "params-match-type-version",
+        default: LintSeverity::Warn,
+        check: check_params_match_type_version,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -125,6 +130,181 @@ fn node_name(node: &Value) -> String {
 
 fn node_type(node: &Value) -> Option<&str> {
     node.get("type").and_then(Value::as_str)
+}
+
+// ---------------------------------------------------------------------------
+// Rule: params-match-type-version
+//
+// n8n resolves a node's parameter schema from its `typeVersion`. When the stored
+// parameters use a schema from a different version, n8n does not warn or error:
+// it simply reads keys that are not there. A v2 `IF` whose parameters still use
+// the v1 `conditions.boolean` shape evaluates zero conditions, so every item
+// takes the true branch and the guard is inert. The mirror case is just as
+// quiet: Set v3 `assignments` on a typeVersion 1 node sets nothing.
+//
+// Only migrations confirmed against real workflows are encoded here. An unknown
+// node type is never flagged, so the rule cannot invent a false positive.
+// ---------------------------------------------------------------------------
+
+/// A parameter shape, identified by a marker key, valid over a typeVersion range.
+struct ParamSchema {
+    /// Dotted path under `parameters` that uniquely identifies this shape.
+    marker: &'static str,
+    /// Valid from this typeVersion (inclusive).
+    min_type_version: f64,
+    /// Valid until this typeVersion (exclusive). `None` means no upper bound.
+    max_type_version: Option<f64>,
+}
+
+struct NodeSchemaHistory {
+    node_type: &'static str,
+    schemas: &'static [ParamSchema],
+    hint: &'static str,
+}
+
+/// The `IF` and `Filter` nodes share n8n's filter component, rewritten at v2.
+const FILTER_COMPONENT: &[ParamSchema] = &[
+    ParamSchema {
+        marker: "conditions.conditions",
+        min_type_version: 2.0,
+        max_type_version: None,
+    },
+    ParamSchema {
+        marker: "conditions.boolean",
+        min_type_version: 1.0,
+        max_type_version: Some(2.0),
+    },
+    ParamSchema {
+        marker: "conditions.string",
+        min_type_version: 1.0,
+        max_type_version: Some(2.0),
+    },
+    ParamSchema {
+        marker: "conditions.number",
+        min_type_version: 1.0,
+        max_type_version: Some(2.0),
+    },
+    ParamSchema {
+        marker: "conditions.dateTime",
+        min_type_version: 1.0,
+        max_type_version: Some(2.0),
+    },
+];
+
+const FILTER_HINT: &str = "typeVersion 2 reads `conditions.conditions[]`; the older shape is ignored, \
+     so no condition is evaluated and every item takes the true branch";
+
+const SET_HINT: &str = "Set v3 (Edit Fields) reads `assignments.assignments[]`; earlier versions read \
+     `values.*`. The mismatched shape is ignored and the node assigns nothing";
+
+const SCHEMA_HISTORY: &[NodeSchemaHistory] = &[
+    NodeSchemaHistory {
+        node_type: "n8n-nodes-base.if",
+        schemas: FILTER_COMPONENT,
+        hint: FILTER_HINT,
+    },
+    NodeSchemaHistory {
+        node_type: "n8n-nodes-base.filter",
+        schemas: FILTER_COMPONENT,
+        hint: FILTER_HINT,
+    },
+    NodeSchemaHistory {
+        node_type: "n8n-nodes-base.set",
+        schemas: &[
+            ParamSchema {
+                marker: "assignments.assignments",
+                min_type_version: 3.0,
+                max_type_version: None,
+            },
+            ParamSchema {
+                marker: "values.string",
+                min_type_version: 1.0,
+                max_type_version: Some(3.0),
+            },
+            ParamSchema {
+                marker: "values.number",
+                min_type_version: 1.0,
+                max_type_version: Some(3.0),
+            },
+            ParamSchema {
+                marker: "values.boolean",
+                min_type_version: 1.0,
+                max_type_version: Some(3.0),
+            },
+        ],
+        hint: SET_HINT,
+    },
+];
+
+/// Resolves a dotted path under a node's `parameters`.
+fn parameter_path<'a>(node: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut current = node.get("parameters")?;
+    for segment in path.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
+/// n8n treats an absent `typeVersion` as 1.
+fn node_type_version(node: &Value) -> f64 {
+    node.get("typeVersion")
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0)
+}
+
+fn schema_covers(schema: &ParamSchema, type_version: f64) -> bool {
+    type_version >= schema.min_type_version
+        && schema.max_type_version.is_none_or(|max| type_version < max)
+}
+
+fn describe_range(schema: &ParamSchema) -> String {
+    match schema.max_type_version {
+        Some(max) => format!("typeVersion {} to {max}", schema.min_type_version),
+        None => format!("typeVersion {} and later", schema.min_type_version),
+    }
+}
+
+fn check_params_match_type_version(
+    workflow: &Value,
+    severity: LintSeverity,
+) -> Vec<LintDiagnostic> {
+    let mut out = Vec::new();
+
+    for node in nodes(workflow) {
+        let Some(node_type) = node_type(node) else {
+            continue;
+        };
+        let Some(history) = SCHEMA_HISTORY
+            .iter()
+            .find(|entry| entry.node_type == node_type)
+        else {
+            continue;
+        };
+
+        let type_version = node_type_version(node);
+        for schema in history.schemas {
+            if parameter_path(node, schema.marker).is_none() {
+                continue;
+            }
+            if schema_covers(schema, type_version) {
+                continue;
+            }
+            out.push(LintDiagnostic {
+                severity,
+                rule: "params-match-type-version".to_string(),
+                node: Some(node_name(node)),
+                message: format!(
+                    "declares typeVersion {type_version} but its parameters use `{}`, \
+                     which belongs to {}. n8n ignores it silently: {}.",
+                    schema.marker,
+                    describe_range(schema),
+                    history.hint
+                ),
+            });
+        }
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +568,169 @@ mod tests {
 
     fn empty_config() -> BTreeMap<String, String> {
         BTreeMap::new()
+    }
+
+    // -----------------------------------------------------------------------
+    // params-match-type-version
+    //
+    // Fixtures are real nodes from a live instance. An IF/Filter at typeVersion 2
+    // reads `conditions.conditions[]`; a v1-shaped `conditions.boolean` is ignored
+    // entirely, so the guard evaluates nothing and every item takes the true branch.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn params_match_type_version_flags_v1_if_on_type_version_2() {
+        let wf = json!({
+            "nodes": [{
+                "name": "Scripture Found?",
+                "type": "n8n-nodes-base.if",
+                "typeVersion": 2,
+                "parameters": {
+                    "conditions": {
+                        "boolean": [{"value1": "={{ $json.ocr_found }}", "value2": true}]
+                    }
+                }
+            }]
+        });
+        let diags = lint_workflow(&wf, &empty_config(), Some("params-match-type-version"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, "params-match-type-version");
+        assert_eq!(diags[0].node.as_deref(), Some("Scripture Found?"));
+        assert!(
+            diags[0].message.contains("typeVersion 2"),
+            "{}",
+            diags[0].message
+        );
+        assert!(
+            diags[0].message.contains("conditions.boolean"),
+            "{}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn params_match_type_version_flags_v1_filter_on_type_version_2() {
+        // `Filter New Recordings` in an active production workflow.
+        let wf = json!({
+            "nodes": [{
+                "name": "Filter New Recordings",
+                "type": "n8n-nodes-base.filter",
+                "typeVersion": 2,
+                "parameters": {
+                    "conditions": {
+                        "dateTime": [{"operation": "after", "value1": "={{ $json.start_time }}"}]
+                    },
+                    "options": {}
+                }
+            }]
+        });
+        let diags = lint_workflow(&wf, &empty_config(), Some("params-match-type-version"));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].node.as_deref(), Some("Filter New Recordings"));
+    }
+
+    #[test]
+    fn params_match_type_version_accepts_correct_v2_if() {
+        let wf = json!({
+            "nodes": [{
+                "name": "Recording Ready?",
+                "type": "n8n-nodes-base.if",
+                "typeVersion": 2,
+                "parameters": {
+                    "conditions": {
+                        "combinator": "and",
+                        "conditions": [{"leftValue": "={{ $json.ready }}", "rightValue": true}],
+                        "options": {}
+                    }
+                }
+            }]
+        });
+        let diags = lint_workflow(&wf, &empty_config(), Some("params-match-type-version"));
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn params_match_type_version_accepts_v1_shape_on_type_version_1() {
+        let wf = json!({
+            "nodes": [{
+                "name": "Old IF",
+                "type": "n8n-nodes-base.if",
+                "typeVersion": 1,
+                "parameters": {
+                    "conditions": {"boolean": [{"value1": "={{ $json.ok }}", "value2": true}]}
+                }
+            }]
+        });
+        let diags = lint_workflow(&wf, &empty_config(), Some("params-match-type-version"));
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn params_match_type_version_defaults_missing_type_version_to_one() {
+        let wf = json!({
+            "nodes": [{
+                "name": "Old IF",
+                "type": "n8n-nodes-base.if",
+                "parameters": {
+                    "conditions": {"boolean": [{"value1": "={{ $json.ok }}", "value2": true}]}
+                }
+            }]
+        });
+        let diags = lint_workflow(&wf, &empty_config(), Some("params-match-type-version"));
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn params_match_type_version_flags_modern_params_on_old_type_version() {
+        // The mirror image: Set v3 `assignments` on a typeVersion 1 node, which
+        // n8n ignores just as silently, so the node sets nothing.
+        let wf = json!({
+            "nodes": [{
+                "name": "Probe",
+                "type": "n8n-nodes-base.set",
+                "typeVersion": 1,
+                "parameters": {
+                    "assignments": {"assignments": [{"name": "ping", "value": "changed"}]}
+                }
+            }]
+        });
+        let diags = lint_workflow(&wf, &empty_config(), Some("params-match-type-version"));
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0].message.contains("assignments.assignments"),
+            "{}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn params_match_type_version_accepts_set_v3_assignments() {
+        let wf = json!({
+            "nodes": [{
+                "name": "Tag as Success",
+                "type": "n8n-nodes-base.set",
+                "typeVersion": 3.4,
+                "parameters": {
+                    "assignments": {"assignments": [{"name": "status", "value": "success"}]}
+                }
+            }]
+        });
+        let diags = lint_workflow(&wf, &empty_config(), Some("params-match-type-version"));
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn params_match_type_version_ignores_unknown_node_types() {
+        let wf = json!({
+            "nodes": [{
+                "name": "Code",
+                "type": "n8n-nodes-base.code",
+                "typeVersion": 2,
+                "parameters": {"conditions": {"boolean": []}}
+            }]
+        });
+        let diags = lint_workflow(&wf, &empty_config(), Some("params-match-type-version"));
+        assert!(diags.is_empty(), "{diags:?}");
     }
 
     #[test]

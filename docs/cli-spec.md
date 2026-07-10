@@ -490,6 +490,23 @@ The scanner intentionally ignores obvious placeholders and common n8n dynamic re
 
 Warnings do not fail `validate`, but they are returned in human output, JSON output, and the post-write summaries from `pull` and successful `push`.
 
+## 12a. Lint Rules
+
+`lint` checks tracked workflow files against configurable rules. Severities are `off`, `warn`, or `error`, set per rule in `n8n.toml`. Any diagnostic at `error` fails the command.
+
+| rule | default | what it catches |
+| --- | --- | --- |
+| `no-hardcoded-urls` | warn | HTTP Request nodes with a literal URL instead of an expression |
+| `no-disabled-nodes` | warn | nodes left disabled in a tracked workflow |
+| `require-error-handler` | off | nodes without an error-handling path |
+| `no-default-names` | warn | nodes still carrying their default name |
+| `no-empty-expressions` | warn | expressions that resolve to nothing |
+| `params-match-type-version` | warn | parameters written for a different `typeVersion` than the node declares |
+
+`params-match-type-version` exists because n8n resolves a node's parameter schema from its `typeVersion` and then reads keys that may not be there, without warning. An `IF` at `typeVersion: 2` whose parameters still use the v1 `conditions.boolean` shape evaluates zero conditions, so every item takes the true branch and the guard is silently inert. The mirror case is equally quiet: `Set` v3 `assignments` on a `typeVersion: 1` node assigns nothing.
+
+Only migrations confirmed against real workflows are encoded (`if`, `filter`, `set`). An unrecognised node type is never flagged, so the rule cannot invent a false positive. Raise it to `error` in `n8n.toml` if a silently-inert guard should fail your build.
+
 ## 13. Execution Inspection
 
 `runs ls` returns recent executions from the remote instance.
