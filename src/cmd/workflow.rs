@@ -2,12 +2,15 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
+    auth::{resolve_browser_id, resolve_session_cookie},
     canonical::{canonicalize_workflow, pretty_json},
     cli::{
         GetArgs, WorkflowArgs, WorkflowCommand, WorkflowCreateArgs, WorkflowExecuteArgs,
@@ -28,6 +31,7 @@ use crate::{
     validate::sensitive_data_diagnostics,
 };
 
+use super::activate::require_session_auth;
 use super::common::{
     Context, WEBHOOK_NODE_TYPE, emit_edit_result, emit_json, fetch_workflow_required,
     finalize_created_workflow_source, load_loaded_repo, normalize_webhook_path,
@@ -205,6 +209,178 @@ fn find_workflow_node(workflow: &Value, name: &str) -> Option<Value> {
         .cloned()
 }
 
+/// n8n's manual-trigger node type. Anything else has to be started some other
+/// way, so we say so rather than posting a run that cannot start.
+const MANUAL_TRIGGER_TYPE: &str = "n8n-nodes-base.manualTrigger";
+
+fn find_manual_trigger(workflow: &Value) -> Option<String> {
+    workflow
+        .get("nodes")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|node| node.get("type").and_then(Value::as_str) == Some(MANUAL_TRIGGER_TYPE))
+        .and_then(|node| node.get("name").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+}
+
+/// Runs a workflow through the internal REST session, the same call the editor's
+/// Execute Workflow button makes.
+///
+/// n8n registers the run and returns immediately, so unless `--no-wait` is given
+/// the execution is polled through the public API until it settles.
+async fn execute_via_rest_session(
+    context: &Context,
+    repo: &crate::config::LoadedRepo,
+    alias: &str,
+    args: WorkflowExecuteArgs,
+) -> Result<(), AppError> {
+    if args.input.is_some() || args.input_file.is_some() || args.stdin {
+        return Err(AppError::usage(
+            "workflow",
+            "Execution input is only passed to a configured external backend.",
+        )
+        .with_suggestion(
+            "Remove --input/--input-file/--stdin, or configure an execute backend in n8n.toml.",
+        ));
+    }
+
+    // Neither route is available: name both remedies rather than only the one
+    // whichever resolver happened to fail first.
+    if resolve_session_cookie(alias, "workflow")?.is_none()
+        || resolve_browser_id(alias, "workflow")?.is_none()
+    {
+        return Err(AppError::config(
+            "workflow",
+            format!(
+                "Cannot execute on `{alias}`: no execute backend is configured, \
+                 and no session auth is stored for the internal REST fallback."
+            ),
+        )
+        .with_suggestion(format!(
+            "{} Or run `n8nc auth session add {alias}` to execute through n8n's \
+             internal REST API, the same call the editor's Execute Workflow button makes. \
+             Use `n8nc trigger <webhook-url>` for webhook-triggered workflows.",
+            execute_backend_setup_hint(alias)
+        )));
+    }
+
+    let (session_cookie, browser_id) = require_session_auth(alias, "workflow")?;
+    let (client, _, _) = remote_client(repo, Some(alias), "workflow")?;
+    let workflow = client.resolve_workflow(&args.identifier).await?;
+    let wf_id = workflow_id(&workflow).ok_or_else(|| {
+        AppError::api(
+            "workflow",
+            "api.invalid_response",
+            "Resolved workflow response was missing `id`.",
+        )
+    })?;
+
+    let trigger_node = find_manual_trigger(&workflow).ok_or_else(|| {
+        AppError::validation(
+            "workflow",
+            format!("Workflow `{wf_id}` has no manual trigger to start from."),
+        )
+        .with_suggestion(
+            "Use `n8nc trigger <webhook-url>` for webhook-triggered workflows, or add a Manual Trigger node.",
+        )
+    })?;
+
+    let execution_id = client
+        .run_workflow_rest_session(
+            &wf_id,
+            &workflow,
+            &trigger_node,
+            &session_cookie,
+            &browser_id,
+        )
+        .await?;
+
+    if args.no_wait {
+        return emit_execute_result(context, &wf_id, &trigger_node, &execution_id, None, false);
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(args.timeout.max(1) as u64);
+    loop {
+        let execution = client.get_execution(&execution_id, false).await?;
+        if let Some(execution) = execution {
+            let finished = execution
+                .get("finished")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let status = value_string(&execution, "status");
+            let settled =
+                finished || matches!(status.as_deref(), Some("success" | "error" | "crashed"));
+            if settled {
+                if matches!(status.as_deref(), Some("error" | "crashed")) {
+                    return Err(AppError::api(
+                        "workflow",
+                        "api.execution_failed",
+                        format!(
+                            "Execution {execution_id} finished with status `{}`.",
+                            status.as_deref().unwrap_or("error")
+                        ),
+                    )
+                    .with_suggestion(format!(
+                        "Inspect it with `n8nc runs get {execution_id} --summary`."
+                    )));
+                }
+                return emit_execute_result(
+                    context,
+                    &wf_id,
+                    &trigger_node,
+                    &execution_id,
+                    status.as_deref(),
+                    true,
+                );
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Err(AppError::api(
+                "workflow",
+                "api.execution_timeout",
+                format!(
+                    "Execution {execution_id} did not finish within {}s.",
+                    args.timeout
+                ),
+            )
+            .with_suggestion(format!(
+                "It may still be running. Check `n8nc runs get {execution_id}`, or pass --no-wait."
+            )));
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn emit_execute_result(
+    context: &Context,
+    workflow_id: &str,
+    trigger_node: &str,
+    execution_id: &str,
+    status: Option<&str>,
+    finished: bool,
+) -> Result<(), AppError> {
+    if context.json {
+        return emit_json(
+            "workflow",
+            &json!({
+                "backend": "rest-session",
+                "workflow_id": workflow_id,
+                "trigger_node": trigger_node,
+                "execution_id": execution_id,
+                "status": status,
+                "finished": finished,
+            }),
+        );
+    }
+    println!("Started execution {execution_id} from `{trigger_node}`");
+    match status {
+        Some(status) => println!("Status: {status}"),
+        None => println!("Not waiting for the result (--no-wait)."),
+    }
+    Ok(())
+}
+
 pub(crate) async fn cmd_workflow(context: &Context, args: WorkflowArgs) -> Result<(), AppError> {
     match args.command {
         WorkflowCommand::New(args) => cmd_workflow_new(context, args).await,
@@ -351,21 +527,16 @@ async fn cmd_workflow_execute(
 ) -> Result<(), AppError> {
     let repo = load_loaded_repo(context)?;
     let alias = resolve_instance_alias(&repo, args.remote.instance.as_deref(), "workflow")?;
-    let execute_config = repo
+    let Some(execute_config) = repo
         .config
         .instances
         .get(&alias)
         .and_then(|instance| instance.execute.as_ref())
-        .ok_or_else(|| {
-            AppError::config(
-                "workflow",
-                format!("No workflow execute backend is configured for `{alias}`."),
-            )
-            .with_suggestion(format!(
-                "{} Use `n8nc trigger <webhook-url>` for webhook-triggered workflows.",
-                execute_backend_setup_hint(&alias)
-            ))
-        })?;
+    else {
+        // No external adapter. The public API has no run endpoint, so fall back
+        // to the internal REST session, which is what the editor itself calls.
+        return execute_via_rest_session(context, &repo, &alias, args).await;
+    };
     probe_execute_backend(&repo.root, execute_config, "workflow").map_err(|err| {
         AppError::config(
             "workflow",

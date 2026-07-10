@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::{
     api::{ApiClient, ListOptions},
-    auth::{ensure_alias_exists, resolve_token},
+    auth::{ensure_alias_exists, resolve_browser_id, resolve_session_cookie, resolve_token},
     cli::DoctorArgs,
     cmd::credential::probe_credential_inventory_capability,
     config::LoadedRepo,
@@ -322,15 +322,42 @@ async fn build_doctor_report(
                     ),
                 }
             }
-            None => add_doctor_check(
-                &mut checks,
-                DoctorCheckStatus::Skip,
-                "instance",
-                Some(alias.clone()),
-                "workflow_execute",
-                "No workflow execute backend configured. Non-webhook execution is unavailable, but `trigger` still works for webhook URLs.",
-                None,
-            ),
+            // No external adapter. `workflow execute` falls back to n8n's
+            // internal REST API, which needs session auth, so report which of
+            // the two the instance can actually do.
+            None => {
+                let has_session = resolve_session_cookie(&alias, "doctor")
+                    .ok()
+                    .flatten()
+                    .is_some()
+                    && resolve_browser_id(&alias, "doctor")
+                        .ok()
+                        .flatten()
+                        .is_some();
+                if has_session {
+                    add_doctor_check(
+                        &mut checks,
+                        DoctorCheckStatus::Ok,
+                        "instance",
+                        Some(alias.clone()),
+                        "workflow_execute",
+                        "No external backend configured; using the internal REST session fallback.",
+                        None,
+                    )
+                } else {
+                    add_doctor_check(
+                        &mut checks,
+                        DoctorCheckStatus::Skip,
+                        "instance",
+                        Some(alias.clone()),
+                        "workflow_execute",
+                        "No execute backend and no session auth. Non-webhook execution is unavailable, but `trigger` still works for webhook URLs.",
+                        Some(format!(
+                            "Run `n8nc auth session add {alias}` to execute through n8n's internal REST API."
+                        )),
+                    )
+                }
+            }
         }
 
         if args.skip_network {

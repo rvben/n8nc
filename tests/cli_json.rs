@@ -6952,3 +6952,239 @@ async fn runs_stats_with_no_executions_reports_no_gap() {
     );
     assert!(data["first"].is_null());
 }
+
+// ---------------------------------------------------------------------------
+// workflow execute against a stock n8n, via the internal REST session.
+//
+// The public API has no run endpoint (405), so a manual-trigger workflow was
+// unreachable from the CLI without configuring an external adapter. The editor
+// calls POST /rest/workflows/:id/run, and n8nc already speaks that protocol for
+// archive/unarchive.
+// ---------------------------------------------------------------------------
+
+fn manual_trigger_workflow() -> Value {
+    json!({
+        "id": "wf-1",
+        "name": "Alpha",
+        "active": false,
+        "nodes": [
+            {"id": "t1", "name": "Manual Trigger", "type": "n8n-nodes-base.manualTrigger",
+             "typeVersion": 1, "position": [0, 0], "parameters": {}},
+            {"id": "n1", "name": "Code", "type": "n8n-nodes-base.code",
+             "typeVersion": 2, "position": [200, 0], "parameters": {"jsCode": "return items;"}}
+        ],
+        "connections": {}
+    })
+}
+
+/// The run payload must name the trigger to start from and echo the workflow id.
+#[derive(Debug)]
+struct RunPayloadMatcher;
+
+impl Match for RunPayloadMatcher {
+    fn matches(&self, request: &Request) -> bool {
+        let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
+            return false;
+        };
+        body["workflowData"]["id"] == json!("wf-1")
+            && body["triggerToStartFrom"]["name"] == json!("Manual Trigger")
+    }
+}
+
+async fn mount_manual_trigger_workflow(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(manual_trigger_workflow()))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn workflow_execute_runs_through_the_internal_rest_session() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_manual_trigger_workflow(&server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/rest/workflows/wf-1/run"))
+        .and(header("cookie", "n8n-auth=session-cookie"))
+        .and(header("browser-id", "browser-123"))
+        .and(RunPayloadMatcher)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"executionId": "4321"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .env("N8NC_SESSION_COOKIE_MOCK", "n8n-auth=session-cookie")
+        .env("N8NC_BROWSER_ID_MOCK", "browser-123")
+        .args([
+            "workflow",
+            "execute",
+            "--instance",
+            "mock",
+            "wf-1",
+            "--no-wait",
+        ])
+        .output()
+        .expect("run workflow execute");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["data"]["execution_id"], "4321");
+    assert_eq!(envelope["data"]["backend"], "rest-session");
+    assert_eq!(envelope["data"]["trigger_node"], "Manual Trigger");
+}
+
+#[tokio::test]
+async fn workflow_execute_waits_for_the_result_by_default() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_manual_trigger_workflow(&server).await;
+
+    Mock::given(method("POST"))
+        .and(path("/rest/workflows/wf-1/run"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"executionId": "4321"}})),
+        )
+        .mount(&server)
+        .await;
+    // n8n returns before the run finishes, so the result comes from polling.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions/4321"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "4321", "status": "success", "finished": true,
+            "startedAt": "2026-07-10T12:00:00.000Z", "stoppedAt": "2026-07-10T12:00:02.000Z"
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .env("N8NC_SESSION_COOKIE_MOCK", "n8n-auth=session-cookie")
+        .env("N8NC_BROWSER_ID_MOCK", "browser-123")
+        .args(["workflow", "execute", "--instance", "mock", "wf-1"])
+        .output()
+        .expect("run workflow execute");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["data"]["execution_id"], "4321");
+    assert_eq!(envelope["data"]["status"], "success");
+    assert_eq!(envelope["data"]["finished"], true);
+}
+
+#[tokio::test]
+async fn workflow_execute_reports_a_failed_run_as_an_error() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_manual_trigger_workflow(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/rest/workflows/wf-1/run"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"executionId": "9"}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions/9"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "9", "status": "error", "finished": true
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .env("N8NC_SESSION_COOKIE_MOCK", "n8n-auth=session-cookie")
+        .env("N8NC_BROWSER_ID_MOCK", "browser-123")
+        .args(["workflow", "execute", "--instance", "mock", "wf-1"])
+        .output()
+        .expect("run workflow execute");
+
+    assert!(
+        !output.status.success(),
+        "a failed execution must not exit 0"
+    );
+    let envelope = parse_json(&output.stderr);
+    assert_eq!(envelope["error"]["kind"], "api");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("error")
+    );
+}
+
+#[tokio::test]
+async fn workflow_execute_without_session_auth_explains_how_to_configure_it() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_manual_trigger_workflow(&server).await;
+
+    let output = base_command(repo.path())
+        .args(["workflow", "execute", "--instance", "mock", "wf-1"])
+        .output()
+        .expect("run workflow execute");
+
+    // Neither route configured: a config error naming both remedies.
+    assert_eq!(output.status.code(), Some(3));
+    let envelope = parse_json(&output.stderr);
+    let hint = envelope["error"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("auth session add"),
+        "should offer the session route: {hint}"
+    );
+    assert!(
+        hint.contains("[instances.mock.execute]"),
+        "should offer the backend route: {hint}"
+    );
+}
+
+#[tokio::test]
+async fn workflow_execute_without_a_manual_trigger_is_a_clear_error() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "wf-1", "name": "Hooked", "active": true,
+            "nodes": [{"id": "w", "name": "Hook", "type": "n8n-nodes-base.webhook",
+                       "typeVersion": 2, "position": [0, 0], "parameters": {}}],
+            "connections": {}
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .env("N8NC_SESSION_COOKIE_MOCK", "n8n-auth=session-cookie")
+        .env("N8NC_BROWSER_ID_MOCK", "browser-123")
+        .args(["workflow", "execute", "--instance", "mock", "wf-1"])
+        .output()
+        .expect("run workflow execute");
+
+    assert!(!output.status.success());
+    let envelope = parse_json(&output.stderr);
+    let message = envelope["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("manual trigger"), "{message}");
+    assert!(
+        envelope["error"]["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("trigger"),
+        "should point at `n8nc trigger` for webhook workflows"
+    );
+}

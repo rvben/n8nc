@@ -13,7 +13,7 @@ It is intentionally narrower than the original brainstorm. The tool is now speci
 - fetching one or all workflows into canonical local artifacts
 - creating local workflow drafts and editing local workflow JSON structurally
 - creating a remote workflow from a local file and converting it into a tracked artifact
-- executing non-webhook workflows through a configured external backend
+- executing non-webhook workflows, through a configured external backend or n8n's internal REST API
 - validating and formatting local workflow files
 - pushing a tracked workflow back safely
 - activating and deactivating workflows
@@ -23,7 +23,7 @@ It is intentionally narrower than the original brainstorm. The tool is now speci
 
 - promoting a workflow across multiple environments
 - remapping credential IDs or project bindings between instances
-- built-in non-webhook execution through a stable public n8n API
+- non-webhook execution through a *stable* public n8n API (none exists; the internal REST route is used instead)
 
 ## 2. Command Surface
 
@@ -196,7 +196,7 @@ Failure behavior:
 
 `instance.credential_inventory` reports whether full credential inventory is available through the public API, available only through the opt-in internal REST fallback, or limited to workflow-reference coverage.
 
-`instance.workflow_execute` reports whether a configured non-webhook execute backend is runnable. It is skipped when no backend is configured for that instance.
+`instance.workflow_execute` reports whether non-webhook execution is available: through a configured backend, or through the internal REST session fallback when session auth is stored. It is skipped only when neither is available.
 
 ## 5. API Assumptions
 
@@ -222,7 +222,14 @@ The execution commands currently assume these endpoints exist and are reachable 
 
 `trigger` does not use the public API. It makes a direct HTTP request to a full URL or a path resolved against the configured instance base URL.
 
-`workflow execute` also does not use the public API. It resolves the workflow through the public API, then hands execution off to a configured local backend such as an MCP runner or other adapter command.
+`workflow execute` resolves the workflow through the public API, then runs it one of two ways:
+
+1. Through a configured local backend (`[instances.<alias>.execute]`), such as an MCP runner or other adapter command.
+2. Otherwise through n8n's **internal REST API**, `POST /rest/workflows/:id/run`, authenticated with the stored session cookie and browser id. This is the same call the editor's Execute Workflow button makes, because the public API has no run endpoint (`POST /api/v1/workflows/:id/run` returns `405`).
+
+The internal route is not part of n8n's public API surface and carries no stability guarantee: its request shape changed between n8n 1.x and 2.x. n8nc sends `workflowData` plus `triggerToStartFrom`, which both accept. The workflow must have a Manual Trigger node; anything else is reported as such, pointing at `n8nc trigger` for webhook workflows.
+
+n8n registers the run and returns an `executionId` before the workflow finishes, so `workflow execute` polls the public executions API until it settles. `--no-wait` returns as soon as the run is registered, and `--timeout <SECONDS>` bounds the wait (default 300). A run that finishes with status `error` or `crashed` exits non-zero.
 
 ## 6. Canonical Workflow Artifact
 

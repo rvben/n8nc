@@ -415,6 +415,78 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Runs a workflow through n8n's internal REST API, the same call the editor
+    /// makes when you press Execute Workflow.
+    ///
+    /// The public API has no run endpoint (`POST /api/v1/workflows/:id/run` is a
+    /// 405), so a manual-trigger workflow is otherwise unreachable from a CLI.
+    /// This path is internal to n8n and carries no stability guarantee: the
+    /// request shape changed between 1.x and 2.x. `workflowData` plus
+    /// `triggerToStartFrom` is accepted by both.
+    ///
+    /// n8n returns as soon as the run is registered, not when it finishes, so
+    /// the caller polls the public executions API for the result.
+    pub async fn run_workflow_rest_session(
+        &self,
+        workflow_id: &str,
+        workflow_data: &Value,
+        trigger_node: &str,
+        session_cookie: &str,
+        browser_id: &str,
+    ) -> Result<String, AppError> {
+        let body = json!({
+            "workflowData": workflow_data,
+            "triggerToStartFrom": { "name": trigger_node },
+        });
+        let path = format!("workflows/{workflow_id}/run");
+        let response = self
+            .request_rest_json_optional(
+                Method::POST,
+                &path,
+                &[],
+                Some(&body),
+                session_cookie,
+                browser_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                AppError::not_found(
+                    self.command,
+                    format!("Workflow `{workflow_id}` was not found on the instance."),
+                )
+            })?;
+
+        let payload = response.get("data").unwrap_or(&response);
+
+        if payload
+            .get("waitingForWebhook")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(AppError::api(
+                self.command,
+                "api.waiting_for_webhook",
+                "n8n is waiting for a webhook call rather than running the workflow.",
+            )
+            .with_suggestion("Use `n8nc trigger <webhook-url>` for webhook-triggered workflows."));
+        }
+
+        payload
+            .get("executionId")
+            .and_then(|id| {
+                id.as_str()
+                    .map(ToOwned::to_owned)
+                    .or_else(|| id.as_i64().map(|n| n.to_string()))
+            })
+            .ok_or_else(|| {
+                AppError::api(
+                    self.command,
+                    "api.invalid_response",
+                    "n8n did not return an executionId for the manual run.",
+                )
+            })
+    }
+
     pub async fn unarchive_workflow(
         &self,
         workflow_id: &str,

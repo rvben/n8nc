@@ -232,7 +232,10 @@ pub(crate) async fn cmd_archive(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn require_session_auth(alias: &str, command: &'static str) -> Result<(String, String), AppError> {
+pub(crate) fn require_session_auth(
+    alias: &str,
+    command: &'static str,
+) -> Result<(String, String), AppError> {
     let cookie = resolve_session_cookie(alias, command)?
         .ok_or_else(|| {
             AppError::auth(

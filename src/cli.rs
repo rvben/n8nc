@@ -483,6 +483,12 @@ pub struct WorkflowExecuteArgs {
     /// Read JSON or plain-text input from stdin
     #[arg(long, conflicts_with_all = ["input", "input_file"])]
     pub stdin: bool,
+    /// Return as soon as the run is registered, without waiting for its result
+    #[arg(long)]
+    pub no_wait: bool,
+    /// How long to wait for the execution to finish, in seconds
+    #[arg(long, default_value_t = 300, value_name = "SECONDS")]
+    pub timeout: u32,
 }
 
 #[derive(Debug, Args)]
