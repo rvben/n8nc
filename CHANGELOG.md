@@ -15,6 +15,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.5.1](https://github.com/rvben/n8nc/compare/v0.5.0...v0.5.1) - 2026-07-10
+
+### Added
+
+- **node**: read `node set` values from a file ([110155d](https://github.com/rvben/n8nc/commit/110155d3963fad99f370e25c675e2daf77df101f))
+- **runs**: add --summary, --node, and --explain projections ([b9232d0](https://github.com/rvben/n8nc/commit/b9232d04468ae9c4256d88d722fef602d3bcf651))
+
+### Fixed
+
+- **api**: stop over-reporting truncation and warn in ls text output ([afda670](https://github.com/rvben/n8nc/commit/afda670d3d9f482c90d20328fd6996f9d2f5fe32))
+- **api**: paginate past the page cap instead of truncating in silence ([5614023](https://github.com/rvben/n8nc/commit/56140233a3da4d2df619da47e503ee32462a2151))
+
 ## [0.5.0](https://github.com/rvben/n8nc/compare/v0.4.7...v0.5.0) - 2026-07-01
 
 ### Added
