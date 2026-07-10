@@ -66,6 +66,7 @@ fn is_mutating(path: &str) -> bool {
             | "auth session remove"
             | "node add"
             | "node set"
+            | "node set-remote"
             | "node rename"
             | "node rm"
             | "conn add"

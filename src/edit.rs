@@ -492,6 +492,29 @@ pub fn default_workflow_settings() -> Value {
     })
 }
 
+/// Applies a `node set` edit to an in-memory workflow.
+///
+/// The remote one-shot edit runs the exact same mutation as the local file
+/// path, so `node set` and `node set-remote` cannot drift in behaviour.
+pub fn apply_node_value(
+    workflow: &mut Value,
+    command: &'static str,
+    node_name: &str,
+    raw_path: &str,
+    value: Value,
+) -> Result<(), AppError> {
+    let normalized_path = normalize_node_path(command, raw_path)?;
+    let tokens = parse_path(command, &normalized_path)?;
+
+    let node = find_node_mut(workflow, node_name, command)?;
+    let previous_path = webhook_path(node);
+    set_path_value(command, node, &tokens, value)?;
+    if normalized_path == "parameters.path" {
+        sync_webhook_node_after_path_change(node, previous_path.as_deref())?;
+    }
+    Ok(())
+}
+
 fn set_node_value_inner(
     path: &Path,
     command: &'static str,
@@ -499,17 +522,8 @@ fn set_node_value_inner(
     raw_path: &str,
     value: Value,
 ) -> Result<EditResult, AppError> {
-    let normalized_path = normalize_node_path(command, raw_path)?;
-    let tokens = parse_path(command, &normalized_path)?;
-
     mutate_workflow(path, command, move |workflow| {
-        let node = find_node_mut(workflow, node_name, command)?;
-        let previous_path = webhook_path(node);
-        set_path_value(command, node, &tokens, value.clone())?;
-        if normalized_path == "parameters.path" {
-            sync_webhook_node_after_path_change(node, previous_path.as_deref())?;
-        }
-        Ok(())
+        apply_node_value(workflow, command, node_name, raw_path, value.clone())
     })
 }
 

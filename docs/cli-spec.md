@@ -502,6 +502,20 @@ The three are mutually exclusive. On a 52 KB production workflow, `--node` retur
 
 These mirror `runs get --summary` / `--node`, which do the same for executions.
 
+## 11b. Remote One-Shot Edits
+
+`node set-remote <workflow> <node> <path> <value>` edits one node on a remote workflow without making it a tracked artifact. It takes the same node, path and value syntax as `node set`, including `--value-file` for multiline bodies, and runs the identical in-memory mutation, so the two cannot drift apart.
+
+The write is guarded:
+
+- **Lease.** The workflow is re-read immediately before writing. If it changed on the remote since it was read, the command exits `12` (conflict) rather than overwriting a concurrent edit.
+- **Mutable fields only.** The payload goes through the same `workflow_update_payload` that `push` uses, so `id`, `active` and timestamps are never sent.
+- **Active is preserved.** n8n's update endpoint can return the workflow with `active` cleared. When that happens the workflow is reactivated and `reactivated: true` is reported.
+- **No-op writes nothing.** If the value already matches, no `PUT` is issued and `changed: false` is reported.
+- `--dry-run` reports the change without writing.
+
+This exists because the safe path (`pull` -> `node set` -> `push --verify`) requires tracking the workflow in a repo. For a one-off fix to a workflow you do not want to track, that ceremony pushes people into hand-rolled `PUT /api/v1/workflows/:id` calls, which is exactly where `active` gets silently dropped.
+
 ## 12a. Lint Rules
 
 `lint` checks tracked workflow files against configurable rules. Severities are `off`, `warn`, or `error`, set per rule in `n8n.toml`. Any diagnostic at `error` fails the command.

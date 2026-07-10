@@ -6328,3 +6328,409 @@ async fn get_projections_are_mutually_exclusive() {
         "--nodes and --connections must conflict"
     );
 }
+
+// ---------------------------------------------------------------------------
+// node set-remote: a one-shot remote edit.
+//
+// Changing one code node on an untracked workflow otherwise means hand-rolling
+// `PUT /api/v1/workflows/:id`, remembering to send only the mutable fields and
+// to re-check that `active` survived. That bypass is where a production
+// workflow silently gets deactivated.
+// ---------------------------------------------------------------------------
+
+fn remote_workflow(js: &str, active: bool) -> Value {
+    json!({
+        "id": "wf-1",
+        "name": "Alpha",
+        "active": active,
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "nodes": [{
+            "id": "n1",
+            "name": "Last 9",
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": [0, 0],
+            "parameters": {"jsCode": js}
+        }],
+        "connections": {},
+        "settings": {"executionOrder": "v1"}
+    })
+}
+
+#[tokio::test]
+async fn node_set_remote_updates_the_node_and_preserves_active() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(remote_workflow("old();", true)))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(remote_workflow("new();", true)))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "node",
+            "set-remote",
+            "--instance",
+            "mock",
+            "wf-1",
+            "Last 9",
+            "jsCode",
+            "new();",
+        ])
+        .output()
+        .expect("run node set-remote");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["data"]["changed"], true);
+    assert_eq!(envelope["data"]["workflow_id"], "wf-1");
+    assert_eq!(envelope["data"]["node"], "Last 9");
+    assert_eq!(envelope["data"]["active"], true);
+}
+
+#[tokio::test]
+async fn node_set_remote_sends_only_mutable_fields() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(remote_workflow("old();", false)))
+        .mount(&server)
+        .await;
+    // `id`, `active` and `createdAt` are read-only on the update endpoint.
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .and(MissingBodyKey("id"))
+        .and(MissingBodyKey("active"))
+        .and(MissingBodyKey("createdAt"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(remote_workflow("new();", false)))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "node",
+            "set-remote",
+            "--instance",
+            "mock",
+            "wf-1",
+            "Last 9",
+            "jsCode",
+            "new();",
+        ])
+        .output()
+        .expect("run node set-remote");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn node_set_remote_is_a_no_op_when_the_value_already_matches() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(remote_workflow("same();", true)))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "node",
+            "set-remote",
+            "--instance",
+            "mock",
+            "wf-1",
+            "Last 9",
+            "jsCode",
+            "same();",
+        ])
+        .output()
+        .expect("run node set-remote");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["data"]["changed"], false);
+}
+
+#[tokio::test]
+async fn node_set_remote_dry_run_writes_nothing() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(remote_workflow("old();", true)))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "node",
+            "set-remote",
+            "--instance",
+            "mock",
+            "wf-1",
+            "Last 9",
+            "jsCode",
+            "new();",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run node set-remote --dry-run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["data"]["dry_run"], true);
+    assert_eq!(envelope["data"]["changed"], true);
+}
+
+#[tokio::test]
+async fn node_set_remote_unknown_node_is_not_found() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(remote_workflow("old();", true)))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "node",
+            "set-remote",
+            "--instance",
+            "mock",
+            "wf-1",
+            "Nope",
+            "jsCode",
+            "x",
+        ])
+        .output()
+        .expect("run node set-remote");
+
+    assert_eq!(output.status.code(), Some(11));
+}
+
+#[tokio::test]
+async fn node_set_remote_reads_a_multiline_value_from_a_file() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    let body = "const rows = $input.all();\nreturn rows.slice(-9);\n";
+    let value_path = repo.path().join("body.js");
+    fs::write(&value_path, body).expect("write value file");
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(remote_workflow("old();", false)))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(remote_workflow(body, false)))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "node",
+            "set-remote",
+            "--instance",
+            "mock",
+            "wf-1",
+            "Last 9",
+            "jsCode",
+            "--value-file",
+        ])
+        .arg(&value_path)
+        .output()
+        .expect("run node set-remote --value-file");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["data"]["changed"], true);
+}
+
+/// Asserts the request body has no such top-level key.
+#[derive(Debug)]
+struct MissingBodyKey(&'static str);
+
+impl Match for MissingBodyKey {
+    fn matches(&self, request: &Request) -> bool {
+        let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
+            return false;
+        };
+        body.get(self.0).is_none()
+    }
+}
+
+/// Returns a different workflow on the second GET, simulating a concurrent edit
+/// landing between the read and the write.
+#[derive(Debug)]
+struct DriftingWorkflow {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Respond for DriftingWorkflow {
+    fn respond(&self, _: &Request) -> ResponseTemplate {
+        let nth = self.calls.fetch_add(1, Ordering::SeqCst);
+        let js = if nth == 0 {
+            "old();"
+        } else {
+            "someone_else();"
+        };
+        ResponseTemplate::new(200).set_body_json(remote_workflow(js, true))
+    }
+}
+
+#[tokio::test]
+async fn node_set_remote_refuses_when_the_remote_changed_under_it() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(DriftingWorkflow {
+            calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "node",
+            "set-remote",
+            "--instance",
+            "mock",
+            "wf-1",
+            "Last 9",
+            "jsCode",
+            "new();",
+        ])
+        .output()
+        .expect("run node set-remote");
+
+    assert_eq!(
+        output.status.code(),
+        Some(12),
+        "remote drift must be a conflict"
+    );
+    let envelope = parse_json(&output.stderr);
+    assert_eq!(envelope["error"]["kind"], "conflict");
+}
+
+/// GET always reports active; the PUT response clears it, as n8n's update
+/// endpoint can. The command must notice and restore it.
+#[derive(Debug)]
+struct ClearsActiveOnPut;
+
+impl Respond for ClearsActiveOnPut {
+    fn respond(&self, _: &Request) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(remote_workflow("new();", false))
+    }
+}
+
+#[tokio::test]
+async fn node_set_remote_reactivates_when_the_update_clears_active() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(remote_workflow("old();", true)))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ClearsActiveOnPut)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/wf-1/activate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(remote_workflow("new();", true)))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "node",
+            "set-remote",
+            "--instance",
+            "mock",
+            "wf-1",
+            "Last 9",
+            "jsCode",
+            "new();",
+        ])
+        .output()
+        .expect("run node set-remote");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    assert_eq!(envelope["data"]["active"], true);
+    assert_eq!(envelope["data"]["reactivated"], true);
+}

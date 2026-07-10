@@ -515,6 +515,9 @@ pub enum NodeCommand {
     Add(NodeAddArgs),
     /// Set a node field or parameter path
     Set(NodeSetArgs),
+    /// Set a node field directly on a remote workflow, without tracking it
+    #[command(name = "set-remote")]
+    SetRemote(NodeSetRemoteArgs),
     /// Rename a node and rewrite connection references
     Rename(NodeRenameArgs),
     /// Remove a node and all of its connections
@@ -568,6 +571,29 @@ pub struct NodeSetArgs {
     /// bodies such as a `code` node's `jsCode`, which argv quoting mangles.
     #[arg(long, value_name = "PATH", conflicts_with = "value")]
     pub value_file: Option<PathBuf>,
+    #[command(flatten)]
+    pub mode: ValueModeArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct NodeSetRemoteArgs {
+    #[command(flatten)]
+    pub remote: RemoteArgs,
+    /// Remote workflow ID or exact workflow name.
+    pub workflow: String,
+    /// Target node, matched by its display name first, then by its `id`.
+    pub node: String,
+    /// Field to set, using the same path syntax as `node set`.
+    pub path: String,
+    /// Value to assign; treated as a string unless a typing flag is given.
+    #[arg(required_unless_present_any = ["null", "value_file"])]
+    pub value: Option<String>,
+    /// Read the value from a file instead of argv, for multiline bodies.
+    #[arg(long, value_name = "PATH", conflicts_with = "value")]
+    pub value_file: Option<PathBuf>,
+    /// Report the change without writing it.
+    #[arg(long)]
+    pub dry_run: bool,
     #[command(flatten)]
     pub mode: ValueModeArgs,
 }
