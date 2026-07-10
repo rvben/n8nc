@@ -16,6 +16,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
 
+
+## [0.5.2](https://github.com/rvben/n8nc/compare/v0.5.1...v0.5.2) - 2026-07-10
+
+### Added
+
+- **workflow**: execute through n8n's internal REST when no backend is configured ([797a5d1](https://github.com/rvben/n8nc/commit/797a5d1797e88454d32e5a0749a0a2adf920597b))
+- **runs**: add stats --status, --by workflow, and cadence gaps ([702efaa](https://github.com/rvben/n8nc/commit/702efaac44bf26d13ebb6273486679f16af19e3c))
+- **node**: add set-remote for one-shot edits on untracked workflows ([64d0f2a](https://github.com/rvben/n8nc/commit/64d0f2acb5588819f93a939a7eff831792c5cf03))
+- **get**: add --node, --nodes and --connections projections ([c88d458](https://github.com/rvben/n8nc/commit/c88d458c919498e141c40a8f888d64c718a54dce))
+- **lint**: add params-match-type-version rule ([4d962f3](https://github.com/rvben/n8nc/commit/4d962f328302075727f0e2fa585bac81e7f55101))
+
+### Fixed
+
+- **workflow**: do not exit 0 when an execution did not succeed ([b0fbf4c](https://github.com/rvben/n8nc/commit/b0fbf4c4c6db8ce21887ce2f13fa2d034c0722e0))
+- **remote**: stop canonicalization from deleting node parameters ([a43393c](https://github.com/rvben/n8nc/commit/a43393c1fd5dcc7679249a42d436a576d1e84f1a))
+- **runs**: stop shipping the run payload twice in get --details ([0c3e2c0](https://github.com/rvben/n8nc/commit/0c3e2c0b3930507da8d5cfd8eb4ff0ed4654e61d))
+
 ## [0.5.1](https://github.com/rvben/n8nc/compare/v0.5.0...v0.5.1) - 2026-07-10
 
 ### Added
