@@ -516,6 +516,26 @@ The write is guarded:
 
 This exists because the safe path (`pull` -> `node set` -> `push --verify`) requires tracking the workflow in a repo. For a one-off fix to a workflow you do not want to track, that ceremony pushes people into hand-rolled `PUT /api/v1/workflows/:id` calls, which is exactly where `active` gets silently dropped.
 
+## 13a. Execution Statistics
+
+`runs stats [workflow]` aggregates every execution in the window. It never samples: pagination walks each page, so the totals cannot be computed from a truncated set.
+
+- `--status <STATUS>` filters server-side, so `--status error` aggregates only failures.
+- `--by workflow` breaks the window down per workflow, **ranked by failures first**. That answers "which workflow is failing" in one call rather than by paginating executions by hand.
+- Cadence is always reported: `first`, `last`, and the largest interval between consecutive executions as `max_gap_ms` with its `max_gap_from` / `max_gap_to` endpoints.
+
+Cadence turns a monitoring workflow into an outage detector. A heartbeat running every five minutes, with a gap of a hundred, means the instance was down:
+
+```
+$ n8nc runs stats <heartbeat-id> --last 7d
+Cadence:
+  First: 2026-07-03T14:30:19.000Z
+  Last:  2026-07-10T14:25:54.000Z
+  Largest gap: 1h 40m (2026-07-05T09:35:19.000Z -> 2026-07-05T11:15:54.000Z)
+```
+
+With no executions in the window, `first`, `last` and `max_gap_ms` are absent rather than zero: nothing ran and a gap of zero are different facts.
+
 ## 12a. Lint Rules
 
 `lint` checks tracked workflow files against configurable rules. Severities are `off`, `warn`, or `error`, set per rule in `n8n.toml`. Any diagnostic at `error` fails the command.

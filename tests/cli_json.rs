@@ -6734,3 +6734,221 @@ async fn node_set_remote_reactivates_when_the_update_clears_active() {
     assert_eq!(envelope["data"]["active"], true);
     assert_eq!(envelope["data"]["reactivated"], true);
 }
+
+// ---------------------------------------------------------------------------
+// runs stats: triage and cadence.
+//
+// "Which workflow is failing" required hand-paginating the raw API, and the
+// 2026-07-05 outage was found by hand-computing gaps between a 5-minute
+// heartbeat workflow's executions. `runs stats` already fetches every execution
+// in the window; it should answer both.
+// ---------------------------------------------------------------------------
+
+fn execution_at(id: &str, wf: &str, status: &str, started: &str) -> Value {
+    json!({
+        "id": id,
+        "workflowId": wf,
+        "status": status,
+        "mode": "trigger",
+        "startedAt": started,
+        "stoppedAt": started
+    })
+}
+
+#[tokio::test]
+async fn runs_stats_reports_the_largest_cadence_gap() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    // A 5-minute heartbeat with one 100-minute hole, newest first.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                execution_at("4", "wf-1", "success", "2100-07-05T11:15:00.000Z"),
+                execution_at("3", "wf-1", "success", "2100-07-05T09:35:00.000Z"),
+                execution_at("2", "wf-1", "success", "2100-07-05T09:30:00.000Z"),
+                execution_at("1", "wf-1", "success", "2100-07-05T09:25:00.000Z")
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(workflow_fixture(
+            "wf-1",
+            "Heartbeat",
+            true,
+        )))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "runs",
+            "stats",
+            "--instance",
+            "mock",
+            "--since",
+            "2000-01-01T00:00:00Z",
+        ])
+        .output()
+        .expect("run runs stats");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope = parse_json(&output.stdout);
+    let data = &envelope["data"];
+    assert_eq!(data["total"], 4);
+    assert_eq!(data["first"], "2100-07-05T09:25:00.000Z");
+    assert_eq!(data["last"], "2100-07-05T11:15:00.000Z");
+    assert_eq!(data["max_gap_ms"], 100 * 60 * 1000);
+    assert_eq!(data["max_gap_from"], "2100-07-05T09:35:00.000Z");
+    assert_eq!(data["max_gap_to"], "2100-07-05T11:15:00.000Z");
+}
+
+#[tokio::test]
+async fn runs_stats_by_workflow_groups_and_ranks_by_failures() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                execution_at("1", "wf-quiet", "success", "2100-07-05T10:00:00.000Z"),
+                execution_at("2", "wf-quiet", "success", "2100-07-05T10:01:00.000Z"),
+                execution_at("3", "wf-quiet", "success", "2100-07-05T10:02:00.000Z"),
+                execution_at("4", "wf-noisy", "error", "2100-07-05T10:03:00.000Z"),
+                execution_at("5", "wf-noisy", "error", "2100-07-05T10:04:00.000Z")
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-quiet"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workflow_fixture("wf-quiet", "Quiet", true)),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-noisy"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(workflow_fixture(
+            "wf-noisy",
+            "Restart Alert",
+            true,
+        )))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "runs",
+            "stats",
+            "--instance",
+            "mock",
+            "--since",
+            "2000-01-01T00:00:00Z",
+            "--by",
+            "workflow",
+        ])
+        .output()
+        .expect("run runs stats --by workflow");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let groups = parse_json(&output.stdout)["data"]["groups"]
+        .as_array()
+        .expect("groups")
+        .clone();
+    assert_eq!(groups.len(), 2);
+    // The failing workflow comes first: that is the triage question.
+    assert_eq!(groups[0]["workflow_id"], "wf-noisy");
+    assert_eq!(groups[0]["workflow_name"], "Restart Alert");
+    assert_eq!(groups[0]["failed"], 2);
+    assert_eq!(groups[0]["total"], 2);
+    assert_eq!(groups[1]["workflow_id"], "wf-quiet");
+    assert_eq!(groups[1]["failed"], 0);
+    assert_eq!(groups[1]["total"], 3);
+}
+
+#[tokio::test]
+async fn runs_stats_status_filter_reaches_the_api() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .and(query_param("status", "error"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [execution_at("1", "wf-1", "error", "2100-07-05T10:00:00.000Z")]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-1"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(workflow_fixture("wf-1", "Alpha", true)),
+        )
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args([
+            "runs",
+            "stats",
+            "--instance",
+            "mock",
+            "--since",
+            "2000-01-01T00:00:00Z",
+            "--status",
+            "error",
+        ])
+        .output()
+        .expect("run runs stats --status error");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = parse_json(&output.stdout)["data"].clone();
+    assert_eq!(data["total"], 1);
+    assert_eq!(data["failed"], 1);
+}
+
+#[tokio::test]
+async fn runs_stats_with_no_executions_reports_no_gap() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .args(["runs", "stats", "--instance", "mock", "--last", "1h"])
+        .output()
+        .expect("run runs stats");
+
+    assert!(output.status.success());
+    let data = parse_json(&output.stdout)["data"].clone();
+    assert_eq!(data["total"], 0);
+    assert!(
+        data["max_gap_ms"].is_null(),
+        "no executions means no gap, not a gap of zero"
+    );
+    assert!(data["first"].is_null());
+}

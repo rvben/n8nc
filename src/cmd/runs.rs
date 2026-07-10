@@ -10,7 +10,7 @@ use crate::{
     api::{ApiClient, ExecutionListOptions},
     cli::{
         RunsArgs, RunsCommand, RunsGetArgs, RunsListArgs, RunsStatsArgs, RunsTimeArgs,
-        RunsWatchArgs,
+        RunsWatchArgs, StatsGroupBy,
     },
     config::resolve_instance_alias,
     error::AppError,
@@ -393,6 +393,22 @@ struct StatsOutput {
     /// Retained for the v1 contract. Always false: stats now walk every page in
     /// the window, so the aggregate can no longer be computed from a sample.
     capped: bool,
+    /// Cadence over the window. `None` when nothing ran: an absent execution and
+    /// a gap of zero are different facts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last: Option<String>,
+    /// Largest interval between consecutive executions, and its endpoints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_gap_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_gap_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_gap_to: Option<String>,
+    /// Present only with `--by workflow`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    groups: Option<Vec<StatsGroup>>,
     total: usize,
     succeeded: usize,
     failed: usize,
@@ -408,6 +424,110 @@ struct DurationStats {
     min: i64,
     max: i64,
     avg: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StatsGroup {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_name: Option<String>,
+    total: usize,
+    succeeded: usize,
+    failed: usize,
+    running: usize,
+    waiting: usize,
+    success_rate: f64,
+}
+
+/// First and last execution in the window, plus the largest interval between
+/// consecutive ones. A monitoring workflow on a fixed cadence turns this into an
+/// outage detector: a heartbeat every 5 minutes with a 100-minute gap means the
+/// instance was down.
+#[derive(Debug, Clone, Default)]
+struct Cadence {
+    first: Option<String>,
+    last: Option<String>,
+    max_gap_ms: Option<i64>,
+    max_gap_from: Option<String>,
+    max_gap_to: Option<String>,
+}
+
+fn compute_cadence(executions: &[Value]) -> Cadence {
+    let mut stamps: Vec<(DateTime<Utc>, String)> = executions
+        .iter()
+        .filter_map(|execution| {
+            let raw = value_string(execution, "startedAt")?;
+            let parsed = DateTime::parse_from_rfc3339(&raw).ok()?;
+            Some((parsed.with_timezone(&Utc), raw))
+        })
+        .collect();
+    if stamps.is_empty() {
+        return Cadence::default();
+    }
+    stamps.sort_by_key(|(when, _)| *when);
+
+    let mut cadence = Cadence {
+        first: Some(stamps[0].1.clone()),
+        last: Some(stamps[stamps.len() - 1].1.clone()),
+        ..Cadence::default()
+    };
+
+    for pair in stamps.windows(2) {
+        let gap = (pair[1].0 - pair[0].0).num_milliseconds();
+        if cadence.max_gap_ms.is_none_or(|current| gap > current) {
+            cadence.max_gap_ms = Some(gap);
+            cadence.max_gap_from = Some(pair[0].1.clone());
+            cadence.max_gap_to = Some(pair[1].1.clone());
+        }
+    }
+
+    cadence
+}
+
+/// Groups the window per workflow, failures first: that is the triage question.
+fn group_by_workflow(executions: &[Value], names: &BTreeMap<String, String>) -> Vec<StatsGroup> {
+    let mut buckets: BTreeMap<String, [usize; 4]> = BTreeMap::new();
+    for execution in executions {
+        let wf_id = value_string(execution, "workflowId").unwrap_or_default();
+        let counts = buckets.entry(wf_id).or_insert([0; 4]);
+        match value_string(execution, "status").as_deref() {
+            Some("success") => counts[0] += 1,
+            Some("error") => counts[1] += 1,
+            Some("running") => counts[2] += 1,
+            Some("waiting") => counts[3] += 1,
+            _ => {}
+        }
+    }
+
+    let mut groups: Vec<StatsGroup> = buckets
+        .into_iter()
+        .map(|(wf_id, [succeeded, failed, running, waiting])| {
+            let total = succeeded + failed + running + waiting;
+            StatsGroup {
+                workflow_name: names.get(&wf_id).cloned(),
+                workflow_id: (!wf_id.is_empty()).then_some(wf_id),
+                total,
+                succeeded,
+                failed,
+                running,
+                waiting,
+                success_rate: if total > 0 {
+                    succeeded as f64 / total as f64 * 100.0
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect();
+
+    groups.sort_by(|a, b| {
+        b.failed
+            .cmp(&a.failed)
+            .then(b.total.cmp(&a.total))
+            .then(a.workflow_id.cmp(&b.workflow_id))
+    });
+    groups
 }
 
 async fn cmd_runs_stats(context: &Context, args: RunsStatsArgs) -> Result<(), AppError> {
@@ -461,11 +581,20 @@ async fn cmd_runs_stats(context: &Context, args: RunsStatsArgs) -> Result<(), Ap
         .list_executions(&ExecutionListOptions {
             max_results: None,
             workflow_id: workflow_id.clone(),
-            status: None,
+            status: args.status.clone(),
             since,
         })
         .await?
         .items;
+
+    let cadence = compute_cadence(&executions);
+    let groups = match args.by {
+        Some(StatsGroupBy::Workflow) => {
+            let names = workflow_names_for_executions(&client, &executions).await?;
+            Some(group_by_workflow(&executions, &names))
+        }
+        None => None,
+    };
 
     // Aggregate stats
     let mut succeeded = 0usize;
@@ -508,6 +637,12 @@ async fn cmd_runs_stats(context: &Context, args: RunsStatsArgs) -> Result<(), Ap
         workflow_name: wf_name.clone(),
         period: period_label.clone(),
         capped: false,
+        first: cadence.first.clone(),
+        last: cadence.last.clone(),
+        max_gap_ms: cadence.max_gap_ms,
+        max_gap_from: cadence.max_gap_from.clone(),
+        max_gap_to: cadence.max_gap_to.clone(),
+        groups: groups.clone(),
         total,
         succeeded,
         failed,
@@ -527,6 +662,9 @@ async fn cmd_runs_stats(context: &Context, args: RunsStatsArgs) -> Result<(), Ap
             (None, None) => {}
         }
         println!("Period: {period_label}");
+        if let Some(status) = args.status.as_deref() {
+            println!("Status filter: {status}");
+        }
         println!();
         println!("Total:      {total}");
         if total > 0 {
@@ -558,6 +696,41 @@ async fn cmd_runs_stats(context: &Context, args: RunsStatsArgs) -> Result<(), Ap
             println!("  Min: {}", format_duration(Some(ds.min)));
             println!("  Max: {}", format_duration(Some(ds.max)));
             println!("  Avg: {}", format_duration(Some(ds.avg)));
+        }
+        if let (Some(first), Some(last)) = (cadence.first.as_deref(), cadence.last.as_deref()) {
+            println!();
+            println!("Cadence:");
+            println!("  First: {first}");
+            println!("  Last:  {last}");
+            if let Some(gap) = cadence.max_gap_ms {
+                println!(
+                    "  Largest gap: {} ({} -> {})",
+                    format_duration(Some(gap)),
+                    cadence.max_gap_from.as_deref().unwrap_or("?"),
+                    cadence.max_gap_to.as_deref().unwrap_or("?")
+                );
+            }
+        }
+        if let Some(groups) = groups.as_ref() {
+            println!();
+            println!(
+                "{:<34} {:>6} {:>8} {:>7}",
+                "WORKFLOW", "TOTAL", "FAILED", "OK%"
+            );
+            for group in groups {
+                let label = group
+                    .workflow_name
+                    .clone()
+                    .or_else(|| group.workflow_id.clone())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                println!(
+                    "{:<34} {:>6} {:>8} {:>6.1}%",
+                    truncate(&label, 34),
+                    group.total,
+                    group.failed,
+                    group.success_rate
+                );
+            }
         }
         Ok(())
     }

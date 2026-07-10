@@ -370,6 +370,20 @@ pub struct RunsStatsArgs {
     pub time: RunsTimeArgs,
     /// Workflow ID, name, or file path
     pub workflow: Option<String>,
+    /// Filter by execution status, for example `success`, `error`, or `waiting`
+    #[arg(long)]
+    pub status: Option<String>,
+    /// Break the window down per workflow, ranked by failures
+    #[arg(long, value_name = "FIELD", value_enum)]
+    pub by: Option<StatsGroupBy>,
+}
+
+/// What `runs stats --by` groups on. One variant today, kept as an enum so the
+/// schema advertises the accepted values rather than a free-form string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum StatsGroupBy {
+    /// One row per workflow
+    Workflow,
 }
 
 #[derive(Debug, Args)]

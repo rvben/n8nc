@@ -142,6 +142,12 @@ fn output_fields_for(path: &str) -> Vec<Value> {
             json!({"name": "waiting", "type": "integer"}),
             json!({"name": "success_rate", "type": "number"}),
             json!({"name": "duration_ms", "type": "object | null"}),
+            json!({"name": "first", "type": "string | null"}),
+            json!({"name": "last", "type": "string | null"}),
+            json!({"name": "max_gap_ms", "type": "integer | null"}),
+            json!({"name": "max_gap_from", "type": "string | null"}),
+            json!({"name": "max_gap_to", "type": "string | null"}),
+            json!({"name": "groups", "type": "array (--by workflow only)"}),
         ],
         "auth list" => vec![
             json!({"name": "alias", "type": "string"}),
@@ -704,6 +710,12 @@ mod tests {
             "waiting",
             "success_rate",
             "duration_ms",
+            "first",
+            "last",
+            "max_gap_ms",
+            "max_gap_from",
+            "max_gap_to",
+            "groups",
         ];
         let declared: Vec<String> = output_fields_for("runs stats")
             .iter()
