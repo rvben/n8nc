@@ -313,16 +313,29 @@ async fn execute_via_rest_session(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             let status = value_string(&execution, "status");
-            let settled =
-                finished || matches!(status.as_deref(), Some("success" | "error" | "crashed"));
+            // n8n's ExecutionStatus is success | error | crashed | canceled |
+            // new | running | waiting | unknown.
+            let settled = finished
+                || matches!(
+                    status.as_deref(),
+                    Some("success" | "error" | "crashed" | "canceled")
+                );
             if settled {
-                if matches!(status.as_deref(), Some("error" | "crashed")) {
+                // `status` is authoritative wherever n8n reports it: only
+                // `success` counts, so a status n8n adds later cannot slip
+                // through as one. Instances old enough to omit `status`
+                // signal completion through `finished` alone.
+                let succeeded = match status.as_deref() {
+                    Some(status) => status == "success",
+                    None => finished,
+                };
+                if !succeeded {
                     return Err(AppError::api(
                         "workflow",
                         "api.execution_failed",
                         format!(
-                            "Execution {execution_id} finished with status `{}`.",
-                            status.as_deref().unwrap_or("error")
+                            "Execution {execution_id} did not complete successfully (status `{}`).",
+                            status.as_deref().unwrap_or("unknown")
                         ),
                     )
                     .with_suggestion(format!(

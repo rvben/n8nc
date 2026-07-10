@@ -7442,3 +7442,82 @@ async fn get_node_shows_the_node_as_the_server_has_it() {
     assert_eq!(node["parameters"]["body"]["createdAt"], "keep-me");
     assert_eq!(node["parameters"]["body"]["updatedAt"], "keep-me-too");
 }
+
+/// n8n's ExecutionStatus includes `canceled`. A run that did not complete
+/// successfully must not exit 0 just because it settled.
+#[tokio::test]
+async fn workflow_execute_treats_a_canceled_run_as_a_failure() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_manual_trigger_workflow(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/rest/workflows/wf-1/run"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"executionId": "7"}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions/7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "7", "status": "canceled", "finished": true
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .env("N8NC_SESSION_COOKIE_MOCK", "n8n-auth=session-cookie")
+        .env("N8NC_BROWSER_ID_MOCK", "browser-123")
+        .args(["workflow", "execute", "--instance", "mock", "wf-1"])
+        .output()
+        .expect("run workflow execute");
+
+    assert!(!output.status.success(), "a canceled run must not exit 0");
+    let envelope = parse_json(&output.stderr);
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("canceled"),
+        "{}",
+        envelope["error"]["message"]
+    );
+}
+
+/// n8n instances predating the `status` field report completion through
+/// `finished` alone. Those runs succeeded and must still exit 0.
+#[tokio::test]
+async fn workflow_execute_treats_a_finished_run_without_status_as_a_success() {
+    let server = MockServer::start().await;
+    let repo = tempdir().expect("tempdir");
+    write_repo(repo.path(), &server.uri());
+    mount_manual_trigger_workflow(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/rest/workflows/wf-1/run"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"executionId": "8"}})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions/8"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "8", "finished": true
+        })))
+        .mount(&server)
+        .await;
+
+    let output = base_command(repo.path())
+        .env("N8NC_SESSION_COOKIE_MOCK", "n8n-auth=session-cookie")
+        .env("N8NC_BROWSER_ID_MOCK", "browser-123")
+        .args(["workflow", "execute", "--instance", "mock", "wf-1"])
+        .output()
+        .expect("run workflow execute");
+
+    assert!(
+        output.status.success(),
+        "a finished run without `status` must exit 0: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
