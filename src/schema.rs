@@ -436,6 +436,14 @@ fn walk_commands(cmd: &clap::Command, prefix: &str, out: &mut Vec<Value>) {
             }
 
             entry.insert("mutating".into(), json!(is_mutating(&path)));
+            entry.insert(
+                "effects".into(),
+                json!(if is_mutating(&path) {
+                    "non_idempotent"
+                } else {
+                    "read_only"
+                }),
+            );
 
             let mut args = Vec::new();
             for arg in sub.get_arguments() {
@@ -466,11 +474,12 @@ pub fn generate(cmd: &clap::Command) -> Value {
     let mut commands: Vec<Value> = Vec::new();
     walk_commands(cmd, "", &mut commands);
 
-    json!({
-        "clispec": "0.2",
+    let mut document = json!({
+        "clispec": "0.3",
         "name": "n8nc",
         "version": env!("CARGO_PKG_VERSION"),
         "description": "Human- and agent-friendly CLI for n8n workflows",
+        "output": {"tty": "text", "piped": "json"},
         "global_args": [
             {
                 "name": "--output",
@@ -553,13 +562,96 @@ pub fn generate(cmd: &clap::Command) -> Value {
         ],
         "outcomes": [
             {
-                "kind": "doctor_failed",
-                "exit_code": 13,
-                "retryable": false,
+                "name": "doctor_failed",
+                "code": 13,
                 "description": "Doctor checks ran but one or more checks failed; see the report for details"
             }
         ]
-    })
+    });
+    enrich_v03(&mut document);
+    document
+}
+
+fn enrich_v03(document: &mut Value) {
+    let Some(commands) = document.get_mut("commands").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for command in commands {
+        let Some(object) = command.as_object_mut() else {
+            continue;
+        };
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        if name == "completions" {
+            object.remove("output_fields");
+            object.insert("output_kind".into(), json!("opaque"));
+            object.insert("media_type".into(), json!("text/plain"));
+            continue;
+        }
+
+        let unbounded = matches!(name.as_str(), "ls" | "runs ls" | "auth list");
+        object.insert(
+            "cardinality".into(),
+            json!(if unbounded { "unbounded" } else { "bounded" }),
+        );
+        if unbounded {
+            object.insert(
+                "pagination".into(),
+                json!({"style":"offset","limit_arg":"--limit","offset_arg":"--offset"}),
+            );
+            object.insert("fields_arg".into(), json!("--fields"));
+        }
+        if name == "auth list" {
+            object.insert("example".into(), json!({"args":["auth","list"]}));
+        }
+        if name == "schema" {
+            object.insert("cardinality".into(), json!("single"));
+            object.insert(
+                "stdout_schema".into(),
+                json!({"$ref":"https://clispec.dev/schema/v0.3.json"}),
+            );
+        }
+        if !object.contains_key("output_fields") && !object.contains_key("stdout_schema") {
+            object.insert("stdout_schema".into(), json!({}));
+        }
+        if let Some(fields) = object
+            .get_mut("output_fields")
+            .and_then(Value::as_array_mut)
+        {
+            for field in fields {
+                normalize_output_field(field);
+            }
+        }
+    }
+}
+
+fn normalize_output_field(field: &mut Value) {
+    let Some(object) = field.as_object_mut() else {
+        return;
+    };
+    let original = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("object")
+        .to_string();
+    let normalized = if original.starts_with("array") || original == "changed" {
+        "array"
+    } else if original.starts_with("object") {
+        "object"
+    } else {
+        original.split('|').next().unwrap_or("object").trim()
+    };
+    object.insert("type".into(), json!(normalized));
+    if original.contains("null") {
+        object.insert("nullable".into(), json!(true));
+    }
+    if normalized == "array" && !object.contains_key("items") {
+        object.insert("items".into(), json!({"type":"object"}));
+    }
 }
 
 pub fn print_schema() {
@@ -582,9 +674,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_has_required_v02_top_level_keys() {
+    fn schema_has_required_v03_top_level_keys() {
         let schema = generate(&test_cmd());
-        assert_eq!(schema.get("clispec").and_then(Value::as_str), Some("0.2"));
+        assert_eq!(schema.get("clispec").and_then(Value::as_str), Some("0.3"));
         assert!(schema.get("name").is_some());
         assert!(schema.get("version").is_some());
         assert!(schema.get("global_args").is_some());
@@ -597,7 +689,7 @@ mod tests {
         let schema = generate(&test_cmd());
         assert!(
             schema["commands"].is_array(),
-            "commands must be an array for clispec v0.2"
+            "commands must be an array for clispec v0.3"
         );
     }
 
@@ -606,7 +698,7 @@ mod tests {
         let schema = generate(&test_cmd());
         assert!(
             schema["global_args"].is_array(),
-            "global_args must be an array for clispec v0.2"
+            "global_args must be an array for clispec v0.3"
         );
     }
 
@@ -763,25 +855,25 @@ mod tests {
     }
 
     #[test]
-    fn schema_error_envelope_is_clispec_v02_format() {
+    fn schema_error_envelope_is_clispec_v03_format() {
         let err = crate::error::AppError::not_found("test", "workflow XYZ not found");
         assert_eq!(err.kind, "not_found");
         assert_eq!(err.exit_code, 11);
     }
 
     #[test]
-    fn schema_validates_against_clispec_v02_json_schema() {
+    fn schema_validates_against_clispec_v03_json_schema() {
         let schema_doc: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/fixtures/clispec-v0.2.schema.json"))
-                .expect("parse v0.2 JSON schema fixture");
+            serde_json::from_str(include_str!("../tests/fixtures/clispec-v0.3.schema.json"))
+                .expect("parse v0.3 JSON schema fixture");
 
         let output = generate(&test_cmd());
         let validator =
-            jsonschema::validator_for(&schema_doc).expect("compile clispec v0.2 JSON schema");
+            jsonschema::validator_for(&schema_doc).expect("compile clispec v0.3 JSON schema");
         let errors: Vec<_> = validator.iter_errors(&output).collect();
         assert!(
             errors.is_empty(),
-            "schema output failed validation against clispec v0.2: {:?}",
+            "schema output failed validation against clispec v0.3: {:?}",
             errors
         );
     }

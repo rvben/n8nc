@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use serde::Serialize;
 use serde_json::Value;
 
-/// Structured error as defined by the clispec v0.2 envelope.
+/// Structured error as defined by the clispec v0.3 envelope.
 ///
 /// The envelope is always emitted as the last line of stderr so consumers can
 /// extract it mechanically without parsing surrounding progress output.

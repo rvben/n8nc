@@ -5026,7 +5026,7 @@ fn schema_command_outputs_valid_json() {
     assert!(output.status.success());
     let schema: Value = serde_json::from_slice(&output.stdout).expect("valid JSON from schema");
     assert_eq!(schema["name"], "n8nc");
-    assert_eq!(schema["clispec"], "0.2");
+    assert_eq!(schema["clispec"], "0.3");
     let commands = schema["commands"].as_array().expect("commands is an array");
     assert!(
         commands.len() > 20,
@@ -5415,8 +5415,8 @@ impl Respond for PaginatedList {
                         "workflowId": "wf-1",
                         "status": if index % 5 == 0 { "error" } else { "success" },
                         "mode": "trigger",
-                        "startedAt": "2026-07-09T12:00:00.000Z",
-                        "stoppedAt": "2026-07-09T12:00:01.000Z"
+                        "startedAt": "2100-07-09T12:00:00.000Z",
+                        "stoppedAt": "2100-07-09T12:00:01.000Z"
                     })
                 } else {
                     json!({
