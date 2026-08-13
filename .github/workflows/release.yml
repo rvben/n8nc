@@ -336,4 +336,13 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/n8nc.rb
           git diff --cached --quiet || git commit -m "Update n8nc to ${VERSION}"
-          git push
+          for attempt in 1 2 3; do
+            if git push; then
+              break
+            fi
+            if [[ "$attempt" -eq 3 ]]; then
+              exit 1
+            fi
+            git fetch origin main
+            git rebase origin/main
+          done
