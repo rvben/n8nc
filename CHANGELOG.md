@@ -4,18 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.5.4](https://github.com/rvben/n8nc/compare/v0.5.3...v0.5.4) - 2026-09-27
 
+### Fixed
 
-
-
-
-
-
-
-
-
-
-
+- **deps**: update rustls to 0.23.45 for RUSTSEC-2026-0285 ([c5f205d](https://github.com/rvben/n8nc/commit/c5f205d7d0aece9cf2a6307347a17162afeb4abc))
+- **release**: use package version in dry runs ([97851b9](https://github.com/rvben/n8nc/commit/97851b9044b222d6f2bf06878cfaafa3ab9e8557))
+- **ci**: install pinned Rust components ([bdfb142](https://github.com/rvben/n8nc/commit/bdfb14225c68b7cb6e890890a4047d3d4bc7e8fd))
+- **release**: retry Homebrew tap updates ([e06da52](https://github.com/rvben/n8nc/commit/e06da52a452651c69da7c4554bc213e3c66a1f39))
 
 ## [0.5.2](https://github.com/rvben/n8nc/compare/v0.5.1...v0.5.2) - 2026-07-10
 

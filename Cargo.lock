@@ -1079,7 +1079,7 @@ dependencies = [
 
 [[package]]
 name = "n8nc"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "assert_cmd",
  "base64",
