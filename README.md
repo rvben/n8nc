@@ -23,6 +23,12 @@ n8nc status
 
 ## Installation
 
+### Homebrew
+
+```sh
+brew install rvben/tap/n8nc
+```
+
 ### From crates.io
 
 ```bash
